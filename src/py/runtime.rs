@@ -11,6 +11,7 @@ use bytes;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Runtime;
+use crate::mailbox::OverflowPolicy;
 
 use super::pool::{make_release_gil_channel, PoolTask, GIL_WORKER_POOL};
 use super::utils::{message_to_py, run_python_matcher};
@@ -149,6 +150,29 @@ impl PyRuntime {
     /// Configure release_gil runtime limits programmatically.
     fn set_release_gil_limits(&self, max_threads: usize, pool_size: usize) -> PyResult<()> {
         self.inner.set_release_gil_limits(max_threads, pool_size);
+        Ok(())
+    }
+
+    /// Set the overflow policy for a bounded mailbox.
+    ///
+    /// ``policy`` should be one of: "dropnew", "dropold", "block", "redirect", "spill".
+    /// ``target`` is only used for redirect/spill: the PID to forward to.
+    fn set_overflow_policy(&self, pid: u64, policy: String, target: Option<u64>) -> PyResult<()> {
+        let pol = match policy.to_lowercase().as_str() {
+            "dropnew" => OverflowPolicy::DropNew,
+            "dropold" => OverflowPolicy::DropOld,
+            "block" => OverflowPolicy::Block,
+            "redirect" => {
+                let t = target.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("redirect requires target"))?;
+                OverflowPolicy::Redirect(t)
+            }
+            "spill" => {
+                let t = target.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("spill requires target"))?;
+                OverflowPolicy::Spill(t)
+            }
+            _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid policy")),
+        };
+        self.inner.set_overflow_policy(pid, pol);
         Ok(())
     }
 
@@ -345,6 +369,9 @@ impl PyRuntime {
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {
                             // nothing special
+                        }
+                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {
+                            // drop-request, ignore
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
                         | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {}

@@ -44,10 +44,24 @@ pub enum SystemMessage {
     /// Hot Swap signal containing the raw pointer (usize)
     /// to the new handler function / closure.
     HotSwap(usize),
+    /// Instruction for a bounded mailbox to drop its oldest user message.
+    DropOld,
     /// Heartbeat signal to verify actor/node responsiveness.
     Ping,
     /// Response to a heartbeat signal.
     Pong,
+}
+
+/// Strategy for handling overflow in a bounded mailbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OverflowPolicy {
+    DropNew,
+    DropOld,
+    Block,
+    /// Redirect overflowing messages to a fallback PID (payload is sent there instead).
+    Redirect(u64),
+    /// Send a copy to the fallback PID and still queue the message.
+    Spill(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,51 +188,87 @@ impl MailboxSender {
 }
 
 impl MailboxReceiver {
-    /// Await a message from the mailbox, prioritizing any already-enqueued
-    /// system messages.
-    pub async fn recv(&mut self) -> Option<Message> {
-        // Prefer any system messages already in the stash.
+    fn drop_oldest_user_queued(&mut self) -> bool {
         if let Some(pos) = self
             .stash
             .iter()
-            .position(|m| matches!(m, Message::System(_)))
+            .position(|m| matches!(m, Message::User(_)))
         {
-            return self.stash.remove(pos);
+            let _ = self.stash.remove(pos);
+            self.counter.fetch_sub(1, Ordering::Relaxed);
+            return true;
         }
 
-        if let Ok(sys) = self.rx_sys.try_recv() {
-            return Some(Message::System(sys));
+        let dropped = match &mut self.rx_user {
+            UserReceiver::Unbounded(rx) => rx.try_recv().ok().is_some(),
+            UserReceiver::Bounded(rx) => rx.try_recv().ok().is_some(),
+        };
+        if dropped {
+            self.counter.fetch_sub(1, Ordering::Relaxed);
         }
+        dropped
+    }
 
-        // If there are deferred user messages, deliver them before awaiting new ones.
-        if let Some(front) = self.stash.pop_front() {
-            if matches!(front, Message::User(_)) {
-                self.counter.fetch_sub(1, Ordering::Relaxed);
-            }
-            return Some(front);
-        }
-
-        tokio::select! {
-            biased;
-            sys = self.rx_sys.recv() => {
-                match sys {
-                    Some(s) => Some(Message::System(s)),
-                    None => None,
+    /// Await a message from the mailbox, prioritizing any already-enqueued
+    /// system messages.
+    pub async fn recv(&mut self) -> Option<Message> {
+        loop {
+            // Prefer any system messages already in the stash.
+            if let Some(pos) = self
+                .stash
+                .iter()
+                .position(|m| matches!(m, Message::System(_)))
+            {
+                if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
+                    let _ = self.stash.remove(pos);
+                    let _ = self.drop_oldest_user_queued();
+                    continue;
                 }
+                return self.stash.remove(pos);
             }
-            user = {
-                async {
-                    match &mut self.rx_user {
-                        UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
-                        UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+
+            if let Ok(sys) = self.rx_sys.try_recv() {
+                if matches!(sys, SystemMessage::DropOld) {
+                    let _ = self.drop_oldest_user_queued();
+                    continue;
+                }
+                return Some(Message::System(sys));
+            }
+
+            // If there are deferred user messages, deliver them before awaiting new ones.
+            if let Some(front) = self.stash.pop_front() {
+                if matches!(front, Message::User(_)) {
+                    self.counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return Some(front);
+            }
+
+            tokio::select! {
+                biased;
+                sys = self.rx_sys.recv() => {
+                    match sys {
+                        Some(SystemMessage::DropOld) => {
+                            let _ = self.drop_oldest_user_queued();
+                            continue;
+                        }
+                        Some(s) => return Some(Message::System(s)),
+                        None => return None,
                     }
                 }
-            } => {
-                if let Some(m) = user {
-                    self.counter.fetch_sub(1, Ordering::Relaxed);
-                    Some(m)
-                } else {
-                    None
+                user = {
+                    async {
+                        match &mut self.rx_user {
+                            UserReceiver::Unbounded(rx) => rx.recv().await.map(Message::User),
+                            UserReceiver::Bounded(rx) => rx.recv().await.map(Message::User),
+                        }
+                    }
+                } => {
+                    if let Some(m) = user {
+                        self.counter.fetch_sub(1, Ordering::Relaxed);
+                        return Some(m);
+                    } else {
+                        return None;
+                    }
                 }
             }
         }
@@ -226,35 +276,46 @@ impl MailboxReceiver {
 
     /// Try to receive without awaiting; system messages are preferred.
     pub fn try_recv(&mut self) -> Option<Message> {
-        // Prefer any system messages already in the stash.
-        if let Some(pos) = self
-            .stash
-            .iter()
-            .position(|m| matches!(m, Message::System(_)))
-        {
-            return self.stash.remove(pos);
-        }
-
-        if let Ok(sys) = self.rx_sys.try_recv() {
-            return Some(Message::System(sys));
-        }
-
-        // Deliver deferred user messages first, then try underlying channel.
-        if let Some(front) = self.stash.pop_front() {
-            if matches!(front, Message::User(_)) {
-                self.counter.fetch_sub(1, Ordering::Relaxed);
+        loop {
+            // Prefer any system messages already in the stash.
+            if let Some(pos) = self
+                .stash
+                .iter()
+                .position(|m| matches!(m, Message::System(_)))
+            {
+                if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
+                    let _ = self.stash.remove(pos);
+                    let _ = self.drop_oldest_user_queued();
+                    continue;
+                }
+                return self.stash.remove(pos);
             }
-            return Some(front);
-        }
 
-        let opt = match &mut self.rx_user {
-            UserReceiver::Unbounded(rx) => rx.try_recv().ok(),
-            UserReceiver::Bounded(rx) => rx.try_recv().ok(),
-        };
-        opt.map(|b| {
-            self.counter.fetch_sub(1, Ordering::SeqCst);
-            Message::User(b)
-        })
+            if let Ok(sys) = self.rx_sys.try_recv() {
+                if matches!(sys, SystemMessage::DropOld) {
+                    let _ = self.drop_oldest_user_queued();
+                    continue;
+                }
+                return Some(Message::System(sys));
+            }
+
+            // Deliver deferred user messages first, then try underlying channel.
+            if let Some(front) = self.stash.pop_front() {
+                if matches!(front, Message::User(_)) {
+                    self.counter.fetch_sub(1, Ordering::Relaxed);
+                }
+                return Some(front);
+            }
+
+            let opt = match &mut self.rx_user {
+                UserReceiver::Unbounded(rx) => rx.try_recv().ok(),
+                UserReceiver::Bounded(rx) => rx.try_recv().ok(),
+            };
+            return opt.map(|b| {
+                self.counter.fetch_sub(1, Ordering::SeqCst);
+                Message::User(b)
+            });
+        }
     }
 
     /// Selective receive: await until a message matching `matcher` arrives.
@@ -264,6 +325,15 @@ impl MailboxReceiver {
     where
         F: FnMut(&Message) -> bool,
     {
+        while let Some(idx) = self
+            .stash
+            .iter()
+            .position(|m| matches!(m, Message::System(SystemMessage::DropOld)))
+        {
+            let _ = self.stash.remove(idx);
+            let _ = self.drop_oldest_user_queued();
+        }
+
         // First, search stash for a matching message (preserve ordering).
         if let Some(idx) = self.stash.iter().position(|m| matcher(m)) {
             let m = self.stash.remove(idx);
@@ -276,6 +346,10 @@ impl MailboxReceiver {
         loop {
             // Prefer any immediately available system messages.
             if let Ok(sys) = self.rx_sys.try_recv() {
+                if matches!(sys, SystemMessage::DropOld) {
+                    let _ = self.drop_oldest_user_queued();
+                    continue;
+                }
                 let m = Message::System(sys);
                 if matcher(&m) {
                     return Some(m);
@@ -289,6 +363,10 @@ impl MailboxReceiver {
                 biased;
                 sys = self.rx_sys.recv() => {
                     match sys {
+                        Some(SystemMessage::DropOld) => {
+                            let _ = self.drop_oldest_user_queued();
+                            continue;
+                        }
                         Some(s) => {
                             let m = Message::System(s);
                             if matcher(&m) {
@@ -402,6 +480,21 @@ mod tests {
 
         match second {
             Message::User(b) => assert_eq!(b.as_ref(), b"m3"),
+            _ => panic!("expected user message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drop_old_system_message_discards_oldest_user_message() {
+        let (tx, mut rx) = bounded_channel(2);
+
+        tx.send(Message::User(Bytes::from_static(b"m1"))).unwrap();
+        tx.send(Message::User(Bytes::from_static(b"m2"))).unwrap();
+        tx.send_system(SystemMessage::DropOld).unwrap();
+
+        let got = rx.recv().await.expect("message after drop-old");
+        match got {
+            Message::User(b) => assert_eq!(b.as_ref(), b"m2"),
             _ => panic!("expected user message"),
         }
     }

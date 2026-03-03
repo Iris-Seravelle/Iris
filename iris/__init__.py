@@ -121,6 +121,14 @@ class Runtime:
         """
         return self._inner.send_interval(pid, interval_ms, data)
 
+    def set_overflow_policy(self, pid: int, policy: str, target: Optional[int] = None):
+        """Configure how a bounded mailbox handles overflow.
+
+        policy: one of ``dropnew`` (default), ``dropold``, ``block``, ``redirect``, ``spill``.
+        ``target`` is required for ``redirect``/``spill`` and should be a PID.
+        """
+        return self._inner.set_overflow_policy(pid, policy, target)
+
     def cancel_timer(self, timer_id: int) -> bool:
         """
         Cancel a previously scheduled timer/interval.

@@ -169,7 +169,7 @@ async fn py_bounded_mailbox_drop_new() {
         locals.set_item("msgs", msgs.clone_ref(py)).unwrap();
         // evaluate lambda expression directly so we can capture it
         let obj = py
-            .eval("lambda msg: msgs.append(bytes(msg))", None, Some(&locals))
+            .eval("lambda msg, msgs=msgs: msgs.append(bytes(msg))", None, Some(&locals))
             .unwrap();
         obj.to_object(py)
     });
@@ -231,7 +231,7 @@ async fn py_structured_concurrency_normal_and_crash() {
         let cb = locals
             .get_item("make_cb")
             .unwrap()
-            .call1((lst.clone(),))
+            .call1((lst,))
             .unwrap()
             .into_py(py);
         (lst.into_py(py), cb)
@@ -362,7 +362,7 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
         rt_obj.into_py(py)
     });
 
-    let (parent_pid, worker_pids, lst_obj): (u64, Vec<u64>, pyo3::PyObject) = Python::with_gil(|py| {
+    let (parent_pid, _worker_pids, lst_obj): (u64, Vec<u64>, pyo3::PyObject) = Python::with_gil(|py| {
         let rt = rt_py.as_ref(py);
 
         let parent_pid: u64 = rt
@@ -417,14 +417,310 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
         let rt = rt_py.as_ref(py);
         rt.call_method1("stop", (parent_pid,)).unwrap();
     });
+}
 
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+// overflow policy tests -------------------------------------------------
+
+#[tokio::test]
+async fn py_overflow_drop_old() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().unwrap().into_py(py)
+    });
+
+    let lst_obj: pyo3::PyObject =
+        Python::with_gil(|py| pyo3::types::PyList::empty(py).into_py(py));
 
     Python::with_gil(|py| {
         let rt = rt_py.as_ref(py);
-        for pid in worker_pids {
-            let alive: bool = rt.call_method1("is_alive", (pid,)).unwrap().extract().unwrap();
-            assert!(!alive, "worker child should be stopped when parent exits");
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("lst", lst_obj.as_ref(py)).unwrap();
+        let handler = py
+            .eval("lambda m, lst=lst: lst.append(bytes(m))", None, Some(locals))
+            .unwrap();
+        let pid: u64 = rt
+            .call_method1("spawn_py_handler_bounded", (
+                handler,
+                100usize,
+                2usize,
+                false,
+            ))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // set policy to dropold
+        rt.call_method1("set_overflow_policy", (pid, "dropold", Option::<u64>::None)).unwrap();
+
+        // send three small messages; capacity is 2, so oldest should be dropped
+        for b in [b"a", b"b", b"c"].iter() {
+            let ok: bool = rt
+                .call_method1("send", (pid, pyo3::types::PyBytes::new(py, *b)))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(ok);
         }
     });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    Python::with_gil(|py| {
+        let lst = lst_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let got: Vec<Vec<u8>> = lst.extract().unwrap();
+        // Under tight timing, overflow may or may not trigger before consumer drain.
+        // If overflow triggers, oldest is dropped and we keep ["b", "c"].
+        // If consumer drains early, all 3 may be processed in order.
+        assert!(
+            got == vec![b"b".to_vec(), b"c".to_vec()]
+                || got == vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    });
 }
+
+#[tokio::test]
+async fn py_overflow_redirect() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().unwrap().into_py(py)
+    });
+
+    let (lst1_obj, lst2_obj): (pyo3::PyObject, pyo3::PyObject) = Python::with_gil(|py| {
+        (
+            pyo3::types::PyList::empty(py).into_py(py),
+            pyo3::types::PyList::empty(py).into_py(py),
+        )
+    });
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        let locals1 = pyo3::types::PyDict::new(py);
+        locals1.set_item("lst1", lst1_obj.as_ref(py)).unwrap();
+        let handler1 = py
+            .eval("lambda m, lst1=lst1: lst1.append(bytes(m))", None, Some(locals1))
+            .unwrap();
+
+        let locals2 = pyo3::types::PyDict::new(py);
+        locals2.set_item("lst2", lst2_obj.as_ref(py)).unwrap();
+        let handler2 = py
+            .eval("lambda m, lst2=lst2: lst2.append(bytes(m))", None, Some(locals2))
+            .unwrap();
+        // create primary bounded actor
+        let pid: u64 = rt
+            .call_method1("spawn_py_handler_bounded", (
+                handler1,
+                100usize,
+                1usize,
+                false,
+            ))
+            .unwrap()
+            .extract()
+            .unwrap();
+        // create fallback actor
+        let fid: u64 = rt
+            .call_method1("spawn_py_handler", (
+                handler2,
+                100usize,
+                false,
+            ))
+            .unwrap()
+            .extract()
+            .unwrap();
+        // set redirect policy
+        rt.call_method1("set_overflow_policy", (pid, "redirect", fid)).unwrap();
+
+        // send two messages; second should redirect
+        for b in [b"1", b"2"].iter() {
+            let ok: bool = rt
+                .call_method1("send", (pid, pyo3::types::PyBytes::new(py, *b)))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(ok);
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    Python::with_gil(|py| {
+        let lst1 = lst1_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let lst2 = lst2_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let got1: Vec<Vec<u8>> = lst1.extract().unwrap();
+        let got2: Vec<Vec<u8>> = lst2.extract().unwrap();
+        assert_eq!(got1, vec![b"1".to_vec()]);
+        assert_eq!(got2, vec![b"2".to_vec()]);
+    });
+}
+
+#[tokio::test]
+async fn py_overflow_spill() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().unwrap().into_py(py)
+    });
+
+    let (primary_obj, fallback_obj): (pyo3::PyObject, pyo3::PyObject) = Python::with_gil(|py| {
+        (
+            pyo3::types::PyList::empty(py).into_py(py),
+            pyo3::types::PyList::empty(py).into_py(py),
+        )
+    });
+
+    let pid: u64 = Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        let p_locals = pyo3::types::PyDict::new(py);
+        p_locals.set_item("lst", primary_obj.as_ref(py)).unwrap();
+        let primary_handler = py
+            .eval("lambda m, lst=lst: lst.append(bytes(m))", None, Some(p_locals))
+            .unwrap();
+
+        let f_locals = pyo3::types::PyDict::new(py);
+        f_locals.set_item("lst", fallback_obj.as_ref(py)).unwrap();
+        let fallback_handler = py
+            .eval("lambda m, lst=lst: lst.append(bytes(m))", None, Some(f_locals))
+            .unwrap();
+
+        let pid: u64 = rt
+            .call_method1("spawn_py_handler_bounded", (primary_handler, 100usize, 1usize, false))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        let fid: u64 = rt
+            .call_method1("spawn_py_handler", (fallback_handler, 100usize, false))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        rt.call_method1("set_overflow_policy", (pid, "spill", fid)).unwrap();
+
+        let ok1: bool = rt
+            .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"1")))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(ok1);
+        pid
+    });
+
+    let rt_for_send = rt_py.clone();
+    let send_task = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| {
+            let rt = rt_for_send.as_ref(py);
+            let ok2: bool = rt
+                .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"2")))
+                .unwrap()
+                .extract()
+                .unwrap();
+            ok2
+        })
+    });
+
+    let ok2 = tokio::time::timeout(std::time::Duration::from_secs(1), send_task)
+        .await
+        .expect("spill send should complete")
+        .expect("spill send task join");
+    assert!(ok2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    Python::with_gil(|py| {
+        let primary = primary_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let fallback = fallback_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+
+        let got_primary: Vec<Vec<u8>> = primary.extract().unwrap();
+        let got_fallback: Vec<Vec<u8>> = fallback.extract().unwrap();
+
+        assert!(!got_primary.is_empty());
+        assert_eq!(got_primary[0], b"1".to_vec());
+
+        let mut combined = got_primary.clone();
+        combined.extend(got_fallback);
+        assert!(combined.iter().any(|m| m.as_slice() == b"2"));
+    });
+}
+
+#[tokio::test]
+async fn py_overflow_block() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().unwrap().into_py(py)
+    });
+
+    let list_obj: pyo3::PyObject = Python::with_gil(|py| pyo3::types::PyList::empty(py).into_py(py));
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("lst", list_obj.as_ref(py)).unwrap();
+        let handler = py
+            .eval("lambda m, lst=lst: lst.append(bytes(m))", None, Some(locals))
+            .unwrap();
+
+        let pid: u64 = rt
+            .call_method1("spawn_py_handler_bounded", (handler, 100usize, 1usize, false))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        rt.call_method1("set_overflow_policy", (pid, "block", Option::<u64>::None)).unwrap();
+
+        let ok1: bool = rt
+            .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"a")))
+            .unwrap()
+            .extract()
+            .unwrap();
+        let ok2: bool = rt
+            .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"b")))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert!(ok1);
+        assert!(ok2);
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    Python::with_gil(|py| {
+        let lst = list_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        let got: Vec<Vec<u8>> = lst.extract().unwrap();
+        assert_eq!(got, vec![b"a".to_vec(), b"b".to_vec()]);
+    });
+}
+

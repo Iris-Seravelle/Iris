@@ -57,6 +57,10 @@ pub struct Runtime {
     parent_of: Arc<DashMap<Pid, Pid>>,
     /// Tracks direct children of each parent PID.
     children_by_parent: Arc<DashMap<Pid, Vec<Pid>>>,
+    /// Capacity for bounded mailboxes.
+    bounded_capacity: Arc<DashMap<Pid, usize>>,
+    /// Overflow policies for bounded mailboxes; default is DropNew if absent.
+    overflow_policy: Arc<DashMap<Pid, mailbox::OverflowPolicy>>,
     // Runtime-configurable limits for Python GIL-release behavior
     release_gil_max_threads: Arc<Mutex<usize>>,
     gil_pool_size: Arc<Mutex<usize>>,
@@ -84,6 +88,8 @@ impl Runtime {
             path_supervisors: Arc::new(DashMap::new()),
             parent_of: Arc::new(DashMap::new()),
             children_by_parent: Arc::new(DashMap::new()),
+            bounded_capacity: Arc::new(DashMap::new()),
+            overflow_policy: Arc::new(DashMap::new()),
             release_gil_max_threads: Arc::new(Mutex::new(0)),
             gil_pool_size: Arc::new(Mutex::new(8)),
             release_gil_strict: Arc::new(Mutex::new(false)),
@@ -481,6 +487,9 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        // track capacity and default policy
+        self.bounded_capacity.insert(pid, capacity);
+        self.overflow_policy.insert(pid, mailbox::OverflowPolicy::DropNew);
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -540,6 +549,9 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        // track capacity and default overflow policy
+        self.bounded_capacity.insert(pid, capacity);
+        self.overflow_policy.insert(pid, mailbox::OverflowPolicy::DropNew);
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -838,6 +850,48 @@ impl Runtime {
     }
 
     pub fn send(&self, pid: Pid, msg: mailbox::Message) -> Result<(), mailbox::Message> {
+        // apply overflow policy if bounded
+        if let Some(cap) = self.bounded_capacity.get(&pid) {
+            let size = self.mailbox_size(pid).unwrap_or(0);
+            if size >= *cap {
+                if let Some(pol) = self.overflow_policy.get(&pid) {
+                    match pol.value() {
+                        mailbox::OverflowPolicy::DropNew => return Err(msg),
+                        mailbox::OverflowPolicy::DropOld => {
+                            // tell receiver to drop oldest user message
+                            if let Some(sender) = self.mailboxes.get(&pid) {
+                                let _ = sender.send_system(mailbox::SystemMessage::DropOld);
+                            }
+                            for _ in 0..64 {
+                                if self.mailbox_size(pid).unwrap_or(0) < *cap {
+                                    break;
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                        mailbox::OverflowPolicy::Block => {
+                            // busy-wait until space appears
+                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
+                                std::thread::yield_now();
+                            }
+                        }
+                        mailbox::OverflowPolicy::Redirect(target) => {
+                            // forward to target and consider message handled
+                            return self.send(*target, msg);
+                        }
+                        mailbox::OverflowPolicy::Spill(target) => {
+                            // send copy to fallback, then proceed with original below
+                            let _ = self.send(*target, msg.clone());
+                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
+                                std::thread::yield_now();
+                            }
+                        }
+                    }
+                } else {
+                    return Err(msg);
+                }
+            }
+        }
         if let Some(sender) = self.mailboxes.get(&pid) {
             sender.send(msg)
         } else {
@@ -853,11 +907,54 @@ impl Runtime {
     /// Python bindings and is hidden from generated documentation.
     #[doc(hidden)]
     pub fn send_user(&self, pid: Pid, bytes: bytes::Bytes) -> Result<(), bytes::Bytes> {
+        // emulate same overflow-policy logic but with raw bytes
+        if let Some(cap) = self.bounded_capacity.get(&pid) {
+            let size = self.mailbox_size(pid).unwrap_or(0);
+            if size >= *cap {
+                if let Some(pol) = self.overflow_policy.get(&pid) {
+                    match pol.value() {
+                        mailbox::OverflowPolicy::DropNew => return Err(bytes),
+                        mailbox::OverflowPolicy::DropOld => {
+                            if let Some(sender) = self.mailboxes.get(&pid) {
+                                let _ = sender.send_system(mailbox::SystemMessage::DropOld);
+                            }
+                            for _ in 0..64 {
+                                if self.mailbox_size(pid).unwrap_or(0) < *cap {
+                                    break;
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                        mailbox::OverflowPolicy::Block => {
+                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
+                                std::thread::yield_now();
+                            }
+                        }
+                        mailbox::OverflowPolicy::Redirect(target) => {
+                            return self.send_user(*target, bytes);
+                        }
+                        mailbox::OverflowPolicy::Spill(target) => {
+                            let _ = self.send_user(*target, bytes.clone());
+                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
+                                std::thread::yield_now();
+                            }
+                        }
+                    }
+                } else {
+                    return Err(bytes);
+                }
+            }
+        }
         if let Some(sender) = self.mailboxes.get(&pid) {
             sender.send_user_bytes(bytes)
         } else {
             Err(bytes)
         }
+    }
+
+    /// Set overflow policy for an existing bounded mailbox.
+    pub fn set_overflow_policy(&self, pid: Pid, policy: mailbox::OverflowPolicy) {
+        self.overflow_policy.insert(pid, policy);
     }
 
     /// Return the number of queued user messages for the actor with `pid`.
@@ -978,7 +1075,7 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{sleep, timeout, Duration};
 
     #[tokio::test]
     async fn bounded_spawn_rejects_overflow() {
@@ -991,7 +1088,7 @@ mod tests {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         let handler = move |mut mailbox: mailbox::MailboxReceiver| {
             let tx = tx.clone();
-            let mut start_rx = start_rx;
+            let start_rx = start_rx;
             async move {
                 // wait until test gives permission to proceed
                 let _ = start_rx.await;
@@ -1047,5 +1144,142 @@ mod tests {
         let payload = bytes::Bytes::from_static(b"payload");
         let err = rt.send_user(pid, payload.clone()).expect_err("send should fail for stopped pid");
         assert_eq!(err, payload);
+    }
+
+    #[tokio::test]
+    async fn overflow_policy_spill_forwards_and_keeps_primary_delivery() {
+        let rt = Runtime::new();
+
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let primary = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let primary_tx = primary_tx.clone();
+                let start_rx = start_rx;
+                async move {
+                    let _ = start_rx.await;
+                    for _ in 0..2 {
+                        if let Some(msg) = mailbox.recv().await {
+                            let _ = primary_tx.send(msg);
+                        }
+                    }
+                }
+            },
+            1,
+        );
+
+        let fallback = rt.spawn_actor(move |mut mailbox: mailbox::MailboxReceiver| {
+            let fallback_tx = fallback_tx.clone();
+            async move {
+                if let Some(msg) = mailbox.recv().await {
+                    let _ = fallback_tx.send(msg);
+                }
+            }
+        });
+
+        rt.set_overflow_policy(primary, mailbox::OverflowPolicy::Spill(fallback));
+
+        assert!(rt
+            .send(primary, mailbox::Message::User(b"p1".to_vec().into()))
+            .is_ok());
+
+        let rt_send = rt.clone();
+        let send_task = tokio::task::spawn_blocking(move || {
+            rt_send
+                .send(primary, mailbox::Message::User(b"p2".to_vec().into()))
+                .is_ok()
+        });
+
+        let spilled = timeout(Duration::from_secs(1), fallback_rx.recv())
+            .await
+            .expect("spill should reach fallback promptly")
+            .expect("fallback should receive spill copy");
+        assert_eq!(spilled, mailbox::Message::User(b"p2".to_vec().into()));
+
+        let _ = start_tx.send(());
+
+        let send_ok = timeout(Duration::from_secs(1), send_task)
+            .await
+            .expect("spill send should complete")
+            .expect("send task should join");
+        assert!(send_ok, "spill send should report success");
+
+        let first = timeout(Duration::from_secs(1), primary_rx.recv())
+            .await
+            .expect("primary first receive")
+            .expect("primary first message exists");
+        let second = timeout(Duration::from_secs(1), primary_rx.recv())
+            .await
+            .expect("primary second receive")
+            .expect("primary second message exists");
+
+        assert_eq!(first, mailbox::Message::User(b"p1".to_vec().into()));
+        assert_eq!(second, mailbox::Message::User(b"p2".to_vec().into()));
+    }
+
+    #[tokio::test]
+    async fn overflow_policy_block_waits_until_capacity_then_succeeds() {
+        let rt = Runtime::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let tx = tx.clone();
+                let start_rx = start_rx;
+                async move {
+                    let _ = start_rx.await;
+                    for _ in 0..2 {
+                        if let Some(msg) = mailbox.recv().await {
+                            let _ = tx.send(msg);
+                        }
+                    }
+                }
+            },
+            1,
+        );
+
+        rt.set_overflow_policy(pid, mailbox::OverflowPolicy::Block);
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"b1".to_vec().into()))
+            .is_ok());
+
+        let rt_send = rt.clone();
+        let mut send_task = tokio::task::spawn_blocking(move || {
+            rt_send
+                .send(pid, mailbox::Message::User(b"b2".to_vec().into()))
+                .is_ok()
+        });
+
+        assert!(
+            timeout(Duration::from_millis(30), &mut send_task)
+                .await
+                .is_err(),
+            "block policy should wait while mailbox is full"
+        );
+
+        let _ = start_tx.send(());
+
+        let send_ok = timeout(Duration::from_secs(1), send_task)
+            .await
+            .expect("blocked send should complete")
+            .expect("send task should join");
+        assert!(send_ok, "block policy send should report success");
+
+        let first = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first message receive")
+            .expect("first message exists");
+        let second = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("second message receive")
+            .expect("second message exists");
+
+        assert_eq!(first, mailbox::Message::User(b"b1".to_vec().into()));
+        assert_eq!(second, mailbox::Message::User(b"b2".to_vec().into()));
     }
 }

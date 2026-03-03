@@ -66,6 +66,7 @@ pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
             metadata: None,
         }
         .into_py(py),
+        mailbox::Message::System(mailbox::SystemMessage::DropOld) => py.None(),
     }
 }
 
@@ -137,6 +138,7 @@ pub(crate) fn run_python_matcher(
                     Err(_) => false,
                 }
             }
+            mailbox::SystemMessage::DropOld => false,
         },
     }
 }
