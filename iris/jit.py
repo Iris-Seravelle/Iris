@@ -77,7 +77,16 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
         elif strategy == "jit" and call_jit is not None:
             @functools.wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
-                return call_jit(func, args, kwargs)
+                try:
+                    return call_jit(func, args, kwargs)
+                except RuntimeError as e:
+                    # common failure when JIT entry is missing; fall back to
+                    # executing the original Python function.  This keeps the
+                    # decorator non‑fatal when compilation is not possible.
+                    msg = str(e)
+                    if "no JIT entry" in msg or "failed to compile" in msg:
+                        return func(*args, **kwargs)
+                    raise
             return jit_wrapper
 
         return func

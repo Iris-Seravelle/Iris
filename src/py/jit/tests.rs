@@ -28,6 +28,20 @@ fn jit_builder_pic_flag_behavior() {
     assert_eq!(isa.flags().is_pic(), !cfg!(target_arch = "aarch64"));
 }
 
+#[test]
+fn compile_jit_nested_parens_generator() {
+    let args = vec!["n".to_string()];
+    let entry = compile_jit("sum((i * i for i in range(int(n))))", &args);
+    assert!(entry.is_some(), "nested parens generator should compile");
+}
+
+#[test]
+fn compile_jit_vector_generator_should_fail() {
+    let args = vec!["x".to_string()];
+    let entry = compile_jit("sum((x_i * x_i for x_i in x))", &args);
+    assert!(entry.is_none(), "vector generator must not compile");
+}
+
 // remaining tests are copy-pasted from original...
 
 #[test]

@@ -63,6 +63,9 @@ performs lightweight optimizations via an internal heuristics pass:
 * ternary expressions with constant conditions are evaluated at compile time.
 * simple loop‑reductions such as `sum(i for i in range(5))` are folded to a
   constant.
+* linear‑body loops like `sum(2*i+3 for i in range(n))` are rewritten into
+  simpler forms (`2*sum(i)+3*n`) and may collapse entirely when bounds are
+  constant.
 * unary `-`/`+`
 * loop-style reductions via `sum(expr for i in range(n))` and
     `sum(expr for i in range(start, end))`.
@@ -170,6 +173,16 @@ Currently supported JIT expression features include:
 - arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
 - unary operators: `+x`, `-x`
 - loop reductions: `sum(expr for i in range(n))`, `sum(expr for i in range(start, end))`
+  * the JIT applies a heuristics pass that constantly folds any range with
+    fixed bounds, pulls variable coefficients outside the loop, and even
+    rewrites linear/quadratic bodies into closed‑form formulas (e.g.
+    `sum(i*i for i in range(n))` becomes `(n-1)*n*(2n-1)/6`).
+
+> **Fallback behaviour:** when JIT compilation fails (unsupported syntax,
+> missing range, etc.) the offload decorator simply runs the original Python
+> function rather than raising an error.  This makes `[email protected]` safe to leave
+> in production code — the function will “auto‑fallback” to the interpreter or
+> actor pool without crashing your program.
 - math calls: `sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `pow`, `abs`,
   `sinh`, `cosh`, `tanh`
 - constants: `pi`, `e`

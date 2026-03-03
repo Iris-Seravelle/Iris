@@ -158,6 +158,18 @@ async fn py_jit_offload_decorator_async() {
             .unwrap();
         assert_eq!(ret_loop, 10.0);
 
+        // check python-side wrapper fallback when JIT compilation fails
+        py.run(r#"
+@iris.offload(strategy='jit', return_type='float')
+def bad(x):
+    return sum((x_i * x_i for x_i in x))
+"#, None, Some(locals)).unwrap();
+        let bad = locals.get_item("bad").unwrap();
+        let arr = py.eval("[1.0,2.0,3.0]", None, Some(locals)).unwrap();
+        let res: f64 = bad.call1((arr,)).unwrap().extract().unwrap();
+        // result should still be correct (1+4+9=14)
+        assert_eq!(res, 14.0);
+
         let mexp = locals.get_item("mexp").unwrap().to_object(py);
         let _decorated_exp: PyObject = register
             .call1(py, (mexp.clone(), Some("jit"), Some("float"),

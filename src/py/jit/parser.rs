@@ -175,7 +175,12 @@ impl Parser {
             if tok == "(" {
                 self.next();
                 let expr = self.parse_expr();
-                self.next(); // consume ')'
+                // only consume a closing parenthesis if it's actually there;
+                // in generator expressions the `for` token may follow, so we
+                // must not eat it.
+                if matches!(self.peek(), Some(")")) {
+                    self.next();
+                }
                 return expr;
             }
             if tok == "-" {
@@ -292,6 +297,20 @@ mod tests {
             assert_eq!(op, "+");
         } else {
             panic!("unexpected parse result");
+        }
+    }
+
+    #[test]
+    fn parse_sum_with_extra_parens() {
+        let expr = "sum((i * i for i in range(n)))";
+        let tokens = tokenize(expr);
+        let mut p = Parser::new(tokens);
+        let ast = p.parse_expr().expect("should parse");
+        // expecting SumFor node
+        match ast {
+            Expr::Call(_, _) => panic!("generator parsed as regular call"),
+            Expr::SumFor {..} => {}
+            other => panic!("unexpected AST: {:?}", other),
         }
     }
 }
