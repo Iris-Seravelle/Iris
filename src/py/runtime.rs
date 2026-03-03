@@ -643,10 +643,7 @@ impl PyRuntime {
 
     fn send(&self, pid: u64, data: &PyBytes) -> PyResult<bool> {
         let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
-        Ok(self
-        .inner
-        .send(pid, crate::mailbox::Message::User(msg))
-        .is_ok())
+        Ok(self.inner.send_user(pid, msg).is_ok())
     }
 
     /// Schedule a one-shot send from Python. Returns a numeric timer id.

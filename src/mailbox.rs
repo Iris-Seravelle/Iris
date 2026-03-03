@@ -116,7 +116,7 @@ impl MailboxSender {
         match msg {
             Message::User(b) => {
                 // increment counter before enqueue attempt
-                self.counter.fetch_add(1, Ordering::SeqCst);
+                self.counter.fetch_add(1, Ordering::Relaxed);
                 let res = match &self.tx_user {
                     UserSender::Unbounded(tx) => tx.send(b).map_err(|e| Message::User(e.0)),
                     UserSender::Bounded(tx) => match tx.try_send(b) {
@@ -127,7 +127,7 @@ impl MailboxSender {
                 };
                 if res.is_err() {
                     // rollback counter
-                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                    self.counter.fetch_sub(1, Ordering::Relaxed);
                 }
                 res
             }
@@ -142,7 +142,7 @@ impl MailboxSender {
 
     /// Convenience: send user bytes directly.
     pub fn send_user_bytes(&self, b: Bytes) -> Result<(), Bytes> {
-        self.counter.fetch_add(1, Ordering::SeqCst);
+        self.counter.fetch_add(1, Ordering::Relaxed);
         let res = match &self.tx_user {
             UserSender::Unbounded(tx) => tx.send(b).map_err(|e| e.0),
             UserSender::Bounded(tx) => match tx.try_send(b) {
@@ -154,7 +154,7 @@ impl MailboxSender {
             },
         };
         if res.is_err() {
-            self.counter.fetch_sub(1, Ordering::SeqCst);
+            self.counter.fetch_sub(1, Ordering::Relaxed);
         }
         res
     }
@@ -169,7 +169,7 @@ impl MailboxSender {
 
     /// Return the number of user messages currently queued for this mailbox.
     pub fn len(&self) -> usize {
-        self.counter.load(Ordering::SeqCst)
+        self.counter.load(Ordering::Relaxed)
     }
 }
 
@@ -193,7 +193,7 @@ impl MailboxReceiver {
         // If there are deferred user messages, deliver them before awaiting new ones.
         if let Some(front) = self.stash.pop_front() {
             if matches!(front, Message::User(_)) {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
+                self.counter.fetch_sub(1, Ordering::Relaxed);
             }
             return Some(front);
         }
@@ -215,7 +215,7 @@ impl MailboxReceiver {
                 }
             } => {
                 if let Some(m) = user {
-                    self.counter.fetch_sub(1, Ordering::SeqCst);
+                    self.counter.fetch_sub(1, Ordering::Relaxed);
                     Some(m)
                 } else {
                     None
@@ -242,7 +242,7 @@ impl MailboxReceiver {
         // Deliver deferred user messages first, then try underlying channel.
         if let Some(front) = self.stash.pop_front() {
             if matches!(front, Message::User(_)) {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
+                self.counter.fetch_sub(1, Ordering::Relaxed);
             }
             return Some(front);
         }
@@ -268,7 +268,7 @@ impl MailboxReceiver {
         if let Some(idx) = self.stash.iter().position(|m| matcher(m)) {
             let m = self.stash.remove(idx);
             if let Some(Message::User(_)) = m.as_ref() {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
+                self.counter.fetch_sub(1, Ordering::Relaxed);
             }
             return m;
         }

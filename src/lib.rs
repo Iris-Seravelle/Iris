@@ -845,6 +845,15 @@ impl Runtime {
         }
     }
 
+    /// Send user bytes with a fast path that avoids wrapping in `Message` at callsite.
+    pub fn send_user(&self, pid: Pid, bytes: bytes::Bytes) -> Result<(), bytes::Bytes> {
+        if let Some(sender) = self.mailboxes.get(&pid) {
+            sender.send_user_bytes(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+
     /// Return the number of queued user messages for the actor with `pid`.
     pub fn mailbox_size(&self, pid: Pid) -> Option<usize> {
         self.mailboxes.get(&pid).map(|s| s.len())
@@ -999,5 +1008,38 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
         let got = rx.try_recv().unwrap();
         assert_eq!(got, mailbox::Message::User(b"x".to_vec().into()));
+    }
+
+    #[tokio::test]
+    async fn send_user_fast_path_roundtrip_and_missing_pid() {
+        let rt = Runtime::new();
+
+        let (tx, mut recv_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pid = rt.spawn_handler_with_budget(
+            move |msg| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(msg);
+                }
+            },
+            32,
+        );
+
+        assert!(rt
+            .send_user(pid, bytes::Bytes::from_static(b"hello"))
+            .is_ok());
+
+        let got = recv_rx.recv().await.expect("message should be received");
+        match got {
+            mailbox::Message::User(b) => assert_eq!(b.as_ref(), b"hello"),
+            _ => panic!("expected user message"),
+        }
+
+        rt.stop(pid);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let payload = bytes::Bytes::from_static(b"payload");
+        let err = rt.send_user(pid, payload.clone()).expect_err("send should fail for stopped pid");
+        assert_eq!(err, payload);
     }
 }
