@@ -41,7 +41,7 @@
   - Python: `Runtime.spawn_py_handler_bounded` (with tests)
   - Node.js: `Runtime.spawn_bounded`
 
-* [ ] **Overflow Policies**
+* [-] **Overflow Policies**
   Drop-new, drop-old, block, redirect, or spill to actor.
 
 * [ ] **Backpressure Signals**

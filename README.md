@@ -564,6 +564,19 @@ rate-limiting fast producers. Use `Runtime.spawn_py_handler_bounded` in Python
 or `runtime.spawn_bounded` in Node and specify the mailbox capacity (in
 messages).
 
+Overflow policy can be changed per PID at runtime with:
+
+- Python: `rt.set_overflow_policy(pid, policy, target_pid_or_none)`
+- Rust: `runtime.set_overflow_policy(pid, OverflowPolicy::...)`
+
+Supported policies:
+
+- `dropnew` — reject the incoming message (`send(...)` returns `False`/`Err`).
+- `dropold` — evict the oldest queued user message, then accept the new one.
+- `redirect` — send overflowing messages to a fallback PID.
+- `spill` — send a copy to fallback PID and still enqueue the original on primary.
+- `block` — block the sender until mailbox capacity is available.
+
 Python example:
 
 ```python
@@ -579,6 +592,25 @@ assert rt.send(pid, b'two')
 
 # third message is dropped and send returns False
 assert not rt.send(pid, b'three')
+```
+
+Python policy examples:
+
+```python
+from iris import Runtime
+rt = Runtime()
+
+primary = rt.spawn_py_handler_bounded(lambda m: print("primary", bytes(m)), budget=100, capacity=1)
+fallback = rt.spawn(lambda m: print("fallback", bytes(m)), budget=100)
+
+# Redirect overflow to fallback actor
+rt.set_overflow_policy(primary, "redirect", fallback)
+
+# Spill copies overflow to fallback and still enqueues on primary
+rt.set_overflow_policy(primary, "spill", fallback)
+
+# Block sender until room is available
+rt.set_overflow_policy(primary, "block", None)
 ```
 
 ### Python example — toggling GIL release
