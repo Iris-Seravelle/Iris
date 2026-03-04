@@ -380,6 +380,51 @@ fn compile_jit_math_functions() {
     }
 
     #[test]
+    fn compile_jit_while_reductions() {
+        let args = vec!["n".to_string()];
+
+        let sum_entry = compile_jit("sum_while(i, 0, i < n, i + 1, i)", &args)
+            .expect("sum_while compile");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_entry.func_ptr) };
+        let vals = [5.0];
+        assert_eq!(f(vals.as_ptr()), 10.0);
+
+        let sum_entry2 = compile_jit("sum_while(i, 1, i <= n, i + 1, i)", &args)
+            .expect("sum_while inclusive compile");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_entry2.func_ptr) };
+        assert_eq!(g(vals.as_ptr()), 15.0);
+    }
+
+    #[test]
+    fn compile_jit_while_reductions_with_loop_control() {
+        let empty: [f64; 0] = [];
+
+        let sum_break = compile_jit(
+            "sum_while(i, 0, i < 10, i + 1, break_if(i >= 4, i))",
+            &vec![],
+        )
+        .expect("sum_while break_if compile");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_break.func_ptr) };
+        assert_eq!(f(empty.as_ptr()), 6.0);
+
+        let sum_continue = compile_jit(
+            "sum_while(i, 0, i < 10, i + 1, continue_if(i % 2 == 0, i))",
+            &vec![],
+        )
+        .expect("sum_while continue_if compile");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_continue.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 25.0);
+
+        let sum_break_nan = compile_jit(
+            "sum_while(i, 0, i < 10, i + 1, break_on_nan((i - i) / (i - i)))",
+            &vec![],
+        )
+        .expect("sum_while break_on_nan compile");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_break_nan.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 0.0);
+    }
+
+    #[test]
     fn compile_jit_range_step_and_predicate() {
         let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
