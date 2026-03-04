@@ -437,8 +437,8 @@ fn gen_expr(
     #[derive(Clone, Copy)]
     enum LoopControl<'a> {
         None,
-        Break { cond: &'a Expr, value: &'a Expr },
-        Continue { cond: &'a Expr, value: &'a Expr },
+        Break { cond: &'a Expr, value: &'a Expr, invert_cond: bool },
+        Continue { cond: &'a Expr, value: &'a Expr, invert_cond: bool },
     }
 
     fn detect_loop_control(expr: &Expr) -> LoopControl<'_> {
@@ -446,13 +446,25 @@ fn gen_expr(
             Expr::Call(name, args) if args.len() == 2 => {
                 let symbol = name.rsplit('.').next().unwrap_or(name.as_str());
                 match symbol {
-                    "break_if" | "loop_break_if" => LoopControl::Break {
+                    "break_if" | "loop_break_if" | "break_when" | "loop_break_when" => LoopControl::Break {
                         cond: &args[0],
                         value: &args[1],
+                        invert_cond: false,
                     },
-                    "continue_if" | "loop_continue_if" => LoopControl::Continue {
+                    "break_unless" | "loop_break_unless" => LoopControl::Break {
                         cond: &args[0],
                         value: &args[1],
+                        invert_cond: true,
+                    },
+                    "continue_if" | "loop_continue_if" | "continue_when" | "loop_continue_when" => LoopControl::Continue {
+                        cond: &args[0],
+                        value: &args[1],
+                        invert_cond: false,
+                    },
+                    "continue_unless" | "loop_continue_unless" => LoopControl::Continue {
+                        cond: &args[0],
+                        value: &args[1],
+                        invert_cond: true,
                     },
                     _ => LoopControl::None,
                 }
@@ -601,15 +613,51 @@ fn gen_expr(
         }
         Expr::Call(name, args) => {
             let symbol = name.rsplit('.').next().unwrap().to_string();
+            if (symbol == "break_on_nan" || symbol == "loop_break_on_nan"
+                || symbol == "continue_on_nan" || symbol == "loop_continue_on_nan")
+                && args.len() == 1
+            {
+                let value_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let is_nan = fb.ins().fcmp(FloatCC::Unordered, value_val, value_val);
+                let sentinel = if symbol == "break_on_nan" || symbol == "loop_break_on_nan" {
+                    fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
+                } else {
+                    fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
+                };
+                return fb.ins().select(is_nan, sentinel, value_val);
+            }
+
+            if symbol == "if_else" && args.len() == 3 {
+                let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let then_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                let else_val = gen_expr(&args[2], fb, ptr, arg_names, module, locals);
+                let zero = fb.ins().f64const(0.0);
+                let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                return fb.ins().select(cond_true, then_val, else_val);
+            }
+
             if (symbol == "break_if" || symbol == "loop_break_if"
-                || symbol == "continue_if" || symbol == "loop_continue_if")
+                || symbol == "break_when" || symbol == "loop_break_when"
+                || symbol == "break_unless" || symbol == "loop_break_unless"
+                || symbol == "continue_if" || symbol == "loop_continue_if"
+                || symbol == "continue_when" || symbol == "loop_continue_when"
+                || symbol == "continue_unless" || symbol == "loop_continue_unless")
                 && args.len() == 2
             {
                 let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
                 let value_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
                 let zero = fb.ins().f64const(0.0);
-                let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
-                let sentinel = if symbol == "break_if" || symbol == "loop_break_if" {
+                let cond_true = if symbol == "break_unless" || symbol == "loop_break_unless"
+                    || symbol == "continue_unless" || symbol == "loop_continue_unless"
+                {
+                    fb.ins().fcmp(FloatCC::Equal, cond_val, zero)
+                } else {
+                    fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                };
+                let sentinel = if symbol == "break_if" || symbol == "loop_break_if"
+                    || symbol == "break_when" || symbol == "loop_break_when"
+                    || symbol == "break_unless" || symbol == "loop_break_unless"
+                {
                     fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
                 } else {
                     fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
@@ -710,11 +758,29 @@ fn gen_expr(
             } else {
                 fb.ins().fcmp(FloatCC::Equal, zero, one)
             };
+            let break_true = if let LoopControl::Break { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(break_true)
+                } else {
+                    break_true
+                }
+            } else {
+                break_true
+            };
             let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
                 let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
                 fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
             } else {
                 fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+            let continue_true = if let LoopControl::Continue { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(continue_true)
+                } else {
+                    continue_true
+                }
+            } else {
+                continue_true
             };
 
             let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);
@@ -809,11 +875,29 @@ fn gen_expr(
             } else {
                 fb.ins().fcmp(FloatCC::Equal, zero, one)
             };
+            let break_true = if let LoopControl::Break { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(break_true)
+                } else {
+                    break_true
+                }
+            } else {
+                break_true
+            };
             let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
                 let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
                 fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
             } else {
                 fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+            let continue_true = if let LoopControl::Continue { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(continue_true)
+                } else {
+                    continue_true
+                }
+            } else {
+                continue_true
             };
 
             let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);
@@ -905,12 +989,30 @@ fn gen_expr(
                 let one_const = fb.ins().f64const(1.0);
                 fb.ins().fcmp(FloatCC::Equal, zero, one_const)
             };
+            let break_true = if let LoopControl::Break { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(break_true)
+                } else {
+                    break_true
+                }
+            } else {
+                break_true
+            };
             let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
                 let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
                 fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
             } else {
                 let one_const = fb.ins().f64const(1.0);
                 fb.ins().fcmp(FloatCC::Equal, zero, one_const)
+            };
+            let continue_true = if let LoopControl::Continue { invert_cond, .. } = ctrl {
+                if invert_cond {
+                    fb.ins().bnot(continue_true)
+                } else {
+                    continue_true
+                }
+            } else {
+                continue_true
             };
 
             let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);

@@ -73,9 +73,11 @@ Current JIT support (concise):
 - **Logic:** `and`, `or`, `not`, boolean literals `True/False`.
 - **Comparisons:** `< > <= >= == !=`, including chained comparisons (`a < b < c`).
 - **Conditionals:** Python ternary (`a if cond else b`).
+- **Conditional function form:** `if_else(cond, when_true, when_false)`.
 - **Generator reductions:** `sum(...)`, `any(...)`, `all(...)` over `range(...)` with optional `step` and `if` predicate.
 - **Container generators:** `sum(...)`, `any(...)`, `all(...)` over runtime containers (`for x_i in x`) including optional `if` predicate.
-- **Loop-control intrinsics:** `break_if(cond, value)` / `continue_if(cond, value)` inside generator bodies for gradual break/continue semantics.
+- **Loop-control intrinsics:** `break_if|break_when|break_unless(cond, value)` and `continue_if|continue_when|continue_unless(cond, value)` inside generator bodies for reduction control flow.
+- **Guarded loop-control intrinsics:** `break_on_nan(value)` / `continue_on_nan(value)` for NaN-safe reduction paths.
 - **Math calls:** `sin cos tan sinh cosh tanh exp log sqrt pow abs`, and `math.*` variants.
 
 Speculative type inference and execution:
@@ -97,7 +99,9 @@ Reduction execution behavior:
 - Native reduction modes are tracked per compiled entry (`sum` / `any` / `all`).
 - `any` / `all` apply native short-circuit semantics during vectorized execution.
 - For single-argument reduction kernels, non-buffer Python iterables (for example lists/tuples) use a safe sequence fallback path in Rust.
-- `break_if` stops reduction without applying the current element contribution; `continue_if` skips current element contribution.
+- `break_*` stops reduction without applying the current element contribution; `continue_*` skips current element contribution.
+- Alias semantics: `*_if` and `*_when` are equivalent; `*_unless(cond, value)` is equivalent to the inverted condition form.
+- `break_on_nan` stops reduction when the candidate value is NaN; `continue_on_nan` skips NaN contributions.
 
 Optimizer highlights:
 - constant folding + algebraic simplification,
@@ -209,9 +213,11 @@ print(result)  # 3.7416573867739416
 - Booleans: `and/or/not`, `True/False`
 - Comparisons: `< > <= >= == !=`, including chains (`x < y < z`)
 - Conditionals: `a if cond else b`
+- Conditional function form: `if_else(cond, when_true, when_false)`
 - Generator reductions: `sum(...)`, `any(...)`, `all(...)` over `range(...)` (with step/predicate)
 - Container generators: `sum(...)`, `any(...)`, `all(...)` over runtime containers, including `if` filters
-- Loop-control intrinsics in generator bodies: `break_if(cond, value)`, `continue_if(cond, value)`
+- Loop-control intrinsics in generator bodies: `break_if|break_when|break_unless(cond, value)`, `continue_if|continue_when|continue_unless(cond, value)`
+- Guarded loop-control intrinsics: `break_on_nan(value)`, `continue_on_nan(value)`
 - Math: `sin cos tan sinh cosh tanh exp log sqrt pow abs`, including `math.*`
 
 #### Speculative Typing + Data Types

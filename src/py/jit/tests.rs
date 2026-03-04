@@ -329,6 +329,57 @@ fn compile_jit_math_functions() {
     }
 
     #[test]
+    fn compile_jit_with_break_continue_unless_intrinsics() {
+        let empty: [f64; 0] = [];
+
+        let sum_break_unless = compile_jit("sum(break_unless(i < 4, i) for i in range(10))", &vec![])
+            .expect("sum break_unless");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_break_unless.func_ptr) };
+        assert_eq!(f(empty.as_ptr()), 6.0);
+
+        let sum_continue_unless = compile_jit("sum(continue_unless(i % 2 == 1, i) for i in range(6))", &vec![])
+            .expect("sum continue_unless");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_continue_unless.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 9.0);
+
+        let any_break_unless = compile_jit("any(break_unless(i < 3, i > 10) for i in range(8))", &vec![])
+            .expect("any break_unless");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_break_unless.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 0.0);
+
+        let all_continue_unless = compile_jit("all(continue_unless(i % 2 == 0, i < 10) for i in range(6))", &vec![])
+            .expect("all continue_unless");
+        let q: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(all_continue_unless.func_ptr) };
+        assert_eq!(q(empty.as_ptr()), 1.0);
+
+        let sum_break_when = compile_jit("sum(break_when(i >= 4, i) for i in range(10))", &vec![])
+            .expect("sum break_when");
+        let r: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_break_when.func_ptr) };
+        assert_eq!(r(empty.as_ptr()), 6.0);
+
+        let sum_continue_when = compile_jit("sum(continue_when(i % 2 == 0, i) for i in range(6))", &vec![])
+            .expect("sum continue_when");
+        let s: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(sum_continue_when.func_ptr) };
+        assert_eq!(s(empty.as_ptr()), 9.0);
+
+    }
+
+    #[test]
+    fn compile_jit_if_else_control_flow_function() {
+        let args = vec!["x".to_string(), "y".to_string()];
+        let entry = compile_jit("if_else(x < y, x, y)", &args).expect("if_else compile");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+        let vals = [2.0, 5.0];
+        assert_eq!(f(vals.as_ptr()), 2.0);
+
+        let entry2 = compile_jit("sum(if_else(i % 2 == 0, i, 0) for i in range(6))", &vec![])
+            .expect("if_else in reduction compile");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry2.func_ptr) };
+        let empty: [f64; 0] = [];
+        assert_eq!(g(empty.as_ptr()), 6.0);
+    }
+
+    #[test]
     fn compile_jit_range_step_and_predicate() {
         let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
@@ -632,5 +683,75 @@ fn execute_jit_container_reductions_with_loop_control_intrinsics() {
             .expect("all continue container execute");
         let all_continue_val: f64 = all_continue_obj.extract(py).unwrap();
         assert_eq!(all_continue_val, 1.0);
+
+        let sum_break_unless = compile_jit(
+            "sum(break_unless(x_i < 4, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum break_unless container compile");
+        let sum_break_unless_obj = execute_jit_func(py, &sum_break_unless, PyTuple::new(py, &[list_obj]))
+            .expect("sum break_unless container execute");
+        let sum_break_unless_val: f64 = sum_break_unless_obj.extract(py).unwrap();
+        assert_eq!(sum_break_unless_val, 6.0);
+
+        let sum_continue_unless = compile_jit(
+            "sum(continue_unless(x_i % 2 == 1, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum continue_unless container compile");
+        let sum_continue_unless_obj = execute_jit_func(py, &sum_continue_unless, PyTuple::new(py, &[list_obj]))
+            .expect("sum continue_unless container execute");
+        let sum_continue_unless_val: f64 = sum_continue_unless_obj.extract(py).unwrap();
+        assert_eq!(sum_continue_unless_val, 9.0);
+
+        let sum_break_when = compile_jit(
+            "sum(break_when(x_i >= 4, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum break_when container compile");
+        let sum_break_when_obj = execute_jit_func(py, &sum_break_when, PyTuple::new(py, &[list_obj]))
+            .expect("sum break_when container execute");
+        let sum_break_when_val: f64 = sum_break_when_obj.extract(py).unwrap();
+        assert_eq!(sum_break_when_val, 6.0);
+
+        let sum_continue_when = compile_jit(
+            "sum(continue_when(x_i % 2 == 0, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum continue_when container compile");
+        let sum_continue_when_obj = execute_jit_func(py, &sum_continue_when, PyTuple::new(py, &[list_obj]))
+            .expect("sum continue_when container execute");
+        let sum_continue_when_val: f64 = sum_continue_when_obj.extract(py).unwrap();
+        assert_eq!(sum_continue_when_val, 9.0);
+
+        let sum_break_on_nan = compile_jit(
+            "sum(break_on_nan((x_i - x_i) / (x_i - x_i)) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum break_on_nan container compile");
+        let sum_break_on_nan_obj = execute_jit_func(py, &sum_break_on_nan, PyTuple::new(py, &[list_obj]))
+            .expect("sum break_on_nan container execute");
+        let sum_break_on_nan_val: f64 = sum_break_on_nan_obj.extract(py).unwrap();
+        assert_eq!(sum_break_on_nan_val, 0.0);
+
+        let sum_continue_on_nan = compile_jit(
+            "sum(continue_on_nan((x_i - x_i) / (x_i - x_i)) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum continue_on_nan container compile");
+        let sum_continue_on_nan_obj = execute_jit_func(py, &sum_continue_on_nan, PyTuple::new(py, &[list_obj]))
+            .expect("sum continue_on_nan container execute");
+        let sum_continue_on_nan_val: f64 = sum_continue_on_nan_obj.extract(py).unwrap();
+        assert_eq!(sum_continue_on_nan_val, 0.0);
+
+        let if_else_container = compile_jit(
+            "sum(if_else(x_i > 0, x_i, 0) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("if_else container compile");
+        let if_else_container_obj = execute_jit_func(py, &if_else_container, PyTuple::new(py, &[list_obj]))
+            .expect("if_else container execute");
+        let if_else_container_val: f64 = if_else_container_obj.extract(py).unwrap();
+        assert_eq!(if_else_container_val, 15.0);
     });
 }
