@@ -279,6 +279,46 @@ fn compile_jit_math_functions() {
     }
 
     #[test]
+    fn compile_jit_sum_with_break_continue_intrinsics() {
+        let empty: [f64; 0] = [];
+
+        let cont = compile_jit("sum(continue_if(i % 2 == 0, i) for i in range(6))", &vec![])
+            .expect("sum continue_if");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(cont.func_ptr) };
+        assert_eq!(f(empty.as_ptr()), 9.0); // 1+3+5
+
+        let brk = compile_jit("sum(break_if(i >= 4, i) for i in range(10))", &vec![])
+            .expect("sum break_if");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(brk.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 6.0); // 0+1+2+3
+    }
+
+    #[test]
+    fn compile_jit_any_all_with_break_continue_intrinsics() {
+        let empty: [f64; 0] = [];
+
+        let any_cont = compile_jit("any(continue_if(i < 3, i > 5) for i in range(8))", &vec![])
+            .expect("any continue_if");
+        let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_cont.func_ptr) };
+        assert_eq!(f(empty.as_ptr()), 1.0);
+
+        let any_break = compile_jit("any(break_if(i >= 3, i > 10) for i in range(8))", &vec![])
+            .expect("any break_if");
+        let g: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(any_break.func_ptr) };
+        assert_eq!(g(empty.as_ptr()), 0.0);
+
+        let all_cont = compile_jit("all(continue_if(i < 3, i < 10) for i in range(6))", &vec![])
+            .expect("all continue_if");
+        let h: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(all_cont.func_ptr) };
+        assert_eq!(h(empty.as_ptr()), 1.0);
+
+        let all_break = compile_jit("all(break_if(i >= 4, i < 10) for i in range(6))", &vec![])
+            .expect("all break_if");
+        let q: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(all_break.func_ptr) };
+        assert_eq!(q(empty.as_ptr()), 1.0);
+    }
+
+    #[test]
     fn compile_jit_range_step_and_predicate() {
         let entry = compile_jit("sum(i for i in range(0,10,2))", &vec![]).expect("step");
         let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
@@ -533,5 +573,54 @@ fn execute_jit_container_reductions_with_python_lists() {
         let all_obj = execute_jit_func(py, &all_entry, all_tuple).expect("all container execute");
         let all_val: f64 = all_obj.extract(py).unwrap();
         assert_eq!(all_val, 1.0);
+    });
+}
+
+#[test]
+fn execute_jit_container_reductions_with_loop_control_intrinsics() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        let list_obj = py.eval("[1.0, 2.0, 3.0, 4.0, 5.0]", None, Some(locals)).unwrap();
+
+        let sum_break = compile_jit(
+            "sum(break_if(x_i >= 4, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum break container compile");
+        let sum_break_obj = execute_jit_func(py, &sum_break, PyTuple::new(py, &[list_obj]))
+            .expect("sum break container execute");
+        let sum_break_val: f64 = sum_break_obj.extract(py).unwrap();
+        assert_eq!(sum_break_val, 6.0);
+
+        let sum_continue = compile_jit(
+            "sum(continue_if(x_i % 2 == 0, x_i) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("sum continue container compile");
+        let sum_continue_obj = execute_jit_func(py, &sum_continue, PyTuple::new(py, &[list_obj]))
+            .expect("sum continue container execute");
+        let sum_continue_val: f64 = sum_continue_obj.extract(py).unwrap();
+        assert_eq!(sum_continue_val, 9.0);
+
+        let any_break = compile_jit(
+            "any(break_if(x_i > 0, x_i > 10) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("any break container compile");
+        let any_break_obj = execute_jit_func(py, &any_break, PyTuple::new(py, &[list_obj]))
+            .expect("any break container execute");
+        let any_break_val: f64 = any_break_obj.extract(py).unwrap();
+        assert_eq!(any_break_val, 0.0);
+
+        let all_continue = compile_jit(
+            "all(continue_if(x_i < 4, x_i > 0) for x_i in x)",
+            &vec!["x".to_string()],
+        )
+        .expect("all continue container compile");
+        let all_continue_obj = execute_jit_func(py, &all_continue, PyTuple::new(py, &[list_obj]))
+            .expect("all continue container execute");
+        let all_continue_val: f64 = all_continue_obj.extract(py).unwrap();
+        assert_eq!(all_continue_val, 1.0);
     });
 }

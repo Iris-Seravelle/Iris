@@ -15,6 +15,9 @@ use cranelift_module::{Linkage, Module};
 use pyo3::AsPyPointer;
 use pyo3::IntoPy;
 
+const BREAK_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0b01;
+const CONTINUE_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0c01;
+
 /// A compiled function entry returned by the JIT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReductionMode {
@@ -236,6 +239,34 @@ fn gen_expr(
     module: &mut JITModule,
     locals: &HashMap<String, Value>,
 ) -> Value {
+
+    #[derive(Clone, Copy)]
+    enum LoopControl<'a> {
+        None,
+        Break { cond: &'a Expr, value: &'a Expr },
+        Continue { cond: &'a Expr, value: &'a Expr },
+    }
+
+    fn detect_loop_control(expr: &Expr) -> LoopControl<'_> {
+        match expr {
+            Expr::Call(name, args) if args.len() == 2 => {
+                let symbol = name.rsplit('.').next().unwrap_or(name.as_str());
+                match symbol {
+                    "break_if" | "loop_break_if" => LoopControl::Break {
+                        cond: &args[0],
+                        value: &args[1],
+                    },
+                    "continue_if" | "loop_continue_if" => LoopControl::Continue {
+                        cond: &args[0],
+                        value: &args[1],
+                    },
+                    _ => LoopControl::None,
+                }
+            }
+            _ => LoopControl::None,
+        }
+    }
+
     match expr {
         Expr::Const(n) => fb.ins().f64const(*n),
         Expr::Var(name) => {
@@ -375,11 +406,28 @@ fn gen_expr(
             }
         }
         Expr::Call(name, args) => {
+            let symbol = name.rsplit('.').next().unwrap().to_string();
+            if (symbol == "break_if" || symbol == "loop_break_if"
+                || symbol == "continue_if" || symbol == "loop_continue_if")
+                && args.len() == 2
+            {
+                let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+                let value_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                let zero = fb.ins().f64const(0.0);
+                let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                let sentinel = if symbol == "break_if" || symbol == "loop_break_if" {
+                    fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
+                } else {
+                    fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
+                };
+                return fb.ins().select(cond_true, sentinel, value_val);
+            }
+
             let mut arg_vals = Vec::with_capacity(args.len());
             for a in args {
                 arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
             }
-            let mut symbol = name.rsplit('.').next().unwrap().to_string();
+            let mut symbol = symbol;
             if symbol == "abs" {
                 symbol = "fabs".to_string();
             }
@@ -457,7 +505,25 @@ fn gen_expr(
             fb.switch_to_block(body_block);
             let mut body_locals = locals.clone();
             body_locals.insert(iter_var.clone(), i_val);
-            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let ctrl = detect_loop_control(body);
+            let body_expr = match ctrl {
+                LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                LoopControl::None => body,
+            };
+            let break_true = if let LoopControl::Break { cond, .. } = ctrl {
+                let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
+            } else {
+                fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+            let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
+                let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
+            } else {
+                fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+
+            let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);
             let body_true = fb.ins().fcmp(FloatCC::NotEqual, body_val, zero);
             let effective_true = if let Some(pred_expr) = pred {
                 let pred_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
@@ -466,15 +532,19 @@ fn gen_expr(
             } else {
                 body_true
             };
+            let false_mask = fb.ins().fcmp(FloatCC::Equal, zero, one);
+            let effective_true = fb.ins().select(continue_true, false_mask, effective_true);
             let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
             let next_true = fb.ins().bor(acc_true, effective_true);
-            let next_acc = fb.ins().select(next_true, one, zero);
+            let next_acc_base = fb.ins().select(next_true, one, zero);
+            let next_acc = fb.ins().select(break_true, acc_val, next_acc_base);
             fb.ins().brnz(next_true, short_true_block, &[]);
             fb.ins().jump(continue_block, &[next_acc]);
 
             fb.switch_to_block(continue_block);
             let next_acc = fb.block_params(continue_block)[0];
-            let next_i = fb.ins().fadd(i_val, step_val);
+            let next_i_base = fb.ins().fadd(i_val, step_val);
+            let next_i = fb.ins().select(break_true, end_val, next_i_base);
             fb.ins().jump(loop_block, &[next_i, next_acc]);
 
             fb.switch_to_block(short_true_block);
@@ -534,7 +604,25 @@ fn gen_expr(
             fb.switch_to_block(body_block);
             let mut body_locals = locals.clone();
             body_locals.insert(iter_var.clone(), i_val);
-            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let ctrl = detect_loop_control(body);
+            let body_expr = match ctrl {
+                LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                LoopControl::None => body,
+            };
+            let break_true = if let LoopControl::Break { cond, .. } = ctrl {
+                let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
+            } else {
+                fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+            let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
+                let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
+            } else {
+                fb.ins().fcmp(FloatCC::Equal, zero, one)
+            };
+
+            let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);
             let body_true = fb.ins().fcmp(FloatCC::NotEqual, body_val, zero);
             let effective_true = if let Some(pred_expr) = pred {
                 let pred_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
@@ -543,15 +631,18 @@ fn gen_expr(
             } else {
                 body_true
             };
+            let effective_true = fb.ins().select(continue_true, true_mask, effective_true);
             let acc_true = fb.ins().fcmp(FloatCC::NotEqual, acc_val, zero);
             let next_true = fb.ins().band(acc_true, effective_true);
-            let next_acc = fb.ins().select(next_true, one, zero);
+            let next_acc_base = fb.ins().select(next_true, one, zero);
+            let next_acc = fb.ins().select(break_true, acc_val, next_acc_base);
             fb.ins().brz(next_true, short_false_block, &[]);
             fb.ins().jump(continue_block, &[next_acc]);
 
             fb.switch_to_block(continue_block);
             let next_acc = fb.block_params(continue_block)[0];
-            let next_i = fb.ins().fadd(i_val, step_val);
+            let next_i_base = fb.ins().fadd(i_val, step_val);
+            let next_i = fb.ins().select(break_true, end_val, next_i_base);
             fb.ins().jump(loop_block, &[next_i, next_acc]);
 
             fb.switch_to_block(short_false_block);
@@ -608,7 +699,27 @@ fn gen_expr(
             fb.switch_to_block(body_block);
             let mut body_locals = locals.clone();
             body_locals.insert(iter_var.clone(), i_val);
-            let body_val = gen_expr(body, fb, ptr, arg_names, module, &body_locals);
+            let ctrl = detect_loop_control(body);
+            let body_expr = match ctrl {
+                LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                LoopControl::None => body,
+            };
+            let break_true = if let LoopControl::Break { cond, .. } = ctrl {
+                let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
+            } else {
+                let one_const = fb.ins().f64const(1.0);
+                fb.ins().fcmp(FloatCC::Equal, zero, one_const)
+            };
+            let continue_true = if let LoopControl::Continue { cond, .. } = ctrl {
+                let cont_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &body_locals);
+                fb.ins().fcmp(FloatCC::NotEqual, cont_cond_val, zero)
+            } else {
+                let one_const = fb.ins().f64const(1.0);
+                fb.ins().fcmp(FloatCC::Equal, zero, one_const)
+            };
+
+            let body_val = gen_expr(body_expr, fb, ptr, arg_names, module, &body_locals);
             let body_val = if let Some(pred_expr) = pred {
                 let cond_val = gen_expr(pred_expr, fb, ptr, arg_names, module, &body_locals);
                 let zero = fb.ins().f64const(0.0);
@@ -617,8 +728,11 @@ fn gen_expr(
             } else {
                 body_val
             };
-            let next_acc = fb.ins().fadd(acc_val, body_val);
-            let next_i = fb.ins().fadd(i_val, step_val);
+            let body_val = fb.ins().select(continue_true, zero, body_val);
+            let next_acc_base = fb.ins().fadd(acc_val, body_val);
+            let next_acc = fb.ins().select(break_true, acc_val, next_acc_base);
+            let next_i_base = fb.ins().fadd(i_val, step_val);
+            let next_i = fb.ins().select(break_true, end_val, next_i_base);
             fb.ins().jump(loop_block, &[next_i, next_acc]);
             fb.seal_block(body_block);
             fb.seal_block(loop_block);
@@ -858,6 +972,14 @@ fn reduction_identity(mode: ReductionMode) -> f64 {
 #[cfg(feature = "pyo3")]
 #[inline(always)]
 fn reduction_step(mode: ReductionMode, acc: &mut f64, value: f64) -> bool {
+    let bits = value.to_bits();
+    if bits == BREAK_SENTINEL_BITS {
+        return true;
+    }
+    if bits == CONTINUE_SENTINEL_BITS {
+        return false;
+    }
+
     match mode {
         ReductionMode::None => false,
         ReductionMode::Sum => {
