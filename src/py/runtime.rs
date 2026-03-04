@@ -383,6 +383,58 @@ impl PyRuntime {
         Ok(self.inner.spawn_handler_with_budget(handler, budget))
     }
 
+    /// Lazy/virtual variant of spawn_py_handler.
+    ///
+    /// The PID is reserved immediately, but the actor is only activated on first send.
+    /// If `idle_timeout_ms` is set, the activated actor will auto-stop after that idle period.
+    fn spawn_virtual_py_handler(
+        &self,
+        py_callable: PyObject,
+        budget: usize,
+        idle_timeout_ms: Option<u64>,
+    ) -> PyResult<u64> {
+        let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+
+        let handler = move |msg: crate::mailbox::Message| {
+            let b = behavior.clone();
+            async move {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                    return;
+                }
+
+                match msg {
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        Python::with_gil(|py| unsafe {
+                            let new_obj =
+                                PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                            *b.write() = new_obj;
+                        });
+                    }
+                    crate::mailbox::Message::User(bytes) => {
+                        Python::with_gil(|py| {
+                            let guard = b.read();
+                            let cb = guard.as_ref(py);
+                            let pybytes = PyBytes::new(py, &bytes);
+                            if let Err(e) = cb.call1((pybytes,)) {
+                                eprintln!("[Iris] Python actor exception: {}", e);
+                                e.print(py);
+                            }
+                        });
+                    }
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {}
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {}
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
+                    | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {}
+                }
+            }
+        };
+
+        let idle = idle_timeout_ms.map(Duration::from_millis);
+        Ok(self
+            .inner
+            .spawn_virtual_handler_with_budget(handler, budget, idle))
+    }
+
     /// Bounded mailbox variant of spawn_py_handler.
     fn spawn_py_handler_bounded(
         &self,

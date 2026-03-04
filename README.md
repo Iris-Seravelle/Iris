@@ -347,6 +347,52 @@ Python and Node bindings expose matching helpers (`spawn_child`, `spawn_child_wi
 
 ---
 
+### Virtual / Lazy Actors (Experimental)
+
+Iris now supports **virtual (lazy) actors**: a PID is reserved up front, but the actor is only activated on first message delivery. This keeps idle footprint low while preserving actor-style addressing.
+
+Current semantics:
+
+- Activation occurs automatically on first `send` / `send_user` to the reserved PID.
+- Optional idle timeout can auto-stop an activated virtual actor after inactivity.
+- `stop(pid)` also works for a never-activated virtual actor and cleanly deallocates its PID.
+
+#### Rust
+
+```rust
+let rt = Runtime::new();
+
+let pid = rt.spawn_virtual_handler_with_budget(
+    |msg| async move {
+        // process message once activated
+    },
+    100,
+    Some(std::time::Duration::from_millis(500)),
+);
+
+// Actor is activated lazily on first send
+rt.send(pid, Message::User(Bytes::from("hello"))).unwrap();
+```
+
+#### Python
+
+```python
+import iris
+
+rt = iris.Runtime()
+
+pid = rt.spawn_virtual(
+    lambda msg: print("virtual got", bytes(msg)),
+    budget=100,
+    idle_timeout_ms=500,
+)
+
+# activates on first send
+rt.send(pid, b"hello")
+```
+
+---
+
 ### 4. Service Discovery & Registry
 
 > [!NOTE]

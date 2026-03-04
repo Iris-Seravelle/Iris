@@ -40,6 +40,17 @@ class Runtime:
         """
         return self._inner.spawn_py_handler_bounded(handler, budget, capacity, release_gil)
 
+    def spawn_virtual(self, handler, budget: int = 100, idle_timeout_ms: Optional[int] = None) -> int:
+        """
+        Reserve a lazy/virtual actor PID and activate it on first message.
+
+        Args:
+            handler: Callable(message)
+            budget: Reduction budget once activated.
+            idle_timeout_ms: Optional inactivity timeout after which actor auto-stops.
+        """
+        return self._inner.spawn_virtual_py_handler(handler, budget, idle_timeout_ms)
+
     def spawn_with_mailbox(self, handler, budget: int = 100) -> int:
         """
         Spawn a new pull-based actor in a dedicated OS thread.

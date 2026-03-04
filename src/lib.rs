@@ -21,11 +21,23 @@ pub mod node;
 use crate::pid::Pid;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::time::Duration;
+
+type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ErasedMessageHandler = Arc<dyn Fn(mailbox::Message) -> BoxFutureUnit + Send + Sync>;
+
+#[derive(Clone)]
+struct VirtualActorSpec {
+    handler: ErasedMessageHandler,
+    budget: usize,
+    idle_timeout: Option<Duration>,
+}
 
 /// A global, multi-threaded Tokio runtime shared by all Iris instances.
 static RUNTIME: Lazy<TokioRuntime> = Lazy::new(|| {
@@ -61,6 +73,10 @@ pub struct Runtime {
     bounded_capacity: Arc<DashMap<Pid, usize>>,
     /// Overflow policies for bounded mailboxes; default is DropNew if absent.
     overflow_policy: Arc<DashMap<Pid, mailbox::OverflowPolicy>>,
+    /// Lazy/virtual actor specs reserved by PID and activated on first send.
+    virtual_specs: Arc<DashMap<Pid, VirtualActorSpec>>,
+    /// Per-virtual-actor activation lock to prevent duplicate activation races.
+    virtual_activate_locks: Arc<DashMap<Pid, Arc<Mutex<()>>>>,
     // Runtime-configurable limits for Python GIL-release behavior
     release_gil_max_threads: Arc<Mutex<usize>>,
     gil_pool_size: Arc<Mutex<usize>>,
@@ -90,6 +106,8 @@ impl Runtime {
             children_by_parent: Arc::new(DashMap::new()),
             bounded_capacity: Arc::new(DashMap::new()),
             overflow_policy: Arc::new(DashMap::new()),
+            virtual_specs: Arc::new(DashMap::new()),
+            virtual_activate_locks: Arc::new(DashMap::new()),
             release_gil_max_threads: Arc::new(Mutex::new(0)),
             gil_pool_size: Arc::new(Mutex::new(8)),
             release_gil_strict: Arc::new(Mutex::new(false)),
@@ -401,6 +419,179 @@ impl Runtime {
     /// Stop an actor by closing its mailbox.
     pub fn stop(&self, pid: Pid) {
         self.mailboxes.remove(&pid);
+        if self.virtual_specs.remove(&pid).is_some() {
+            self.virtual_activate_locks.remove(&pid);
+            self.supervisor.notify_exit(pid);
+            self.slab.lock().unwrap().deallocate(pid);
+            self.handle_exit_internal(pid);
+        }
+    }
+
+    /// Reserve a virtual/lazy actor PID. The actor is activated on first send.
+    ///
+    /// `idle_timeout` controls auto-shutdown after inactivity once activated.
+    pub fn spawn_virtual_handler_with_budget<H, Fut>(
+        &self,
+        handler: H,
+        budget: usize,
+        idle_timeout: Option<Duration>,
+    ) -> Pid
+    where
+        H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let mut slab = self.slab.lock().unwrap();
+        let pid = slab.allocate();
+
+        let erased: ErasedMessageHandler = Arc::new(move |msg: mailbox::Message| {
+            Box::pin(handler(msg))
+        });
+
+        self.virtual_specs.insert(
+            pid,
+            VirtualActorSpec {
+                handler: erased,
+                budget,
+                idle_timeout,
+            },
+        );
+        self.virtual_activate_locks
+            .insert(pid, Arc::new(Mutex::new(())));
+
+        pid
+    }
+
+    /// Reserve a virtual/lazy actor with default budget and no idle timeout.
+    pub fn spawn_virtual_handler<H, Fut>(&self, handler: H) -> Pid
+    where
+        H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.spawn_virtual_handler_with_budget(handler, 100, None)
+    }
+
+    fn ensure_virtual_actor_active(&self, pid: Pid) -> bool {
+        if self.mailboxes.contains_key(&pid) {
+            return true;
+        }
+
+        let lock = if let Some(lock_entry) = self.virtual_activate_locks.get(&pid) {
+            lock_entry.clone()
+        } else {
+            return false;
+        };
+
+        let _guard = lock.lock().unwrap();
+
+        if self.mailboxes.contains_key(&pid) {
+            return true;
+        }
+
+        let spec = if let Some((_, spec)) = self.virtual_specs.remove(&pid) {
+            spec
+        } else {
+            return self.mailboxes.contains_key(&pid);
+        };
+        self.virtual_activate_locks.remove(&pid);
+
+        let (tx, mut rx) = mailbox::channel();
+        self.mailboxes.insert(pid, tx.clone());
+
+        let handler = spec.handler.clone();
+        let budget = spec.budget;
+        let idle_timeout = spec.idle_timeout;
+
+        let supervisor2 = self.supervisor.clone();
+        let mailboxes2 = self.mailboxes.clone();
+        let slab2 = self.slab.clone();
+        let path_supervisors2 = self.path_supervisors.clone();
+        let rt_exit_clone = self.clone();
+
+        RUNTIME.spawn(async move {
+            let h_loop = handler.clone();
+            let actor_handle = tokio::spawn(async move {
+                let mut processed = 0usize;
+                loop {
+                    let first_msg = if let Some(idle) = idle_timeout {
+                        match tokio::time::timeout(idle, rx.recv()).await {
+                            Ok(maybe) => maybe,
+                            Err(_) => break,
+                        }
+                    } else {
+                        rx.recv().await
+                    };
+
+                    let Some(first_msg) = first_msg else {
+                        break;
+                    };
+
+                    let h = h_loop.clone();
+                    (h)(first_msg).await;
+                    processed += 1;
+
+                    while processed < budget {
+                        match rx.try_recv() {
+                            Some(next_msg) => {
+                                let h = h_loop.clone();
+                                (h)(next_msg).await;
+                                processed += 1;
+                            }
+                            None => break,
+                        }
+                    }
+
+                    if processed >= budget {
+                        processed = 0;
+                        tokio::task::yield_now().await;
+                    }
+                }
+            });
+
+            let res = actor_handle.await;
+
+            let (reason, meta) = match res {
+                Ok(_) => (crate::mailbox::ExitReason::Normal, None),
+                Err(e) => {
+                    if e.is_panic() {
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    } else {
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    }
+                }
+            };
+
+            mailboxes2.remove(&pid);
+            supervisor2.notify_exit(pid);
+            for entry in path_supervisors2.iter() {
+                let sup = entry.value();
+                if sup.contains_child(pid) {
+                    sup.notify_exit(pid);
+                }
+            }
+            slab2.lock().unwrap().deallocate(pid);
+
+            rt_exit_clone.handle_exit_internal(pid);
+
+            let linked = supervisor2.linked_pids(pid);
+            for lp in linked {
+                if let Some(sender) = mailboxes2.get(&lp) {
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                }
+            }
+        });
+
+        true
     }
 
     /// Block the current thread until the actor with `pid` fully exits.
@@ -850,6 +1041,8 @@ impl Runtime {
     }
 
     pub fn send(&self, pid: Pid, msg: mailbox::Message) -> Result<(), mailbox::Message> {
+        let _ = self.ensure_virtual_actor_active(pid);
+
         // apply overflow policy if bounded
         if let Some(cap) = self.bounded_capacity.get(&pid) {
             let size = self.mailbox_size(pid).unwrap_or(0);
@@ -907,6 +1100,8 @@ impl Runtime {
     /// Python bindings and is hidden from generated documentation.
     #[doc(hidden)]
     pub fn send_user(&self, pid: Pid, bytes: bytes::Bytes) -> Result<(), bytes::Bytes> {
+        let _ = self.ensure_virtual_actor_active(pid);
+
         // emulate same overflow-policy logic but with raw bytes
         if let Some(cap) = self.bounded_capacity.get(&pid) {
             let size = self.mailbox_size(pid).unwrap_or(0);
@@ -1281,5 +1476,74 @@ mod tests {
 
         assert_eq!(first, mailbox::Message::User(b"b1".to_vec().into()));
         assert_eq!(second, mailbox::Message::User(b"b2".to_vec().into()));
+    }
+
+    #[tokio::test]
+    async fn virtual_actor_activates_on_first_send() {
+        let rt = Runtime::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let pid = rt.spawn_virtual_handler_with_budget(
+            move |msg| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(msg);
+                }
+            },
+            16,
+            None,
+        );
+
+        assert!(rt.mailbox_size(pid).is_none(), "virtual actor should be inactive initially");
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"lazy".to_vec().into()))
+            .is_ok());
+
+        let got = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("virtual handler should receive message")
+            .expect("message must exist");
+        assert_eq!(got, mailbox::Message::User(b"lazy".to_vec().into()));
+        assert!(rt.is_alive(pid));
+    }
+
+    #[tokio::test]
+    async fn virtual_actor_idle_timeout_deactivates_actor() {
+        let rt = Runtime::new();
+
+        let pid = rt.spawn_virtual_handler_with_budget(
+            move |_msg| async move {},
+            8,
+            Some(Duration::from_millis(50)),
+        );
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"ping".to_vec().into()))
+            .is_ok());
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !rt.is_alive(pid) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("virtual actor should stop after idle timeout");
+    }
+
+    #[tokio::test]
+    async fn stop_unactivated_virtual_actor_deallocates_pid() {
+        let rt = Runtime::new();
+
+        let pid = rt.spawn_virtual_handler_with_budget(move |_msg| async move {}, 8, None);
+        assert!(rt.is_alive(pid));
+
+        rt.stop(pid);
+        sleep(Duration::from_millis(20)).await;
+
+        assert!(!rt.is_alive(pid));
     }
 }

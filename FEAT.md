@@ -41,8 +41,8 @@
   - Python: `Runtime.spawn_py_handler_bounded` (with tests)
   - Node.js: `Runtime.spawn_bounded`
 
-* [-] **Overflow Policies**
-  Drop-new, drop-old, block, redirect, or spill to actor.
+* [x] **Overflow Policies**
+  Drop-new, drop-old, block, redirect, or spill to actor.  (Implemented with tests across Rust and Python.)
 
 * [ ] **Backpressure Signals**
   Runtime can refuse messages or slow producers under load.
@@ -52,7 +52,7 @@
 ## 🟠 Scale & Abstraction (Orleans-Inspired)
 
 * [ ] **Virtual / Lazy Actors**
-  Actors instantiated on first message, destroyed when idle.
+  Actors instantiated on first message, destroyed when idle.  **Work in progress: robust design sketched, core APIs defined.**
 
 * [ ] **Location Transparency**
   Local vs remote actors are indistinguishable to callers.
