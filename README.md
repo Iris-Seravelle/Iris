@@ -83,6 +83,11 @@ Speculative type inference and execution:
 - First successful call establishes a fast-path profile; subsequent calls use the specialized path when shape/types match.
 - On profile mismatch, Iris safely falls back to generic conversion and can adapt to new input shapes.
 
+Quantum speculation (optional):
+- When enabled, Iris compiles multiple JIT variants for the same expression in parallel and tracks runtime latency/failures per variant.
+- The dispatcher adaptively picks the best-performing variant and periodically re-samples alternatives to avoid stale choices.
+- Toggle via env: `IRIS_JIT_QUANTUM=1`, or Python API: `iris.jit.set_quantum_speculation(...)` / `iris.jit.get_quantum_speculation()`.
+
 Supported JIT argument data types:
 - **Scalars:** Python `float`, `int`, and `bool` (converted to native `f64` inputs for JIT ABI).
 - **Buffers / vectorized inputs:** contiguous buffers with element types `f64`, `f32`, signed/unsigned ints, and bool.

@@ -26,13 +26,25 @@ pub(crate) mod codegen;
 pub(crate) mod heuristics;
 
 // re-export helpers for convenience within this module
-use crate::py::jit::codegen::{compile_jit, register_jit, lookup_jit, execute_jit_func};
+use crate::py::jit::codegen::{
+    compile_jit,
+    compile_jit_quantum,
+    execute_registered_jit,
+    register_jit,
+    register_quantum_jit,
+};
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
 static JIT_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
+static JIT_QUANTUM_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 
 fn jit_log_env_var() -> &'static RwLock<String> {
     JIT_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_LOG".to_string()))
+}
+
+fn jit_quantum_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM".to_string()))
 }
 
 fn parse_bool_env(v: &str) -> bool {
@@ -62,6 +74,20 @@ where
 {
     if jit_logging_enabled() {
         eprintln!("{}", msg());
+    }
+}
+
+pub(crate) fn quantum_speculation_enabled() -> bool {
+    match JIT_QUANTUM_OVERRIDE.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let env_name = jit_quantum_env_var().read().unwrap().clone();
+            std::env::var(env_name)
+                .ok()
+                .map(|v| parse_bool_env(&v))
+                .unwrap_or(false)
+        }
     }
 }
 
@@ -133,6 +159,8 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(call_jit, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(configure_jit_logging, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(is_jit_logging_enabled, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_quantum_speculation, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(is_quantum_speculation_enabled, m)?)?;
     Ok(())
 }
 
@@ -156,6 +184,26 @@ fn is_jit_logging_enabled() -> PyResult<bool> {
     Ok(jit_logging_enabled())
 }
 
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn configure_quantum_speculation(enabled: Option<bool>, env_var: Option<String>) -> PyResult<bool> {
+    if let Some(name) = env_var {
+        *jit_quantum_env_var().write().unwrap() = name;
+    }
+    match enabled {
+        Some(true) => JIT_QUANTUM_OVERRIDE.store(1, Ordering::Relaxed),
+        Some(false) => JIT_QUANTUM_OVERRIDE.store(0, Ordering::Relaxed),
+        None => JIT_QUANTUM_OVERRIDE.store(-1, Ordering::Relaxed),
+    }
+    Ok(quantum_speculation_enabled())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn is_quantum_speculation_enabled() -> PyResult<bool> {
+    Ok(quantum_speculation_enabled())
+}
+
 /// Register a Python function for offloading.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
@@ -171,12 +219,22 @@ fn register_offload(
             let _ = get_offload_pool();
         } else if s == "jit" {
             if let (Some(expr), Some(args)) = (source_expr.clone(), arg_names.clone()) {
-                if let Some(entry) = compile_jit(&expr, &args) {
-                    let key = func.as_ptr() as usize;
-                    register_jit(key, entry);
-                    jit_log(|| format!("[Iris][jit] compiled JIT for function ptr={}", key));
+                let key = func.as_ptr() as usize;
+                if quantum_speculation_enabled() {
+                    let entries = compile_jit_quantum(&expr, &args);
+                    if !entries.is_empty() {
+                        register_quantum_jit(key, entries);
+                        jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
+                    } else {
+                        jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
+                    }
                 } else {
-                    jit_log(|| format!("[Iris][jit] failed to compile expr: {}", expr));
+                    if let Some(entry) = compile_jit(&expr, &args) {
+                        register_jit(key, entry);
+                        jit_log(|| format!("[Iris][jit] compiled JIT for function ptr={}", key));
+                    } else {
+                        jit_log(|| format!("[Iris][jit] failed to compile expr: {}", expr));
+                    }
                 }
             }
         }
@@ -200,9 +258,9 @@ fn offload_call(
     kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(entry) = lookup_jit(key) {
-        if let Ok(res) = execute_jit_func(py, &entry, args) {
-            return Ok(res);
+    if let Some(res) = execute_registered_jit(py, key, args) {
+        if let Ok(obj) = res {
+            return Ok(obj);
         }
     }
 
@@ -240,8 +298,8 @@ fn call_jit(
     _kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(entry) = lookup_jit(key) {
-        return execute_jit_func(py, &entry, args);
+    if let Some(res) = execute_registered_jit(py, key, args) {
+        return res;
     }
     Err(pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))
 }

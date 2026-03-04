@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use crate::py::jit::parser::Expr;
 use crate::py::jit::heuristics;
@@ -40,6 +41,34 @@ static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
 static JIT_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, JitEntry>>> =
     once_cell::sync::OnceCell::new();
 
+#[derive(Clone)]
+struct QuantumStats {
+    ewma_ns: f64,
+    runs: u64,
+    failures: u64,
+}
+
+impl Default for QuantumStats {
+    fn default() -> Self {
+        Self {
+            ewma_ns: 0.0,
+            runs: 0,
+            failures: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct QuantumState {
+    entries: Vec<JitEntry>,
+    stats: Vec<QuantumStats>,
+    round_robin: usize,
+    total_runs: u64,
+}
+
+static QUANTUM_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, QuantumState>>> =
+    once_cell::sync::OnceCell::new();
+
 pub fn register_jit(func_key: usize, entry: JitEntry) {
     let map = JIT_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap();
@@ -50,6 +79,137 @@ pub fn lookup_jit(func_key: usize) -> Option<JitEntry> {
     JIT_REGISTRY
         .get()
         .and_then(|map| map.lock().unwrap().get(&func_key).cloned())
+}
+
+pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
+    if entries.is_empty() {
+        return;
+    }
+    // prefer optimized candidate (first) as baseline fallback mapping
+    register_jit(func_key, entries[0].clone());
+    let stats = vec![QuantumStats::default(); entries.len()];
+    let state = QuantumState {
+        entries: std::mem::take(&mut entries),
+        stats,
+        round_robin: 0,
+        total_runs: 0,
+    };
+    let map = QUANTUM_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    map.lock().unwrap().insert(func_key, state);
+}
+
+fn choose_quantum_index(state: &mut QuantumState) -> usize {
+    for (idx, s) in state.stats.iter().enumerate() {
+        if s.runs == 0 {
+            return idx;
+        }
+    }
+    state.total_runs = state.total_runs.saturating_add(1);
+    if state.total_runs % 16 == 0 {
+        state.round_robin = (state.round_robin + 1) % state.entries.len();
+        return state.round_robin;
+    }
+    let mut best_idx = 0usize;
+    let mut best_score = f64::MAX;
+    for (idx, s) in state.stats.iter().enumerate() {
+        let penalty = 1.0 + (s.failures as f64 * 0.25);
+        let score = if s.ewma_ns > 0.0 { s.ewma_ns * penalty } else { f64::MAX / 4.0 };
+        if score < best_score {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+    best_idx
+}
+
+fn update_quantum_stats(func_key: usize, idx: usize, elapsed_ns: u64, success: bool) {
+    if let Some(map) = QUANTUM_REGISTRY.get() {
+        if let Some(state) = map.lock().unwrap().get_mut(&func_key) {
+            if let Some(stats) = state.stats.get_mut(idx) {
+                if success {
+                    stats.runs = stats.runs.saturating_add(1);
+                    let sample = elapsed_ns as f64;
+                    if stats.ewma_ns <= 0.0 {
+                        stats.ewma_ns = sample;
+                    } else {
+                        stats.ewma_ns = stats.ewma_ns * 0.80 + sample * 0.20;
+                    }
+                } else {
+                    stats.failures = stats.failures.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "pyo3")]
+pub fn execute_registered_jit(
+    py: pyo3::Python,
+    func_key: usize,
+    args: &pyo3::types::PyTuple,
+) -> Option<pyo3::PyResult<pyo3::PyObject>> {
+    if crate::py::jit::quantum_speculation_enabled() {
+        if let Some(map) = QUANTUM_REGISTRY.get() {
+            let (entry, idx, fallback_entries) = {
+                let mut guard = map.lock().unwrap();
+                if let Some(state) = guard.get_mut(&func_key) {
+                    if state.entries.is_empty() {
+                        (None, 0usize, Vec::new())
+                    } else {
+                        let idx = choose_quantum_index(state);
+                        let entry = Some(state.entries[idx].clone());
+                        let mut fallbacks = Vec::new();
+                        for (i, e) in state.entries.iter().enumerate() {
+                            if i != idx {
+                                fallbacks.push((i, e.clone()));
+                            }
+                        }
+                        (entry, idx, fallbacks)
+                    }
+                } else {
+                    (None, 0usize, Vec::new())
+                }
+            };
+
+            if let Some(entry) = entry {
+                let start = Instant::now();
+                match execute_jit_func(py, &entry, args) {
+                    Ok(obj) => {
+                        update_quantum_stats(func_key, idx, start.elapsed().as_nanos() as u64, true);
+                        return Some(Ok(obj));
+                    }
+                    Err(primary_err) => {
+                        update_quantum_stats(func_key, idx, start.elapsed().as_nanos() as u64, false);
+                        for (fb_idx, fb_entry) in fallback_entries {
+                            let start_fb = Instant::now();
+                            match execute_jit_func(py, &fb_entry, args) {
+                                Ok(obj) => {
+                                    update_quantum_stats(
+                                        func_key,
+                                        fb_idx,
+                                        start_fb.elapsed().as_nanos() as u64,
+                                        true,
+                                    );
+                                    return Some(Ok(obj));
+                                }
+                                Err(_) => {
+                                    update_quantum_stats(
+                                        func_key,
+                                        fb_idx,
+                                        start_fb.elapsed().as_nanos() as u64,
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        return Some(Err(primary_err));
+                    }
+                }
+            }
+        }
+    }
+
+    lookup_jit(func_key).map(|entry| execute_jit_func(py, &entry, args))
 }
 
 thread_local! {
@@ -119,8 +279,7 @@ where
     })
 }
 
-/// Compile an expression string into a native function entry.
-pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
+fn compile_jit_impl(expr_str: &str, arg_names: &[String], optimize_ast: bool) -> Option<JitEntry> {
     // tokenize and parse
     let tokens = crate::py::jit::parser::tokenize(expr_str);
     let mut parser = crate::py::jit::parser::Parser::new(tokens);
@@ -181,8 +340,12 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
             }
         }
     }
-    expr = heuristics::optimize(expr);
-    crate::py::jit::jit_log(|| format!("[Iris][jit] optimized AST: {:?}", expr));
+    if optimize_ast {
+        expr = heuristics::optimize(expr);
+        crate::py::jit::jit_log(|| format!("[Iris][jit] optimized AST: {:?}", expr));
+    } else {
+        crate::py::jit::jit_log(|| format!("[Iris][jit] baseline AST (no-opt): {:?}", expr));
+    }
     let arg_count = adjusted_args.len();
 
     // perform compilation using the thread-local module instance;
@@ -229,6 +392,37 @@ pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
             reduction,
         })
     })
+}
+
+/// Compile an expression string into a native function entry.
+pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
+    compile_jit_impl(expr_str, arg_names, true)
+}
+
+/// Compile multiple speculative versions of the same expression in parallel.
+pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String]) -> Vec<JitEntry> {
+    let expr_opt = expr_str.to_string();
+    let expr_base = expr_str.to_string();
+    let args_opt = arg_names.to_vec();
+    let args_base = arg_names.to_vec();
+
+    let (optimized, baseline) = std::thread::scope(|scope| {
+        let h_opt = scope.spawn(move || compile_jit_impl(&expr_opt, &args_opt, true));
+        let h_base = scope.spawn(move || compile_jit_impl(&expr_base, &args_base, false));
+        (
+            h_opt.join().ok().flatten(),
+            h_base.join().ok().flatten(),
+        )
+    });
+
+    let mut out = Vec::new();
+    if let Some(e) = optimized {
+        out.push(e);
+    }
+    if let Some(e) = baseline {
+        out.push(e);
+    }
+    out
 }
 
 fn gen_expr(

@@ -21,6 +21,8 @@ try:
         call_jit,
         configure_jit_logging,
         is_jit_logging_enabled,
+        configure_quantum_speculation,
+        is_quantum_speculation_enabled,
     )  # pyo3 extension
 except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
@@ -28,6 +30,8 @@ except ImportError:  # allow tests to import without extension built
     call_jit = None  # type: ignore
     configure_jit_logging = None  # type: ignore
     is_jit_logging_enabled = None  # type: ignore
+    configure_quantum_speculation = None  # type: ignore
+    is_quantum_speculation_enabled = None  # type: ignore
 
 
 def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
@@ -53,6 +57,31 @@ def get_jit_logging() -> bool:
     if is_jit_logging_enabled is None:
         return False
     return bool(is_jit_logging_enabled())
+
+
+def set_quantum_speculation(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
+    """Configure quantum-style multi-version JIT speculation.
+
+    Parameters
+    ----------
+    enabled:
+        - ``True``: force quantum speculation on
+        - ``False``: force quantum speculation off
+        - ``None``: use environment variable mode
+    env_var:
+        Environment variable name to read when ``enabled`` is ``None``.
+        Default is ``IRIS_JIT_QUANTUM``.
+    """
+    if configure_quantum_speculation is None:
+        return False
+    return bool(configure_quantum_speculation(enabled, env_var))
+
+
+def get_quantum_speculation() -> bool:
+    """Return whether quantum-style multi-version JIT speculation is enabled."""
+    if is_quantum_speculation_enabled is None:
+        return False
+    return bool(is_quantum_speculation_enabled())
 
 
 def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:

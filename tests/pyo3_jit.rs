@@ -16,6 +16,12 @@ async fn py_jit_offload_decorator_async() {
         let is_logs = module
             .getattr(py, "is_jit_logging_enabled")
             .expect("is_jit_logging_enabled not present");
+        let cfg_quantum = module
+            .getattr(py, "configure_quantum_speculation")
+            .expect("configure_quantum_speculation not present");
+        let is_quantum = module
+            .getattr(py, "is_quantum_speculation_enabled")
+            .expect("is_quantum_speculation_enabled not present");
 
         // default may come from env; force explicit behavior and verify API.
         let off: bool = cfg_logs.call1(py, (false, Option::<String>::None)).unwrap().extract(py).unwrap();
@@ -28,6 +34,17 @@ async fn py_jit_offload_decorator_async() {
         assert!(now_on);
         // return to env mode for remainder
         let _: bool = cfg_logs.call1(py, (Option::<bool>::None, Option::<String>::None)).unwrap().extract(py).unwrap();
+
+        // quantum speculation toggle API
+        let q_off: bool = cfg_quantum.call1(py, (false, Option::<String>::None)).unwrap().extract(py).unwrap();
+        assert!(!q_off);
+        let q_now_off: bool = is_quantum.call0(py).unwrap().extract(py).unwrap();
+        assert!(!q_now_off);
+        let q_on: bool = cfg_quantum.call1(py, (true, Option::<String>::None)).unwrap().extract(py).unwrap();
+        assert!(q_on);
+        let q_now_on: bool = is_quantum.call0(py).unwrap().extract(py).unwrap();
+        assert!(q_now_on);
+        let _: bool = cfg_quantum.call1(py, (Option::<bool>::None, Option::<String>::None)).unwrap().extract(py).unwrap();
 
         let locals = PyDict::new(py);
         py.run("def foo(x): return x * 2", None, Some(locals)).unwrap();

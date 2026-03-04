@@ -15,6 +15,16 @@ fn compile_jit_basic_math() {
 }
 
 #[test]
+fn compile_jit_quantum_variants() {
+    let args = vec!["x".to_string(), "y".to_string()];
+    let entries = compile_jit_quantum("x + y", &args);
+    assert!(!entries.is_empty(), "quantum compile should produce at least one variant");
+    for entry in entries {
+        assert_eq!(entry.arg_count, 2);
+    }
+}
+
+#[test]
 fn jit_builder_pic_flag_behavior() {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
