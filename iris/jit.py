@@ -12,6 +12,7 @@ import functools
 import inspect
 import textwrap
 import warnings
+import copy
 from typing import Callable, Optional, Any
 
 try:
@@ -84,6 +85,158 @@ def get_quantum_speculation() -> bool:
     return bool(is_quantum_speculation_enabled())
 
 
+def _strip_docstring(stmts: list[ast.stmt]) -> list[ast.stmt]:
+    if (
+        stmts
+        and isinstance(stmts[0], ast.Expr)
+        and isinstance(getattr(stmts[0], "value", None), ast.Constant)
+        and isinstance(stmts[0].value.value, str)
+    ):
+        return stmts[1:]
+    return stmts
+
+
+class _NameSubstituter(ast.NodeTransformer):
+    def __init__(self, var_name: str, replacement: ast.AST) -> None:
+        self.var_name = var_name
+        self.replacement = replacement
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id == self.var_name:
+            return copy.deepcopy(self.replacement)
+        return node
+
+
+def _extract_return_expr_plan(fn_node: ast.FunctionDef) -> Optional[tuple[str, list[str]]]:
+    stmts = _strip_docstring(list(fn_node.body))
+    if len(stmts) == 1 and isinstance(stmts[0], ast.Return) and stmts[0].value is not None:
+        return ast.unparse(stmts[0].value), []
+    return None
+
+
+def _extract_stateful_loop_plan(
+    fn_node: ast.FunctionDef,
+    arg_names: list[str],
+) -> Optional[dict[str, Any]]:
+    if len(arg_names) < 2:
+        return None
+
+    stmts = _strip_docstring(list(fn_node.body))
+    if len(stmts) != 4:
+        return None
+
+    list_assign, state_assign, loop_stmt, ret_stmt = stmts
+    if not (
+        isinstance(list_assign, ast.Assign)
+        and len(list_assign.targets) == 1
+        and isinstance(list_assign.targets[0], ast.Name)
+        and isinstance(list_assign.value, ast.List)
+        and len(list_assign.value.elts) == 0
+    ):
+        return None
+    list_var = list_assign.targets[0].id
+
+    if not (
+        isinstance(state_assign, ast.Assign)
+        and len(state_assign.targets) == 1
+        and isinstance(state_assign.targets[0], ast.Name)
+        and isinstance(state_assign.value, ast.Name)
+    ):
+        return None
+    state_var = state_assign.targets[0].id
+    seed_var = state_assign.value.id
+    if seed_var != arg_names[0]:
+        return None
+
+    if not isinstance(loop_stmt, ast.For) or not isinstance(loop_stmt.target, ast.Name):
+        return None
+    iter_var = loop_stmt.target.id
+    if not (
+        isinstance(loop_stmt.iter, ast.Call)
+        and isinstance(loop_stmt.iter.func, ast.Name)
+        and loop_stmt.iter.func.id == "range"
+        and len(loop_stmt.iter.args) == 1
+    ):
+        return None
+    range_arg = loop_stmt.iter.args[0]
+    if isinstance(range_arg, ast.Name):
+        if range_arg.id != arg_names[1]:
+            return None
+    elif (
+        isinstance(range_arg, ast.Call)
+        and isinstance(range_arg.func, ast.Name)
+        and range_arg.func.id == "int"
+        and len(range_arg.args) == 1
+        and isinstance(range_arg.args[0], ast.Name)
+        and range_arg.args[0].id == arg_names[1]
+    ):
+        pass
+    else:
+        return None
+
+    if not (
+        isinstance(ret_stmt, ast.Return)
+        and isinstance(ret_stmt.value, ast.Name)
+        and ret_stmt.value.id == list_var
+    ):
+        return None
+
+    loop_body = list(loop_stmt.body)
+    if not loop_body:
+        return None
+    append_stmt = loop_body[-1]
+    if not (
+        isinstance(append_stmt, ast.Expr)
+        and isinstance(append_stmt.value, ast.Call)
+        and isinstance(append_stmt.value.func, ast.Attribute)
+        and isinstance(append_stmt.value.func.value, ast.Name)
+        and append_stmt.value.func.value.id == list_var
+        and append_stmt.value.func.attr == "append"
+        and len(append_stmt.value.args) == 1
+        and isinstance(append_stmt.value.args[0], ast.Name)
+        and append_stmt.value.args[0].id == state_var
+    ):
+        return None
+
+    state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
+    for stmt in loop_body[:-1]:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == state_var
+        ):
+            rhs = copy.deepcopy(stmt.value)
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+
+        if (
+            isinstance(stmt, ast.AugAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == state_var
+        ):
+            rhs = ast.BinOp(
+                left=ast.Name(id=state_var, ctx=ast.Load()),
+                op=stmt.op,
+                right=copy.deepcopy(stmt.value),
+            )
+            state_expr = _NameSubstituter(state_var, state_expr).visit(rhs)
+            state_expr = ast.fix_missing_locations(state_expr)
+            continue
+
+        return None
+
+    step_src = ast.unparse(state_expr)
+    return {
+        "seed_arg": arg_names[0],
+        "count_arg": arg_names[1],
+        "iter_var": iter_var,
+        "step_src": step_src,
+        "step_args": [state_var, iter_var],
+    }
+
+
 def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator that marks a function for execution on the Iris JIT/actor pool.
 
@@ -100,26 +253,27 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         src: Optional[str] = None
         arg_names: Optional[list[str]] = None
+        loop_plan: Optional[dict[str, Any]] = None
+        sig: Optional[inspect.Signature] = None
 
         if strategy == "jit":
             try:
                 src_txt = inspect.getsource(func)
                 src_txt = textwrap.dedent(src_txt)
-                
-                # Parse function and find the return expression, skipping docstrings
                 tree = ast.parse(src_txt)
-                for node in tree.body:
-                    if isinstance(node, ast.FunctionDef) and node.body:
-                        for stmt in node.body:
-                            if isinstance(stmt, ast.Return) and stmt.value is not None:
-                                # ast.unparse available in py3.9+
-                                src = ast.unparse(stmt.value)
-                                break
-                        if src is not None:
-                            break
-                            
                 sig = inspect.signature(func)
                 arg_names = list(sig.parameters.keys())
+
+                for node in tree.body:
+                    if isinstance(node, ast.FunctionDef) and node.body:
+                        expr_plan = _extract_return_expr_plan(node)
+                        if expr_plan is not None:
+                            src, _ = expr_plan
+                        else:
+                            src = None
+                            if arg_names is not None:
+                                loop_plan = _extract_stateful_loop_plan(node, arg_names)
+                        break
             except Exception:
                 pass
 
@@ -137,24 +291,24 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             return actor_wrapper
             
         elif strategy == "jit" and call_jit is not None:
-            @functools.wraps(func)
-            def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
-                try:
-                    res = call_jit(func, args, kwargs)
-                except RuntimeError as e:
-                    # common failure when JIT entry is missing; fall back to
-                    # executing the original Python function.  This keeps the
-                    # decorator non‑fatal when compilation is not possible.
-                    msg = str(e)
-                    if (
-                        "no JIT entry" in msg
-                        or "failed to compile" in msg
-                        or "jit panic" in msg
-                    ):
-                        return func(*args, **kwargs)
-                    raise
-                reduction_mode: Optional[str] = None
-                if isinstance(src, str):
+            if src is None and loop_plan is None:
+                return func
+
+            if src is not None:
+                @functools.wraps(func)
+                def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    try:
+                        res = call_jit(func, args, kwargs)
+                    except RuntimeError as e:
+                        msg = str(e)
+                        if (
+                            "no JIT entry" in msg
+                            or "failed to compile" in msg
+                            or "jit panic" in msg
+                        ):
+                            return func(*args, **kwargs)
+                        raise
+                    reduction_mode: Optional[str] = None
                     src_s = src.strip()
                     if src_s.startswith("sum("):
                         reduction_mode = "sum"
@@ -163,22 +317,79 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     elif src_s.startswith("all("):
                         reduction_mode = "all"
 
-                # If JIT returned a sequence (vectorized run), reduce according
-                # to generator semantics.
+                    try:
+                        if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                            if reduction_mode == "any":
+                                return 1.0 if any(float(v) != 0.0 for v in res) else 0.0
+                            if reduction_mode == "all":
+                                return 1.0 if all(float(v) != 0.0 for v in res) else 0.0
+                            total = 0.0
+                            for v in res:
+                                total += float(v)
+                            return total
+                    except Exception:
+                        pass
+                    return res
+
+                return jit_wrapper
+
+            if loop_plan is not None and register_offload is not None and sig is not None:
+                step_src = loop_plan["step_src"]
+                step_args = loop_plan["step_args"]
+                seed_arg = loop_plan["seed_arg"]
+                count_arg = loop_plan["count_arg"]
+                iter_var = loop_plan["iter_var"]
+
+                def _iris_step(x: float, i: float) -> float:
+                    namespace = {step_args[0]: x, step_args[1]: i}
+                    return float(eval(step_src, func.__globals__, namespace))
+
                 try:
-                    if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
-                        if reduction_mode == "any":
-                            return 1.0 if any(float(v) != 0.0 for v in res) else 0.0
-                        if reduction_mode == "all":
-                            return 1.0 if all(float(v) != 0.0 for v in res) else 0.0
-                        total = 0.0
-                        for v in res:
-                            total += float(v)
-                        return total
+                    register_offload(_iris_step, "jit", "float", step_src, step_args)
                 except Exception:
-                    pass
-                return res
-            return jit_wrapper
+                    return func
+
+                @functools.wraps(func)
+                def loop_jit_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    try:
+                        bound = sig.bind_partial(*args, **kwargs)
+                    except Exception:
+                        return func(*args, **kwargs)
+                    bound.apply_defaults()
+                    if seed_arg not in bound.arguments or count_arg not in bound.arguments:
+                        return func(*args, **kwargs)
+
+                    try:
+                        state = float(bound.arguments[seed_arg])
+                        count = int(bound.arguments[count_arg])
+                    except Exception:
+                        return func(*args, **kwargs)
+
+                    if count <= 0:
+                        return []
+
+                    out = []
+                    for i in range(count):
+                        iter_val = float(i)
+                        try:
+                            state = float(call_jit(_iris_step, (state, iter_val), None))
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if (
+                                "no JIT entry" in msg
+                                or "failed to compile" in msg
+                                or "jit panic" in msg
+                            ):
+                                local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
+                                state = float(eval(step_src, func.__globals__, local_ns))
+                            else:
+                                raise
+                        out.append(state)
+                    return out
+
+                return loop_jit_wrapper
+
+            return func
 
         return func
 
