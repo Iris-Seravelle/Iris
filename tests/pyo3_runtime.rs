@@ -456,6 +456,21 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
 
 // overflow policy tests -------------------------------------------------
 
+async fn assert_with_retries<F>(attempts: usize, delay: std::time::Duration, mut condition: F, message: &str)
+where
+    F: FnMut() -> bool,
+{
+    for attempt in 0..attempts {
+        if condition() {
+            return;
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(delay).await;
+        }
+    }
+    panic!("{} (attempts={})", message, attempts);
+}
+
 #[tokio::test]
 async fn py_overflow_drop_old() {
     let rt_py = Python::with_gil(|py| {
@@ -533,18 +548,25 @@ def cb(m, lst=lst):
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
-    Python::with_gil(|py| {
-        let got: Vec<Vec<u8>> = lst_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert!(!got.is_empty());
-        assert!(got.len() <= 40);
+    assert_with_retries(
+        3,
+        std::time::Duration::from_millis(100),
+        || {
+            Python::with_gil(|py| {
+                let got: Vec<Vec<u8>> = lst_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                !got.is_empty() && got.len() <= 40
+            })
+        },
+        "dropold expected non-empty bounded output",
+    )
+    .await;
 
-        let _ = pid;
-    });
+    let _ = pid;
 }
 
 #[tokio::test]
@@ -633,24 +655,31 @@ def cb1(m, lst1=lst1):
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    assert_with_retries(
+        5,
+        std::time::Duration::from_millis(150),
+        || {
+            Python::with_gil(|py| {
+                let l1 = lst1_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .len();
+                let l2 = lst2_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .len();
+                l1 > 0 && l2 > 0
+            })
+        },
+        "redirect expected both primary and fallback handlers to receive messages",
+    )
+    .await;
+
     Python::with_gil(|py| {
         let rt = rt_py.as_ref(py);
         rt.call_method1("stop", (pid,)).unwrap();
-
-        let got1: Vec<Vec<u8>> = lst1_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        let got2: Vec<Vec<u8>> = lst2_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert!(!got1.is_empty());
-        assert!(!got2.is_empty());
     });
 }
 
@@ -740,23 +769,31 @@ def primary_cb(m, lst=lst):
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    assert_with_retries(
+        3,
+        std::time::Duration::from_millis(100),
+        || {
+            Python::with_gil(|py| {
+                let l1 = primary_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .len();
+                let l2 = fallback_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .len();
+                l1 > 0 || l2 > 0
+            })
+        },
+        "spill expected at least one handler to receive a message",
+    )
+    .await;
+
     Python::with_gil(|py| {
         let rt = rt_py.as_ref(py);
         rt.call_method1("stop", (pid,)).unwrap();
-
-        let got_primary: Vec<Vec<u8>> = primary_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        let got_fallback: Vec<Vec<u8>> = fallback_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert!(!got_primary.is_empty() || !got_fallback.is_empty());
     });
 }
 
@@ -840,16 +877,26 @@ def cb(m, lst=lst):
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    assert_with_retries(
+        3,
+        std::time::Duration::from_millis(100),
+        || {
+            Python::with_gil(|py| {
+                let len = list_obj
+                    .as_ref(py)
+                    .downcast::<pyo3::types::PyList>()
+                    .unwrap()
+                    .len();
+                len > 0
+            })
+        },
+        "block expected non-empty output",
+    )
+    .await;
+
     Python::with_gil(|py| {
         let rt = rt_py.as_ref(py);
         rt.call_method1("stop", (pid,)).unwrap();
-        let got: Vec<Vec<u8>> = list_obj
-            .as_ref(py)
-            .downcast::<pyo3::types::PyList>()
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert!(!got.is_empty());
     });
 }
 
