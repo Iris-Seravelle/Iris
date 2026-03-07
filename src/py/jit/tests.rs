@@ -3,7 +3,12 @@
 
 use super::*;
 use crate::py::jit::codegen::execute_jit_func;
-use crate::py::jit::codegen::{resolve_symbol_alias, SymbolAlias};
+use crate::py::jit::codegen::{
+    lookup_named_jit,
+    register_named_jit,
+    resolve_symbol_alias,
+    SymbolAlias,
+};
 
 #[test]
 fn compile_jit_basic_math() {
@@ -133,6 +138,164 @@ fn symbol_alias_table_maps_expected_intrinsics() {
         Some(SymbolAlias::Rename("round"))
     );
     assert_eq!(resolve_symbol_alias("round", 2), None);
+}
+
+#[test]
+fn named_jit_registry_roundtrip() {
+    let args = vec!["x".to_string()];
+    let entry = compile_jit("x + 1", &args).expect("compile named jit entry");
+    register_named_jit("inner_add1", entry.clone());
+    let looked = lookup_named_jit("inner_add1").expect("lookup named jit entry");
+    assert_eq!(looked.func_ptr, entry.func_ptr);
+    assert_eq!(looked.arg_count, entry.arg_count);
+    assert_eq!(looked.reduction, entry.reduction);
+}
+
+#[test]
+fn named_jit_registry_overwrites_same_name() {
+    let args = vec!["x".to_string()];
+    let entry1 = compile_jit("x + 1", &args).expect("compile first named jit");
+    let entry2 = compile_jit("x + 2", &args).expect("compile second named jit");
+    register_named_jit("inner_overwrite", entry1.clone());
+    register_named_jit("inner_overwrite", entry2.clone());
+    let looked = lookup_named_jit("inner_overwrite").expect("lookup overwritten named jit");
+    assert_eq!(looked.func_ptr, entry2.func_ptr);
+}
+
+#[test]
+fn named_jit_call_from_compiled_expression() {
+    let args = vec!["x".to_string()];
+    let inner = compile_jit("x + 1", &args).expect("compile inner function");
+    register_named_jit("inner_add1", inner);
+
+    let outer = compile_jit("inner_add1(x) * 2", &args).expect("compile outer function");
+    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(outer.func_ptr) };
+    let vals = [3.0_f64];
+    assert_eq!(f(vals.as_ptr()), 8.0);
+}
+
+#[test]
+fn named_jit_call_from_compiled_expression_five_args() {
+    let inner_args = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+        "e".to_string(),
+    ];
+    let inner = compile_jit("a + b + c + d + e", &inner_args).expect("compile inner five-arg function");
+    register_named_jit("inner_sum5", inner);
+
+    let outer = compile_jit(
+        "inner_sum5(a, b, c, d, e) * 2",
+        &inner_args,
+    )
+    .expect("compile outer five-arg function");
+    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(outer.func_ptr) };
+    let vals = [1.0_f64, 2.0, 3.0, 4.0, 5.0];
+    assert_eq!(f(vals.as_ptr()), 30.0);
+}
+
+#[test]
+fn named_jit_invoke_helper_five_args_direct() {
+    let inner_args = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+        "e".to_string(),
+    ];
+    let inner = compile_jit("a + b + c + d + e", &inner_args).expect("compile inner five-arg function");
+    let out = crate::py::jit::codegen::iris_jit_invoke_5(
+        inner.func_ptr as i64,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+    );
+    assert_eq!(out, 15.0);
+}
+
+#[test]
+fn named_jit_call_from_compiled_expression_twelve_args() {
+    let inner_args = vec![
+        "a0".to_string(),
+        "a1".to_string(),
+        "a2".to_string(),
+        "a3".to_string(),
+        "a4".to_string(),
+        "a5".to_string(),
+        "a6".to_string(),
+        "a7".to_string(),
+        "a8".to_string(),
+        "a9".to_string(),
+        "a10".to_string(),
+        "a11".to_string(),
+    ];
+    let inner = compile_jit(
+        "a0+a1+a2+a3+a4+a5+a6+a7+a8+a9+a10+a11",
+        &inner_args,
+    )
+    .expect("compile inner twelve-arg function");
+    register_named_jit("inner_sum12", inner);
+
+    let outer = compile_jit(
+        "inner_sum12(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) * 2",
+        &inner_args,
+    )
+    .expect("compile outer twelve-arg function");
+    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(outer.func_ptr) };
+    let vals = [1.0_f64, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    assert_eq!(f(vals.as_ptr()), 24.0);
+}
+
+#[test]
+fn named_jit_invoke_helper_sixteen_args_direct() {
+    let inner_args = vec![
+        "a0".to_string(),
+        "a1".to_string(),
+        "a2".to_string(),
+        "a3".to_string(),
+        "a4".to_string(),
+        "a5".to_string(),
+        "a6".to_string(),
+        "a7".to_string(),
+        "a8".to_string(),
+        "a9".to_string(),
+        "a10".to_string(),
+        "a11".to_string(),
+        "a12".to_string(),
+        "a13".to_string(),
+        "a14".to_string(),
+        "a15".to_string(),
+    ];
+    let inner = compile_jit(
+        "a0+a1+a2+a3+a4+a5+a6+a7+a8+a9+a10+a11+a12+a13+a14+a15",
+        &inner_args,
+    )
+    .expect("compile inner sixteen-arg function");
+
+    let out = crate::py::jit::codegen::iris_jit_invoke_16(
+        inner.func_ptr as i64,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    );
+    assert_eq!(out, 16.0);
 }
 
 #[test]
@@ -661,6 +824,37 @@ fn execute_jit_vectorizes_non_f64_buffers() {
             .extract()
             .unwrap();
         assert_eq!(i32_vals, vec![2.0, 3.0, 8.0]);
+    });
+}
+
+#[test]
+fn execute_jit_vectorizes_with_trailing_count() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("x * 2", &args).expect("compile trailing count vectorized test");
+        let tuple = PyTuple::new(py, &[3.0_f64.into_py(py), 4_i64.into_py(py)]);
+        let out_obj = execute_jit_func(py, &entry, tuple).expect("execute trailing count vectorized");
+        let out: Vec<f64> = out_obj
+            .as_ref(py)
+            .call_method0("tolist")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(out, vec![6.0, 6.0, 6.0, 6.0]);
+    });
+}
+
+#[test]
+fn execute_jit_vectorize_with_negative_count_errors() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let args = vec!["x".to_string()];
+        let entry = compile_jit("x + 1", &args).expect("compile negative count test");
+        let tuple = PyTuple::new(py, &[2.0_f64.into_py(py), (-1_i64).into_py(py)]);
+        let err = execute_jit_func(py, &entry, tuple).expect_err("negative count should error");
+        let msg = err.to_string();
+        assert!(msg.contains("count"), "unexpected error message: {msg}");
     });
 }
 

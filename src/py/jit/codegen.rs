@@ -56,6 +56,9 @@ static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
 static JIT_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, JitEntry>>> =
     once_cell::sync::OnceCell::new();
 
+static NAMED_JIT_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<String, JitEntry>>> =
+    once_cell::sync::OnceCell::new();
+
 #[derive(Clone)]
 struct QuantumStats {
     ewma_ns: f64,
@@ -94,6 +97,277 @@ pub fn lookup_jit(func_key: usize) -> Option<JitEntry> {
     JIT_REGISTRY
         .get()
         .and_then(|map| map.lock().unwrap().get(&func_key).cloned())
+}
+
+pub fn register_named_jit(name: &str, entry: JitEntry) {
+    let map = NAMED_JIT_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    guard.insert(name.to_string(), entry);
+}
+
+pub fn lookup_named_jit(name: &str) -> Option<JitEntry> {
+    NAMED_JIT_REGISTRY
+        .get()
+        .and_then(|map| map.lock().unwrap().get(name).cloned())
+}
+
+fn invoke_named_entry(func_ptr: i64, args: &[f64]) -> f64 {
+    let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(func_ptr as usize) };
+    f(args.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_0(func_ptr: i64) -> f64 {
+    let args: [f64; 0] = [];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_1(func_ptr: i64, a0: f64) -> f64 {
+    let args = [a0];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_2(func_ptr: i64, a0: f64, a1: f64) -> f64 {
+    let args = [a0, a1];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_3(func_ptr: i64, a0: f64, a1: f64, a2: f64) -> f64 {
+    let args = [a0, a1, a2];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_4(func_ptr: i64, a0: f64, a1: f64, a2: f64, a3: f64) -> f64 {
+    let args = [a0, a1, a2, a3];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_5(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_6(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_7(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_8(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_9(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_10(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_11(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_12(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+    a11: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_13(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+    a11: f64,
+    a12: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_14(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+    a11: f64,
+    a12: f64,
+    a13: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_15(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+    a11: f64,
+    a12: f64,
+    a13: f64,
+    a14: f64,
+) -> f64 {
+    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14];
+    invoke_named_entry(func_ptr, &args)
+}
+
+#[no_mangle]
+pub extern "C" fn iris_jit_invoke_16(
+    func_ptr: i64,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    a6: f64,
+    a7: f64,
+    a8: f64,
+    a9: f64,
+    a10: f64,
+    a11: f64,
+    a12: f64,
+    a13: f64,
+    a14: f64,
+    a15: f64,
+) -> f64 {
+    let args = [
+        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15,
+    ];
+    invoke_named_entry(func_ptr, &args)
 }
 
 pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
@@ -286,7 +560,24 @@ where
             let isa = isa_builder
                 .finish(settings::Flags::new(flag_builder))
                 .expect("failed to create ISA");
-            let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+            let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+            builder.symbol("iris_jit_invoke_0", iris_jit_invoke_0 as *const u8);
+            builder.symbol("iris_jit_invoke_1", iris_jit_invoke_1 as *const u8);
+            builder.symbol("iris_jit_invoke_2", iris_jit_invoke_2 as *const u8);
+            builder.symbol("iris_jit_invoke_3", iris_jit_invoke_3 as *const u8);
+            builder.symbol("iris_jit_invoke_4", iris_jit_invoke_4 as *const u8);
+            builder.symbol("iris_jit_invoke_5", iris_jit_invoke_5 as *const u8);
+            builder.symbol("iris_jit_invoke_6", iris_jit_invoke_6 as *const u8);
+            builder.symbol("iris_jit_invoke_7", iris_jit_invoke_7 as *const u8);
+            builder.symbol("iris_jit_invoke_8", iris_jit_invoke_8 as *const u8);
+            builder.symbol("iris_jit_invoke_9", iris_jit_invoke_9 as *const u8);
+            builder.symbol("iris_jit_invoke_10", iris_jit_invoke_10 as *const u8);
+            builder.symbol("iris_jit_invoke_11", iris_jit_invoke_11 as *const u8);
+            builder.symbol("iris_jit_invoke_12", iris_jit_invoke_12 as *const u8);
+            builder.symbol("iris_jit_invoke_13", iris_jit_invoke_13 as *const u8);
+            builder.symbol("iris_jit_invoke_14", iris_jit_invoke_14 as *const u8);
+            builder.symbol("iris_jit_invoke_15", iris_jit_invoke_15 as *const u8);
+            builder.symbol("iris_jit_invoke_16", iris_jit_invoke_16 as *const u8);
             *opt = Some(JITModule::new(builder));
         }
         let module = opt.as_mut().unwrap();
@@ -494,13 +785,19 @@ fn gen_expr(
             if let Some(v) = locals.get(name) {
                 return *v;
             }
+            if let Some(idx) = arg_names.iter().position(|n| n == name) {
+                let offset = (idx as i64) * 8;
+                let offset_const = fb.ins().iconst(types::I64, offset);
+                let addr1 = fb.ins().iadd(ptr, offset_const);
+                return fb.ins().load(types::F64, MemFlags::new(), addr1, 0);
+            }
             // treat named constants
             match name.as_str() {
                 "pi" => return fb.ins().f64const(std::f64::consts::PI),
                 "e" => return fb.ins().f64const(std::f64::consts::E),
                 _ => {}
             }
-            let idx = arg_names.iter().position(|n| n == name).unwrap_or(0);
+            let idx = 0;
             let offset = (idx as i64) * 8;
             let offset_const = fb.ins().iconst(types::I64, offset);
             let addr1 = fb.ins().iadd(ptr, offset_const);
@@ -960,6 +1257,52 @@ fn gen_expr(
                 let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
                 let cond = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
                 return fb.ins().select(cond, a, b);
+            }
+
+            if let Some(named) = lookup_named_jit(&symbol) {
+                if named.arg_count == args.len() {
+                    let helper_name = match args.len() {
+                        0 => Some("iris_jit_invoke_0"),
+                        1 => Some("iris_jit_invoke_1"),
+                        2 => Some("iris_jit_invoke_2"),
+                        3 => Some("iris_jit_invoke_3"),
+                        4 => Some("iris_jit_invoke_4"),
+                        5 => Some("iris_jit_invoke_5"),
+                        6 => Some("iris_jit_invoke_6"),
+                        7 => Some("iris_jit_invoke_7"),
+                        8 => Some("iris_jit_invoke_8"),
+                        9 => Some("iris_jit_invoke_9"),
+                        10 => Some("iris_jit_invoke_10"),
+                        11 => Some("iris_jit_invoke_11"),
+                        12 => Some("iris_jit_invoke_12"),
+                        13 => Some("iris_jit_invoke_13"),
+                        14 => Some("iris_jit_invoke_14"),
+                        15 => Some("iris_jit_invoke_15"),
+                        16 => Some("iris_jit_invoke_16"),
+                        _ => None,
+                    };
+
+                    if let Some(helper_name) = helper_name {
+                        let mut arg_vals = Vec::with_capacity(args.len() + 1);
+                        arg_vals.push(fb.ins().iconst(types::I64, named.func_ptr as i64));
+                        for a in args {
+                            arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
+                        }
+
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64));
+                        for _ in 0..args.len() {
+                            sig.params.push(AbiParam::new(types::F64));
+                        }
+                        sig.returns.push(AbiParam::new(types::F64));
+                        let func_id = module
+                            .declare_function(helper_name, Linkage::Import, &sig)
+                            .expect("failed to declare named jit invoke helper");
+                        let local = module.declare_func_in_func(func_id, &mut fb.func);
+                        let call = fb.ins().call(local, &arg_vals);
+                        return fb.inst_results(call)[0];
+                    }
+                }
             }
 
             if (symbol == "break_if" || symbol == "loop_break_if"
@@ -1634,6 +1977,63 @@ fn reduction_step(mode: ReductionMode, acc: &mut f64, value: f64) -> bool {
 pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::PyTuple) -> pyo3::PyResult<pyo3::PyObject> {
     let arg_count = args.len();
     let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
+
+    // 0. Trailing-count vectorization mode: call with N scalar args matching
+    // the compiled signature, plus one final integer count to request a
+    // vectorized return of repeated evaluations.
+    if arg_count == entry.arg_count + 1 {
+        if let Ok(count_item) = args.get_item(arg_count - 1) {
+            if let Ok(count_i64) = count_item.extract::<i64>() {
+                if count_i64 < 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "count must be non-negative",
+                    ));
+                }
+                let count = count_i64 as usize;
+
+                const MAX_FAST_ARGS: usize = 8;
+                let mut results = Vec::with_capacity(count);
+                if entry.arg_count <= MAX_FAST_ARGS {
+                    let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+                    for i in 0..entry.arg_count {
+                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
+                        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
+                            return Err(pyo3::PyErr::fetch(py));
+                        }
+                        stack_args[i] = val;
+                    }
+                    for _ in 0..count {
+                        results.push(f(stack_args.as_ptr()));
+                    }
+                } else {
+                    let mut heap_args = Vec::with_capacity(entry.arg_count);
+                    for i in 0..entry.arg_count {
+                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
+                        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
+                            return Err(pyo3::PyErr::fetch(py));
+                        }
+                        heap_args.push(val);
+                    }
+                    for _ in 0..count {
+                        results.push(f(heap_args.as_ptr()));
+                    }
+                }
+
+                let byte_slice = unsafe {
+                    std::slice::from_raw_parts(
+                        results.as_ptr() as *const u8,
+                        results.len() * std::mem::size_of::<f64>(),
+                    )
+                };
+                let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
+                let array_mod = py.import("array")?;
+                let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
+                return Ok(array_obj.into_py(py));
+            }
+        }
+    }
 
     // Speculative fast path using cached type profile.
     if let Some(profile) = lookup_exec_profile(entry.func_ptr) {

@@ -146,7 +146,11 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                     # executing the original Python function.  This keeps the
                     # decorator non‑fatal when compilation is not possible.
                     msg = str(e)
-                    if "no JIT entry" in msg or "failed to compile" in msg:
+                    if (
+                        "no JIT entry" in msg
+                        or "failed to compile" in msg
+                        or "jit panic" in msg
+                    ):
                         return func(*args, **kwargs)
                     raise
                 reduction_mode: Optional[str] = None

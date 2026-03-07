@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::{any::Any, panic::{catch_unwind, AssertUnwindSafe}};
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
@@ -32,6 +33,7 @@ use crate::py::jit::codegen::{
     execute_registered_jit,
     register_jit,
     register_quantum_jit,
+    register_named_jit,
 };
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -74,6 +76,34 @@ where
 {
     if jit_logging_enabled() {
         eprintln!("{}", msg());
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+#[cfg(feature = "pyo3")]
+fn execute_registered_jit_guarded(
+    py: Python,
+    func_key: usize,
+    args: &PyTuple,
+) -> Option<PyResult<PyObject>> {
+    match catch_unwind(AssertUnwindSafe(|| execute_registered_jit(py, func_key, args))) {
+        Ok(res) => res,
+        Err(payload) => {
+            let msg = panic_payload_to_string(payload);
+            Some(Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "jit panic: {}",
+                msg
+            ))))
+        }
     }
 }
 
@@ -220,16 +250,43 @@ fn register_offload(
         } else if s == "jit" {
             if let (Some(expr), Some(args)) = (source_expr.clone(), arg_names.clone()) {
                 let key = func.as_ptr() as usize;
+                let func_name = Python::with_gil(|py| {
+                    func.as_ref(py)
+                        .getattr("__name__")
+                        .ok()
+                        .and_then(|n| n.extract::<String>().ok())
+                });
                 if quantum_speculation_enabled() {
-                    let entries = compile_jit_quantum(&expr, &args);
+                    let entries = match catch_unwind(AssertUnwindSafe(|| compile_jit_quantum(&expr, &args))) {
+                        Ok(entries) => entries,
+                        Err(payload) => {
+                            let msg = panic_payload_to_string(payload);
+                            jit_log(|| format!("[Iris][jit] panic while compiling quantum variants '{}': {}", expr, msg));
+                            Vec::new()
+                        }
+                    };
                     if !entries.is_empty() {
+                        if let Some(name) = func_name.as_deref() {
+                            register_named_jit(name, entries[0].clone());
+                        }
                         register_quantum_jit(key, entries);
                         jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
                     } else {
                         jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
                     }
                 } else {
-                    if let Some(entry) = compile_jit(&expr, &args) {
+                    let maybe_entry = match catch_unwind(AssertUnwindSafe(|| compile_jit(&expr, &args))) {
+                        Ok(entry) => entry,
+                        Err(payload) => {
+                            let msg = panic_payload_to_string(payload);
+                            jit_log(|| format!("[Iris][jit] panic while compiling expr '{}': {}", expr, msg));
+                            None
+                        }
+                    };
+                    if let Some(entry) = maybe_entry {
+                        if let Some(name) = func_name.as_deref() {
+                            register_named_jit(name, entry.clone());
+                        }
                         register_jit(key, entry);
                         jit_log(|| format!("[Iris][jit] compiled JIT for function ptr={}", key));
                     } else {
@@ -258,9 +315,12 @@ fn offload_call(
     kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(res) = execute_registered_jit(py, key, args) {
+    if let Some(res) = execute_registered_jit_guarded(py, key, args) {
         if let Ok(obj) = res {
             return Ok(obj);
+        }
+        if let Err(err) = &res {
+            jit_log(|| format!("[Iris][jit] guarded execution failed in offload_call; falling back: {}", err));
         }
     }
 
@@ -298,7 +358,7 @@ fn call_jit(
     _kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(res) = execute_registered_jit(py, key, args) {
+    if let Some(res) = execute_registered_jit_guarded(py, key, args) {
         return res;
     }
     Err(pyo3::exceptions::PyRuntimeError::new_err("no JIT entry found"))

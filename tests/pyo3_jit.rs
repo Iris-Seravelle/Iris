@@ -2,6 +2,47 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 #[tokio::test]
+async fn py_jit_offload_falls_back_on_jit_error() {
+    pyo3::prepare_freethreaded_python();
+
+    Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let register = module
+            .getattr(py, "register_offload")
+            .expect("register_offload not present");
+        let offcall = module
+            .getattr(py, "offload_call")
+            .expect("offload_call not present");
+
+        let locals = PyDict::new(py);
+        py.run("def variadic(*xs): return float(sum(xs))", None, Some(locals))
+            .unwrap();
+        let variadic = locals.get_item("variadic").unwrap().to_object(py);
+
+        let _ = register
+            .call1(
+                py,
+                (
+                    variadic.clone(),
+                    Some("jit"),
+                    Some("float"),
+                    Some("x * 2".to_string()),
+                    Some(vec!["x".to_string()]),
+                ),
+            )
+            .unwrap();
+
+        let args = PyTuple::new(py, &[1.0_f64, 2.0_f64]);
+        let out: f64 = offcall
+            .call1(py, (variadic.clone(), args, Option::<&PyDict>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(out, 3.0);
+    });
+}
+
+#[tokio::test]
 async fn py_jit_offload_decorator_async() {
     pyo3::prepare_freethreaded_python();
 
