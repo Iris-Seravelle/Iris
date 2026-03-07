@@ -125,7 +125,9 @@ class TestJitFallback(unittest.TestCase):
         try:
             def fake_call_jit(_func, _args, _kwargs):
                 calls["jit"] += 1
-                # mimic old aggressive mode behavior: evaluate only return expr
+                if isinstance(_args[0], (int, float)):
+                    return (_args[0] / _args[2]) + _args[1]
+                # mimic old aggressive mode behavior for vector path
                 return _args[0]
 
             def fake_register_offload(*_args, **_kwargs):
@@ -149,6 +151,72 @@ class TestJitFallback(unittest.TestCase):
             out = branch_like(prices, vols, strikes)
             self.assertEqual(len(out), 3)
             self.assertGreaterEqual(calls["register"], 1)
+            self.assertEqual(calls["jit"], 2)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_inlined_assignments_use_scalar_jit_path(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0, "register": 0}
+        seen = {"src": None}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return 123.0
+
+            def fake_register_offload(_func, _strategy, _return_type, src, _arg_names):
+                calls["register"] += 1
+                seen["src"] = src
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def calc(price, strike, vol):
+                x = price / strike
+                y = x + vol
+                return y * 2
+
+            out = calc(100.0, 105.0, 0.2)
+            self.assertEqual(out, 123.0)
+            self.assertGreaterEqual(calls["register"], 1)
+            self.assertEqual(calls["jit"], 1)
+            self.assertIsNotNone(seen["src"])
+
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_inlined_if_else_use_scalar_jit_path(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                return 7.0
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branchy(x, y):
+                z = x - y
+                if z > 0:
+                    out = z * 2
+                else:
+                    out = y - x
+                return out + 1
+
+            out = branchy(3.0, 2.0)
+            self.assertEqual(out, 7.0)
             self.assertEqual(calls["jit"], 1)
         finally:
             jit_mod.call_jit = original_call_jit

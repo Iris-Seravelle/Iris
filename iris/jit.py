@@ -108,11 +108,90 @@ class _NameSubstituter(ast.NodeTransformer):
         return node
 
 
+def _subst_expr(expr: ast.AST, env: dict[str, ast.AST]) -> ast.AST:
+    out = copy.deepcopy(expr)
+    for name, value in env.items():
+        out = _NameSubstituter(name, value).visit(out)
+    return ast.fix_missing_locations(out)
+
+
+def _merge_branch_env(cond_expr: ast.AST, left: dict[str, ast.AST], right: dict[str, ast.AST]) -> Optional[dict[str, ast.AST]]:
+    merged: dict[str, ast.AST] = {}
+    keys = set(left.keys()) | set(right.keys())
+    for key in keys:
+        if key not in left or key not in right:
+            return None
+        lv = left[key]
+        rv = right[key]
+        if ast.dump(lv) == ast.dump(rv):
+            merged[key] = lv
+        else:
+            merged[key] = ast.IfExp(
+                test=copy.deepcopy(cond_expr),
+                body=copy.deepcopy(lv),
+                orelse=copy.deepcopy(rv),
+            )
+    return merged
+
+
+def _lower_block(stmts: list[ast.stmt], env: dict[str, ast.AST]) -> tuple[dict[str, ast.AST], Optional[ast.AST]]:
+    current = dict(env)
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return):
+            if stmt.value is None:
+                return current, None
+            return current, _subst_expr(stmt.value, current)
+
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            current[stmt.targets[0].id] = _subst_expr(stmt.value, current)
+            continue
+
+        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+            target_name = stmt.target.id
+            left_expr = copy.deepcopy(current.get(target_name, ast.Name(id=target_name, ctx=ast.Load())))
+            right_expr = _subst_expr(stmt.value, current)
+            current[target_name] = ast.BinOp(left=left_expr, op=copy.deepcopy(stmt.op), right=right_expr)
+            current[target_name] = ast.fix_missing_locations(current[target_name])
+            continue
+
+        if isinstance(stmt, ast.If):
+            cond_expr = _subst_expr(stmt.test, current)
+            then_env, then_ret = _lower_block(list(stmt.body), dict(current))
+            else_env, else_ret = _lower_block(list(stmt.orelse), dict(current))
+
+            if then_ret is not None and else_ret is not None:
+                return current, ast.IfExp(test=cond_expr, body=then_ret, orelse=else_ret)
+            if (then_ret is None) != (else_ret is None):
+                return current, None
+
+            merged = _merge_branch_env(cond_expr, then_env, else_env)
+            if merged is None:
+                return current, None
+            current = merged
+            continue
+
+        return current, None
+
+    return current, None
+
+
 def _extract_return_expr_plan(fn_node: ast.FunctionDef) -> Optional[tuple[str, list[str]]]:
     stmts = _strip_docstring(list(fn_node.body))
     if len(stmts) == 1 and isinstance(stmts[0], ast.Return) and stmts[0].value is not None:
         return ast.unparse(stmts[0].value), []
     return None
+
+
+def _extract_inlined_expr_plan(fn_node: ast.FunctionDef) -> Optional[str]:
+    stmts = _strip_docstring(list(fn_node.body))
+    _env, ret_expr = _lower_block(stmts, {})
+    if ret_expr is None:
+        return None
+    return ast.unparse(ret_expr)
 
 
 def _extract_last_return_expr(fn_node: ast.FunctionDef) -> Optional[str]:
@@ -313,10 +392,14 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                         if expr_plan is not None:
                             src, _ = expr_plan
                         else:
-                            src = None
-                            if arg_names is not None:
-                                loop_plan = _extract_stateful_loop_plan(node, arg_names)
-                            aggressive_src = _extract_last_return_expr(node)
+                            inlined = _extract_inlined_expr_plan(node)
+                            if inlined is not None:
+                                src = inlined
+                            else:
+                                src = None
+                                if arg_names is not None:
+                                    loop_plan = _extract_stateful_loop_plan(node, arg_names)
+                                aggressive_src = _extract_last_return_expr(node)
                         break
             except Exception:
                 pass
@@ -380,6 +463,8 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                             or "failed to compile" in msg
                             or "jit panic" in msg
                         ):
+                            if any(_is_vector_like(a) for a in args):
+                                return _vectorized_python_fallback(func, args, kwargs)
                             return func(*args, **kwargs)
                         raise
                     reduction_mode: Optional[str] = None
@@ -392,7 +477,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                         reduction_mode = "all"
 
                     try:
-                        if hasattr(res, "__iter__") and not isinstance(res, (float, int)):
+                        if reduction_mode is not None and hasattr(res, "__iter__") and not isinstance(res, (float, int)):
                             if reduction_mode == "any":
                                 return 1.0 if any(float(v) != 0.0 for v in res) else 0.0
                             if reduction_mode == "all":
