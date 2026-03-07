@@ -13,6 +13,7 @@ import inspect
 import textwrap
 import warnings
 import copy
+import array as _array
 from typing import Callable, Optional, Any
 
 try:
@@ -111,6 +112,14 @@ def _extract_return_expr_plan(fn_node: ast.FunctionDef) -> Optional[tuple[str, l
     stmts = _strip_docstring(list(fn_node.body))
     if len(stmts) == 1 and isinstance(stmts[0], ast.Return) and stmts[0].value is not None:
         return ast.unparse(stmts[0].value), []
+    return None
+
+
+def _extract_last_return_expr(fn_node: ast.FunctionDef) -> Optional[str]:
+    stmts = _strip_docstring(list(fn_node.body))
+    for stmt in reversed(stmts):
+        if isinstance(stmt, ast.Return) and stmt.value is not None:
+            return ast.unparse(stmt.value)
     return None
 
 
@@ -237,6 +246,39 @@ def _extract_stateful_loop_plan(
     }
 
 
+def _is_vector_like(value: Any) -> bool:
+    if isinstance(value, (str, bytes, bytearray, dict)):
+        return False
+    return hasattr(value, "__len__") and hasattr(value, "__getitem__")
+
+
+def _vectorized_python_fallback(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    vector_positions: list[int] = []
+    vector_len: Optional[int] = None
+    for idx, arg in enumerate(args):
+        if not _is_vector_like(arg):
+            continue
+        current_len = len(arg)
+        if vector_len is None:
+            vector_len = current_len
+        elif current_len != vector_len:
+            raise ValueError("vectorized fallback inputs must have matching lengths")
+        vector_positions.append(idx)
+
+    if vector_len is None:
+        return func(*args, **kwargs)
+
+    out: list[Any] = []
+    for i in range(vector_len):
+        iter_args = [arg[i] if idx in vector_positions else arg for idx, arg in enumerate(args)]
+        out.append(func(*iter_args, **kwargs))
+
+    try:
+        return _array.array("d", (float(v) for v in out))
+    except Exception:
+        return out
+
+
 def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator that marks a function for execution on the Iris JIT/actor pool.
 
@@ -254,6 +296,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
         src: Optional[str] = None
         arg_names: Optional[list[str]] = None
         loop_plan: Optional[dict[str, Any]] = None
+        aggressive_src: Optional[str] = None
         sig: Optional[inspect.Signature] = None
 
         if strategy == "jit":
@@ -273,6 +316,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                             src = None
                             if arg_names is not None:
                                 loop_plan = _extract_stateful_loop_plan(node, arg_names)
+                            aggressive_src = _extract_last_return_expr(node)
                         break
             except Exception:
                 pass
@@ -292,7 +336,37 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             
         elif strategy == "jit" and call_jit is not None:
             if src is None and loop_plan is None:
-                return func
+                if aggressive_src is not None and arg_names is not None and register_offload is not None:
+                    try:
+                        register_offload(func, strategy, return_type, aggressive_src, arg_names)
+                    except Exception:
+                        pass
+
+                    @functools.wraps(func)
+                    def aggressive_vector_wrapper(*args: Any, **kwargs: Any) -> Any:
+                        has_vector = any(_is_vector_like(a) for a in args)
+                        if has_vector:
+                            try:
+                                return call_jit(func, args, kwargs)
+                            except RuntimeError as e:
+                                msg = str(e)
+                                if (
+                                    "no JIT entry" in msg
+                                    or "failed to compile" in msg
+                                    or "jit panic" in msg
+                                    or "wrong argument count" in msg
+                                ):
+                                    return _vectorized_python_fallback(func, args, kwargs)
+                                raise
+                        return func(*args, **kwargs)
+
+                    return aggressive_vector_wrapper
+
+                @functools.wraps(func)
+                def py_fallback_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    return _vectorized_python_fallback(func, args, kwargs)
+
+                return py_fallback_wrapper
 
             if src is not None:
                 @functools.wraps(func)

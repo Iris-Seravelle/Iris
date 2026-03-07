@@ -1,4 +1,5 @@
 import unittest
+import array
 
 import iris.jit as jit_mod
 
@@ -84,6 +85,71 @@ class TestJitFallback(unittest.TestCase):
             self.assertEqual(out, [1.0, 3.0, 6.0])
             self.assertGreaterEqual(calls["register"], 1)
             self.assertEqual(calls["jit"], 3)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_complex_body_array_inputs_vectorized_fallback(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        try:
+            jit_mod.call_jit = lambda _func, _args, _kwargs: (_ for _ in ()).throw(
+                RuntimeError("no JIT entry found")
+            )
+            jit_mod.register_offload = lambda *a, **k: None
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branch_like(price, vol, strike):
+                x = price / strike
+                return x + vol
+
+            prices = array.array("d", [100.0, 101.0, 102.0])
+            vols = array.array("d", [0.2, 0.2, 0.2])
+            strikes = array.array("d", [105.0, 105.0, 105.0])
+
+            out = branch_like(prices, vols, strikes)
+            self.assertEqual(len(out), 3)
+            self.assertAlmostEqual(float(out[0]), (100.0 / 105.0) + 0.2)
+            self.assertAlmostEqual(float(out[2]), (102.0 / 105.0) + 0.2)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+
+    def test_complex_body_vector_inputs_use_aggressive_jit(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+
+        calls = {"jit": 0, "register": 0}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                calls["jit"] += 1
+                # mimic old aggressive mode behavior: evaluate only return expr
+                return _args[0]
+
+            def fake_register_offload(*_args, **_kwargs):
+                calls["register"] += 1
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branch_like(price, vol, strike):
+                x = price / strike
+                return x + vol
+
+            scalar_out = branch_like(100.0, 0.2, 105.0)
+            self.assertAlmostEqual(float(scalar_out), (100.0 / 105.0) + 0.2)
+
+            prices = array.array("d", [100.0, 101.0, 102.0])
+            vols = array.array("d", [0.2, 0.2, 0.2])
+            strikes = array.array("d", [105.0, 105.0, 105.0])
+            out = branch_like(prices, vols, strikes)
+            self.assertEqual(len(out), 3)
+            self.assertGreaterEqual(calls["register"], 1)
+            self.assertEqual(calls["jit"], 1)
         finally:
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
