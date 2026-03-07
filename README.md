@@ -62,71 +62,6 @@ Built-in fault tolerance follows the “Let it Crash” model.
 * **Structured system messages:** exits, hot swaps, and heartbeats are surfaced as system events for supervisors.
 * **Self-healing factories:** restart logic can re-resolve and reconnect automatically when remote nodes recover.
 
-### 🧠 Experimental JIT & Compute Offload
-A Python decorator (`@iris.offload`) marks CPU-heavy functions for native execution.
-Under the hood Iris either:
-- compiles expression bodies to machine code via Cranelift (`strategy="jit"`), or
-- routes calls to a dedicated Rust actor pool (`strategy="actor"`).
-
-Current JIT support (concise):
-- **Arithmetic:** `+ - * / % **`, unary `+/-`, constants `pi/e`.
-- **Logic:** `and`, `or`, `not`, boolean literals `True/False`.
-- **Comparisons:** `< > <= >= == !=`, including chained comparisons (`a < b < c`).
-- **Conditionals:** Python ternary (`a if cond else b`).
-- **Conditional function form:** `if_else(cond, when_true, when_false)`.
-- **Generator reductions:** `sum(...)`, `any(...)`, `all(...)` over `range(...)` with optional `step` and `if` predicate.
-- **While reductions:** `sum_while(...)`, `any_while(...)`, `all_while(...)` for expression-level while loops.
-- **Container generators:** `sum(...)`, `any(...)`, `all(...)` over runtime containers (`for x_i in x`) including optional `if` predicate.
-- **Loop-control intrinsics:** `break_if|break_when|break_unless(cond, value)` and `continue_if|continue_when|continue_unless(cond, value)` inside generator bodies for reduction control flow.
-- **Guarded loop-control intrinsics:** `break_on_nan(value)` / `continue_on_nan(value)` for NaN-safe reduction paths.
-- **Math calls:** `sin cos tan sinh cosh tanh exp log sqrt pow abs`, and `math.*` variants.
-
-Speculative type inference and execution:
-- Runtime execution profiles are cached per compiled function (scalar, packed-buffer, vectorized-buffer).
-- First successful call establishes a fast-path profile; subsequent calls use the specialized path when shape/types match.
-- On profile mismatch, Iris safely falls back to generic conversion and can adapt to new input shapes.
-
-Quantum speculation (optional):
-- When enabled, Iris compiles multiple JIT variants for the same expression in parallel and tracks runtime latency/failures per variant.
-- The dispatcher adaptively picks the best-performing variant and periodically re-samples alternatives to avoid stale choices.
-- Toggle via env: `IRIS_JIT_QUANTUM=1`, or Python API: `iris.jit.set_quantum_speculation(...)` / `iris.jit.get_quantum_speculation()`.
-
-Supported JIT argument data types:
-- **Scalars:** Python `float`, `int`, and `bool` (converted to native `f64` inputs for JIT ABI).
-- **Buffers / vectorized inputs:** contiguous buffers with element types `f64`, `f32`, signed/unsigned ints, and bool.
-- **Mixed buffers:** multiple vectorized arguments are supported when they share a common logical length.
-
-Reduction execution behavior:
-- Native reduction modes are tracked per compiled entry (`sum` / `any` / `all`).
-- `any` / `all` apply native short-circuit semantics during vectorized execution.
-- For single-argument reduction kernels, non-buffer Python iterables (for example lists/tuples) use a safe sequence fallback path in Rust.
-- `break_*` stops reduction without applying the current element contribution; `continue_*` skips current element contribution.
-- Alias semantics: `*_if` and `*_when` are equivalent; `*_unless(cond, value)` is equivalent to the inverted condition form.
-- `break_on_nan` stops reduction when the candidate value is NaN; `continue_on_nan` skips NaN contributions.
-- `sum_while` executes with an internal iteration safety cap to prevent unbounded JIT loops.
-- `any_while` / `all_while` use native short-circuit while lowering in JIT codegen.
-
-Optimizer highlights:
-- constant folding + algebraic simplification,
-- closed-form rewrites for common linear/quadratic range sums,
-- safe constant evaluation for many bounded loop cases,
-- automatic fallback to Python when compilation is not possible.
-
-Safety hardening highlights:
-- typed-buffer format/item-size validation before execution,
-- unaligned-memory-safe reads for typed buffer decoding,
-- conservative fallback paths when direct zero-copy assumptions are not valid.
-
-Logging is environment-aware and runtime-configurable:
-- env mode: `IRIS_JIT_LOG=1` enables Rust-side JIT debug logs,
-- Python API: `iris.jit.set_jit_logging(...)` and `iris.jit.get_jit_logging()`.
-
-> [!NOTE] 
-> Cranelift’s JIT backend historically relied on x86_64‑only PLT support. When running on
-> aarch64 hardware, the runtime automatically disables PIC mode to avoid PLT relocation
-> generation; offloaded functions still execute correctly but are not position‑independent.
-
-
 ---
 
 ## Technical Deep Dive
@@ -193,59 +128,52 @@ npm run build
 
 ## Usage Examples
 
-### 🧠 Experimental JIT & Compute Offload (Python only)
+### 🧠 JIT & Compute Offload (Python)
+Iris exposes one decorator API for native acceleration:
+
+```python
+@iris.offload(strategy="jit", return_type="float")
+def kernel(...):
+    ...
+```
+
+- `strategy="jit"`: compiles eligible code paths with Cranelift.
+- `strategy="actor"`: executes on a dedicated Rust offload pool.
+
+#### Quick start
 ```python
 import iris
-rt = iris.Runtime()
 
 @iris.offload(strategy="jit", return_type="float")
 def vector_magnitude(x: float, y: float, z: float) -> float:
-    # simple expression gets compiled or dispatched via actor pool
     return (x*x + y*y + z*z) ** 0.5
 
-# call just like a normal Python function; the heavy work runs in native code
 result = vector_magnitude(1.0, 2.0, 3.0)
-print(result)  # 3.7416573867739416
+print(result)
 ```
 
-> [!NOTE] 
-> The offload API also supports `strategy="actor"` for routing to a dedicated compute pool; see `JIT.md` for lower-level internals.
+#### What gets accelerated
+- Scalar expression kernels with arithmetic/logic/comparisons/ternaries and common math calls.
+- Generator reductions (`sum/any/all`) over `range(...)` and runtime containers.
+- While-style reduction helpers (`sum_while`, `any_while`, `all_while`) and loop-control intrinsics.
+- Scalar recurrence loops recognized by the frontend (for/while patterns), including inlined helper calls.
 
-#### JIT Capability Snapshot
-- Arithmetic + power: `+ - * / % **`, unary `+/-`
-- Booleans: `and/or/not`, `True/False`
-- Comparisons: `< > <= >= == !=`, including chains (`x < y < z`)
-- Conditionals: `a if cond else b`
-- Conditional function form: `if_else(cond, when_true, when_false)`
-- Generator reductions: `sum(...)`, `any(...)`, `all(...)` over `range(...)` (with step/predicate)
-- While reduction (MVP): `sum_while(iter, init, cond, step, body)`
-- While reductions: `sum_while(...)`, `any_while(...)`, `all_while(...)`
-- Container generators: `sum(...)`, `any(...)`, `all(...)` over runtime containers, including `if` filters
-- Loop-control intrinsics in generator bodies: `break_if|break_when|break_unless(cond, value)`, `continue_if|continue_when|continue_unless(cond, value)`
-- Guarded loop-control intrinsics: `break_on_nan(value)`, `continue_on_nan(value)`
-- Math: `sin cos tan sinh cosh tanh exp log sqrt pow abs`, including `math.*`
+#### Runtime behavior and safety
+- JIT execution profiles are specialized by observed input shapes and data layouts.
+- Supported scalar inputs: Python `float`, `int`, `bool` (lowered to native `f64` ABI).
+- Supported vectorized buffers: `f64`, `f32`, signed/unsigned integers, and bool.
+- On unsupported syntax, compile miss, panic, or profile mismatch, Iris falls back safely to Python.
 
-#### Speculative Typing + Data Types
-- Speculative profiles are cached per function call-shape for faster repeat execution.
-- Scalar inputs support Python `float`, `int`, and `bool`.
-- Buffer/vectorized inputs support contiguous `f64`, `f32`, signed/unsigned integer, and bool element types.
-- On type/shape mismatch, execution falls back to safe generic conversion logic.
+#### Observability and controls
+- Enable JIT logs: `IRIS_JIT_LOG=1` or `iris.jit.set_jit_logging(...)`.
+- Query logging status: `iris.jit.get_jit_logging()`.
+- Optional multi-variant quantum speculation:
+  - env: `IRIS_JIT_QUANTUM=1`
+  - API: `iris.jit.set_quantum_speculation(...)` / `iris.jit.get_quantum_speculation()`
 
-#### Optimizer Behavior
-- Constant folding + simplification (including boolean/relation folding)
-- Built-in function inlining for `min(x,y)` / `max(x,y)` into branchless selects
-- Loop rewrites for common linear/quadratic forms
-- Constant-bound loop evaluation when safe
-- Exponent shortcuts (`x**0.5 -> sqrt(x)`, `x**-1 -> 1.0/x`)
-
-#### Fallback + Logging
-- JIT compile failure auto-falls back to normal Python execution.
-- Runtime profile mismatch (dtype/shape) also falls back safely.
-- Reduction kernels support safe non-buffer iterable fallback (list/tuple/etc.) when zero-copy buffer paths are unavailable.
-- Enable logs by env: `IRIS_JIT_LOG=1`.
-- Control at runtime from Python:
-    - `iris.jit.set_jit_logging(True|False|None, env_var=None)`
-    - `iris.jit.get_jit_logging()`
+> [!NOTE]
+> On aarch64 targets, Iris automatically adjusts JIT module flags to avoid unsupported relocation paths.
+> For lower-level internals and compiler details, see `JIT.md`.
 
 Iris provides a unified API across both supported languages.
 

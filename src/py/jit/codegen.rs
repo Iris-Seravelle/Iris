@@ -1211,6 +1211,15 @@ fn gen_expr(
                 return fb.ins().select(is_nan, sentinel, value_val);
             }
 
+            if symbol == "let_bind" && args.len() == 3 {
+                if let Expr::Var(var_name) = &args[0] {
+                    let v = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+                    let mut new_locals = locals.clone();
+                    new_locals.insert(var_name.clone(), v);
+                    return gen_expr(&args[2], fb, ptr, arg_names, module, &new_locals);
+                }
+            }
+
             if symbol == "if_else" && args.len() == 3 {
                 let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
                 let then_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);

@@ -192,14 +192,16 @@ class _JitExprNormalizer(ast.NodeTransformer):
         if len(params) != len(node.args):
             return None
 
-        env = {param: copy.deepcopy(arg) for param, arg in zip(params, node.args)}
-        inlined = _subst_expr(
-            body_expr,
-            env,
-            self.fn_globals,
-            self.inline_cache,
-            self.active_inline | {name},
-        )
+        inlined = copy.deepcopy(body_expr)
+        inlined = _JitExprNormalizer(self.fn_globals, self.inline_cache, self.active_inline | {name}).visit(inlined)
+        
+        for param, arg in reversed(list(zip(params, node.args))):
+            inlined = ast.Call(
+                func=ast.Name(id='let_bind', ctx=ast.Load()),
+                args=[ast.Name(id=param, ctx=ast.Load()), copy.deepcopy(arg), inlined],
+                keywords=[]
+            )
+            
         return ast.copy_location(inlined, node)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -233,88 +235,80 @@ def _subst_expr(
     return ast.fix_missing_locations(out)
 
 
-def _merge_branch_env(cond_expr: ast.AST, left: dict[str, ast.AST], right: dict[str, ast.AST]) -> Optional[dict[str, ast.AST]]:
-    merged: dict[str, ast.AST] = {}
-    keys = set(left.keys()) | set(right.keys())
-    for key in keys:
-        if key not in left or key not in right:
-            return None
-        lv = left[key]
-        rv = right[key]
-        if ast.dump(lv) == ast.dump(rv):
-            merged[key] = lv
-        else:
-            merged[key] = ast.IfExp(
-                test=copy.deepcopy(cond_expr),
-                body=copy.deepcopy(lv),
-                orelse=copy.deepcopy(rv),
-            )
-    return merged
-
-
-def _lower_block(
+def _lower_to_expr(
     stmts: list[ast.stmt],
-    env: dict[str, ast.AST],
+    rest_expr: ast.AST,
     fn_globals: Optional[dict[str, Any]] = None,
     inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
     active_inline: Optional[set[str]] = None,
-) -> tuple[dict[str, ast.AST], Optional[ast.AST]]:
-    current = dict(env)
-    for stmt in stmts:
-        if isinstance(stmt, ast.Pass):
-            continue
+) -> Optional[ast.AST]:
+    if not stmts:
+        return rest_expr
 
-        if isinstance(stmt, ast.Return):
-            if stmt.value is None:
-                return current, None
-            return current, _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
+    stmt = stmts[0]
+    next_stmts = stmts[1:]
+    normalizer = _JitExprNormalizer(fn_globals, inline_cache, active_inline)
 
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-        ):
-            current[stmt.targets[0].id] = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
-            continue
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+        target = stmt.targets[0].id
+        val = copy.deepcopy(stmt.value)
+        val = normalizer.visit(val)
+        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        if inner is None:
+            return None
+        return ast.Call(
+            func=ast.Name(id="let_bind", ctx=ast.Load()),
+            args=[ast.Name(id=target, ctx=ast.Load()), val, inner],
+            keywords=[],
+        )
 
-        if (
-            isinstance(stmt, ast.AnnAssign)
-            and isinstance(stmt.target, ast.Name)
-            and stmt.value is not None
-        ):
-            current[stmt.target.id] = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
-            continue
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+        target = stmt.target.id
+        val = copy.deepcopy(stmt.value)
+        val = normalizer.visit(val)
+        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        if inner is None:
+            return None
+        return ast.Call(
+            func=ast.Name(id="let_bind", ctx=ast.Load()),
+            args=[ast.Name(id=target, ctx=ast.Load()), val, inner],
+            keywords=[],
+        )
 
-        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
-            target_name = stmt.target.id
-            left_expr = copy.deepcopy(current.get(target_name, ast.Name(id=target_name, ctx=ast.Load())))
-            right_expr = _subst_expr(stmt.value, current, fn_globals, inline_cache, active_inline)
-            current[target_name] = ast.BinOp(left=left_expr, op=copy.deepcopy(stmt.op), right=right_expr)
-            current[target_name] = ast.fix_missing_locations(current[target_name])
-            continue
+    if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+        target = stmt.target.id
+        right_val = copy.deepcopy(stmt.value)
+        right_val = normalizer.visit(right_val)
+        new_val = ast.BinOp(left=ast.Name(id=target, ctx=ast.Load()), op=copy.deepcopy(stmt.op), right=right_val)
+        inner = _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
+        if inner is None:
+            return None
+        return ast.Call(
+            func=ast.Name(id="let_bind", ctx=ast.Load()),
+            args=[ast.Name(id=target, ctx=ast.Load()), new_val, inner],
+            keywords=[],
+        )
 
-        if isinstance(stmt, ast.If):
-            cond_expr = _subst_expr(stmt.test, current, fn_globals, inline_cache, active_inline)
-            then_env, then_ret = _lower_block(list(stmt.body), dict(current), fn_globals, inline_cache, active_inline)
-            if stmt.orelse:
-                else_env, else_ret = _lower_block(list(stmt.orelse), dict(current), fn_globals, inline_cache, active_inline)
-            else:
-                else_env, else_ret = dict(current), None
+    if isinstance(stmt, ast.If):
+        cond = copy.deepcopy(stmt.test)
+        cond = normalizer.visit(cond)
+        then_expr = _lower_to_expr(list(stmt.body) + next_stmts, copy.deepcopy(rest_expr), fn_globals, inline_cache, active_inline)
+        orelse_stmts = list(stmt.orelse) + next_stmts if stmt.orelse else next_stmts
+        else_expr = _lower_to_expr(orelse_stmts, copy.deepcopy(rest_expr), fn_globals, inline_cache, active_inline)
+        if then_expr is None or else_expr is None:
+            return None
+        return ast.IfExp(test=cond, body=then_expr, orelse=else_expr)
 
-            if then_ret is not None and else_ret is not None:
-                return current, ast.IfExp(test=cond_expr, body=then_ret, orelse=else_ret)
-            if (then_ret is None) != (else_ret is None):
-                return current, None
+    if isinstance(stmt, ast.Return):
+        if stmt.value is None:
+            return rest_expr
+        val = copy.deepcopy(stmt.value)
+        return normalizer.visit(val)
 
-            merged = _merge_branch_env(cond_expr, then_env, else_env)
-            if merged is None:
-                return current, None
-            current = merged
-            continue
+    if isinstance(stmt, ast.Pass) or isinstance(stmt, ast.Expr):
+        return _lower_to_expr(next_stmts, rest_expr, fn_globals, inline_cache, active_inline)
 
-        return current, None
-
-    return current, None
+    return None
 
 
 def _extract_return_expr_plan(
@@ -334,7 +328,7 @@ def _extract_inlined_expr_plan(
     inline_cache: Optional[dict[str, Optional[tuple[list[str], ast.AST]]]] = None,
 ) -> Optional[str]:
     stmts = _strip_docstring(list(fn_node.body))
-    _env, ret_expr = _lower_block(stmts, {}, fn_globals, inline_cache)
+    ret_expr = _lower_to_expr(stmts, ast.Constant(value=0.0), fn_globals, inline_cache)
     if ret_expr is None:
         return None
     return ast.unparse(ret_expr)
@@ -443,43 +437,11 @@ def _extract_stateful_loop_plan(
         return None
 
     state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
-    for stmt in loop_body[:-1]:
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-            and stmt.targets[0].id == state_var
-        ):
-            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
-
-        if (
-            isinstance(stmt, ast.AugAssign)
-            and isinstance(stmt.target, ast.Name)
-            and stmt.target.id == state_var
-        ):
-            rhs = ast.BinOp(
-                left=ast.Name(id=state_var, ctx=ast.Load()),
-                op=stmt.op,
-                right=copy.deepcopy(stmt.value),
-            )
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
-
+    step_expr = _lower_to_expr(loop_body[:-1], state_expr, fn_globals, inline_cache)
+    if step_expr is None:
         return None
 
-    step_src = ast.unparse(state_expr)
+    step_src = ast.unparse(step_expr)
     return {
         "count_arg": count_arg,
         "seed_src": seed_src,
@@ -569,40 +531,8 @@ def _extract_scalar_while_plan(
         return None
 
     state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
-    for stmt in body[:-1]:
-        if isinstance(stmt, ast.Pass):
-            continue
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-            and stmt.targets[0].id == state_var
-        ):
-            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
-        if (
-            isinstance(stmt, ast.AugAssign)
-            and isinstance(stmt.target, ast.Name)
-            and stmt.target.id == state_var
-        ):
-            rhs = ast.BinOp(
-                left=ast.Name(id=state_var, ctx=ast.Load()),
-                op=stmt.op,
-                right=copy.deepcopy(stmt.value),
-            )
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
+    step_expr = _lower_to_expr(body[:-1], state_expr, fn_globals, inline_cache)
+    if step_expr is None:
         return None
 
     return {
@@ -610,7 +540,7 @@ def _extract_scalar_while_plan(
         "iter_var": iter_var,
         "state_var": state_var,
         "seed_src": ast.unparse(_subst_expr(seed_expr, {}, fn_globals, inline_cache)),
-        "step_src": ast.unparse(state_expr),
+        "step_src": ast.unparse(step_expr),
         "step_args": [state_var, iter_var],
     }
 
@@ -727,40 +657,8 @@ def _extract_scalar_for_plan(
         return None
 
     state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
-    for stmt in body:
-        if isinstance(stmt, ast.Pass):
-            continue
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-            and stmt.targets[0].id == state_var
-        ):
-            rhs = ast.fix_missing_locations(copy.deepcopy(stmt.value))
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
-        if (
-            isinstance(stmt, ast.AugAssign)
-            and isinstance(stmt.target, ast.Name)
-            and stmt.target.id == state_var
-        ):
-            rhs = ast.BinOp(
-                left=ast.Name(id=state_var, ctx=ast.Load()),
-                op=stmt.op,
-                right=copy.deepcopy(stmt.value),
-            )
-            state_expr = _subst_expr(
-                rhs,
-                {state_var: state_expr},
-                fn_globals,
-                inline_cache,
-            )
-            continue
+    step_expr = _lower_to_expr(body, state_expr, fn_globals, inline_cache)
+    if step_expr is None:
         return None
 
     return {
@@ -768,7 +666,7 @@ def _extract_scalar_for_plan(
         "iter_var": iter_var,
         "state_var": state_var,
         "seed_src": ast.unparse(_subst_expr(seed_expr, {}, fn_globals, inline_cache)),
-        "step_src": ast.unparse(state_expr),
+        "step_src": ast.unparse(step_expr),
         "step_args": [state_var, iter_var],
     }
 
