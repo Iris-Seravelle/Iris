@@ -31,6 +31,7 @@ use tokio::time::Duration;
 
 type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ErasedMessageHandler = Arc<dyn Fn(mailbox::Message) -> BoxFutureUnit + Send + Sync>;
+const MAX_BEHAVIOR_HISTORY: usize = 16;
 
 #[derive(Clone)]
 struct VirtualActorSpec {
@@ -68,6 +69,10 @@ pub struct Runtime {
     remote_proxies: Arc<DashMap<Pid, (String, Pid)>>,
     /// Reverse lookup from (address, remote_pid) -> local proxy PID.
     proxy_by_remote: Arc<DashMap<(String, Pid), Pid>>,
+    /// Behavior version per actor PID (starts at 1).
+    behavior_versions: Arc<DashMap<Pid, u64>>,
+    /// Recent hot-swapped pointers used for rollback (capped).
+    behavior_history: Arc<DashMap<Pid, Vec<usize>>>,
     /// Optional per-path supervisors (shallow supervisors keyed by path).
     path_supervisors: Arc<DashMap<String, Arc<supervisor::Supervisor>>>,
     /// Maps a child PID to its parent PID for structured concurrency.
@@ -126,6 +131,8 @@ impl Runtime {
             monitor_failure_threshold: Arc::new(Mutex::new(1)),
             remote_proxies: Arc::new(DashMap::new()),
             proxy_by_remote: Arc::new(DashMap::new()),
+            behavior_versions: Arc::new(DashMap::new()),
+            behavior_history: Arc::new(DashMap::new()),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -510,6 +517,8 @@ impl Runtime {
         if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
             self.proxy_by_remote.remove(&(addr.clone(), rpid));
         }
+        self.behavior_versions.remove(&pid);
+        self.behavior_history.remove(&pid);
 
         self.mailboxes.remove(&pid);
         if self.virtual_specs.remove(&pid).is_some() {
@@ -699,8 +708,74 @@ impl Runtime {
     /// Send a Hot Swap signal to the actor.
     pub fn hot_swap(&self, pid: Pid, handler_ptr: usize) {
         if let Some(sender) = self.mailboxes.get(&pid) {
-            let _ = sender.send_system(mailbox::SystemMessage::HotSwap(handler_ptr));
+            if sender
+                .send_system(mailbox::SystemMessage::HotSwap(handler_ptr))
+                .is_ok()
+            {
+                if let Some(mut ver) = self.behavior_versions.get_mut(&pid) {
+                    *ver += 1;
+                } else {
+                    // initial behavior is version 1; first successful swap -> v2
+                    self.behavior_versions.insert(pid, 2);
+                }
+
+                let mut history = self
+                    .behavior_history
+                    .entry(pid)
+                    .or_insert_with(Vec::new);
+                history.push(handler_ptr);
+                if history.len() > MAX_BEHAVIOR_HISTORY {
+                    let overflow = history.len() - MAX_BEHAVIOR_HISTORY;
+                    history.drain(0..overflow);
+                }
+            }
         }
+    }
+
+    /// Return current behavior version for an actor.
+    pub fn behavior_version(&self, pid: Pid) -> u64 {
+        self.behavior_versions
+            .get(&pid)
+            .map(|entry| *entry.value())
+            .unwrap_or(1)
+    }
+
+    /// Roll back behavior by `steps` previously hot-swapped versions.
+    ///
+    /// Returns the new behavior version on success.
+    pub fn rollback_behavior(&self, pid: Pid, steps: usize) -> Result<u64, String> {
+        if steps == 0 {
+            return Ok(self.behavior_version(pid));
+        }
+
+        let target_ptr = {
+            let mut history = self
+                .behavior_history
+                .get_mut(&pid)
+                .ok_or_else(|| "rollback failed: no behavior history".to_string())?;
+
+            if history.len() <= steps {
+                return Err("rollback failed: insufficient behavior history".to_string());
+            }
+
+            let target_idx = history.len() - 1 - steps;
+            let target_ptr = history[target_idx];
+            history.truncate(target_idx + 1);
+            target_ptr
+        };
+
+        let sender = self
+            .mailboxes
+            .get(&pid)
+            .ok_or_else(|| "rollback failed: pid not found".to_string())?;
+
+        sender
+            .send_system(mailbox::SystemMessage::HotSwap(target_ptr))
+            .map_err(|_| "rollback failed: could not send hot swap".to_string())?;
+
+        let next = self.behavior_version(pid).saturating_sub(steps as u64).max(1);
+        self.behavior_versions.insert(pid, next);
+        Ok(next)
     }
 
     pub fn spawn_actor<H, Fut>(&self, handler: H) -> Pid
@@ -1345,6 +1420,8 @@ impl Runtime {
         if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
             self.proxy_by_remote.remove(&(addr.clone(), rpid));
         }
+        self.behavior_versions.remove(&pid);
+        self.behavior_history.remove(&pid);
         // remove the pid from its parent's child list (if any)
         if let Some((_, parent)) = self.parent_of.remove(&pid) {
             if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {
@@ -1361,6 +1438,8 @@ impl Runtime {
                 // drop reverse mapping and close mailbox to stop actor
                 let _ = self.parent_of.remove(&child);
                 self.mailboxes.remove(&child);
+                self.behavior_versions.remove(&child);
+                self.behavior_history.remove(&child);
             }
         }
     }
@@ -1648,5 +1727,67 @@ mod tests {
         sleep(Duration::from_millis(20)).await;
 
         assert!(!rt.is_alive(pid));
+    }
+
+    #[tokio::test]
+    async fn behavior_version_increments_on_hot_swap() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_observed_handler(8);
+
+        assert_eq!(rt.behavior_version(pid), 1);
+
+        rt.hot_swap(pid, 0xA11CE);
+        sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(rt.behavior_version(pid), 2);
+    }
+
+    #[tokio::test]
+    async fn rollback_behavior_replays_previous_handler_ptr() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_observed_handler(8);
+
+        rt.hot_swap(pid, 0xBEEF);
+        rt.hot_swap(pid, 0xCAFE);
+        sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(rt.behavior_version(pid), 3);
+        let rolled = rt.rollback_behavior(pid, 1).expect("rollback should succeed");
+        assert_eq!(rolled, 2);
+        assert_eq!(rt.behavior_version(pid), 2);
+
+        let swaps = timeout(Duration::from_secs(1), async {
+            loop {
+                let msgs = rt
+                    .get_observed_messages(pid)
+                    .expect("observed actor should still exist");
+                let mut swaps = Vec::new();
+                for msg in msgs {
+                    if let mailbox::Message::System(mailbox::SystemMessage::HotSwap(ptr)) = msg {
+                        swaps.push(ptr);
+                    }
+                }
+                if swaps.len() >= 3 {
+                    break swaps;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for hot swap replay messages");
+
+        assert_eq!(swaps, vec![0xBEEF, 0xCAFE, 0xBEEF]);
+    }
+
+    #[tokio::test]
+    async fn rollback_behavior_requires_enough_history() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_observed_handler(8);
+
+        rt.hot_swap(pid, 0xBEEF);
+        sleep(Duration::from_millis(20)).await;
+
+        let err = rt.rollback_behavior(pid, 1).expect_err("rollback should fail");
+        assert!(err.contains("history"));
     }
 }

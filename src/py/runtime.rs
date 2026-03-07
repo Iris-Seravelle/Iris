@@ -246,6 +246,16 @@ impl PyRuntime {
         Ok(())
     }
 
+    fn behavior_version(&self, pid: u64) -> PyResult<u64> {
+        Ok(self.inner.behavior_version(pid))
+    }
+
+    fn rollback_behavior(&self, pid: u64, steps: usize) -> PyResult<u64> {
+        self.inner
+            .rollback_behavior(pid, steps)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
     fn spawn_observed_handler(&self, budget: usize) -> u64 {
         self.inner.spawn_observed_handler(budget)
     }

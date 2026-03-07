@@ -28,8 +28,8 @@
 * [x] **Structured Concurrency**
   Child actors automatically terminate with their parent.
 
-* [ ] **Behavior Versioning**
-  Track hot-swapped logic versions with rollback support.
+* [x] **Behavior Versioning**
+  Track hot-swapped logic versions with rollback support (bounded history).
 
 ---
 

@@ -458,6 +458,19 @@ impl NodeRuntime {
         Ok(())
     }
 
+    #[napi]
+    pub fn behavior_version(&self, pid: i64) -> u32 {
+        self.inner.behavior_version(pid as u64) as u32
+    }
+
+    #[napi]
+    pub fn rollback_behavior(&self, pid: i64, steps: u32) -> Result<u32> {
+        self.inner
+            .rollback_behavior(pid as u64, steps as usize)
+            .map(|v| v as u32)
+            .map_err(|e| Error::from_reason(e))
+    }
+
     // --- Observation ---
 
     #[napi]

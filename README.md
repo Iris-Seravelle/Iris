@@ -50,7 +50,7 @@ Update live application logic without stopping the runtime.
 * **Zero downtime:** replace Python or Node.js handlers in memory without losing mailbox state.
 * **Safe transition:** in-flight work completes on old logic; new messages use new logic.
 
-### 🌐 Global Service Discovery (Phase 7 Enhanced)
+### 🌐 Global Service Discovery
 Actors are first-class network services.
 * **Name registry:** register human-readable names (for example, `"auth-provider"`) with `register`/`unregister` and resolve with `whereis`.
 * **Async discovery:** resolve remote service PIDs with Python `await` or Node.js Promises without blocking runtime progress.
@@ -503,6 +503,10 @@ rt.send(pid, b"test") # Prints "Logic A"
 
 rt.hot_swap(pid, behavior_b)
 rt.send(pid, b"test") # Prints "Logic B (Upgraded!)"
+
+# Versioning + rollback
+print(rt.behavior_version(pid))   # 2
+rt.rollback_behavior(pid, 1)      # back to prior hot-swapped behavior
 
 ```
 

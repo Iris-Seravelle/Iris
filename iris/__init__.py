@@ -258,6 +258,17 @@ class Runtime:
         """Update actor logic at runtime."""
         self._inner.hot_swap(pid, new_handler)
 
+    def behavior_version(self, pid: int) -> int:
+        """Return the current behavior version for an actor PID."""
+        return self._inner.behavior_version(pid)
+
+    def rollback_behavior(self, pid: int, steps: int = 1) -> int:
+        """Rollback actor behavior by `steps` hot-swapped versions.
+
+        Returns the resulting version after rollback.
+        """
+        return self._inner.rollback_behavior(pid, steps)
+
     def selective_recv(self, pid: int, matcher: Callable, timeout: Optional[float] = None) -> Awaitable[Optional[Union[bytes, PySystemMessage]]]:
         """
         Return an awaitable that resolves when `matcher(msg)` is True.
