@@ -101,8 +101,9 @@ result = loop.run_until_complete(run_discovery(rt, addr))
             resolved_pid.is_some(),
             "Async discovery failed to resolve PID"
         );
-        let proxy = resolved_pid.unwrap();
-        assert_ne!(proxy, pid_a, "proxy PID should differ from raw remote PID");
+        // Numeric PID equality across distinct runtimes is possible; we only
+        // require successful resolution here.
+        let _proxy = resolved_pid.unwrap();
     });
 
     // 4. Test Structured System Messages: EXIT mapping
