@@ -332,6 +332,106 @@ fn quantum_speculation_logs_choice_when_slow() {
 }
 
 #[test]
+#[cfg(feature = "pyo3")]
+fn quantum_first_run_vector_container_reduction_executes() {
+    use crate::py::jit::{execute_registered_jit, register_quantum_jit};
+    use pyo3::Python;
+    use std::env;
+
+    env::set_var("IRIS_JIT_QUANTUM", "1");
+
+    let args = vec!["x".to_string()];
+    let entries = compile_jit_quantum(
+        "sum((x_i * x_i for x_i in x if x_i > 0))",
+        &args,
+        crate::py::jit::codegen::JitReturnType::Float,
+    );
+    assert!(
+        !entries.is_empty(),
+        "quantum compile should produce at least one variant"
+    );
+
+    let func_key = 123_456_789;
+    register_quantum_jit(func_key, entries);
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "from array import array\nxs = array('d', [1.0, 2.0, 3.0, 4.0])",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+
+        let xs = locals.get_item("xs").unwrap();
+        let tuple = pyo3::types::PyTuple::new(py, &[xs]);
+        let out_obj = execute_registered_jit(py, func_key, tuple)
+            .expect("quantum dispatcher should return a result")
+            .expect("quantum first-run execution should succeed");
+        let out: f64 = out_obj.extract(py).unwrap();
+        assert_eq!(out, 30.0);
+    });
+
+    env::remove_var("IRIS_JIT_QUANTUM");
+}
+
+#[test]
+#[cfg(feature = "pyo3")]
+fn quantum_first_run_multiarg_vector_executes() {
+    use crate::py::jit::{execute_registered_jit, register_quantum_jit};
+    use pyo3::Python;
+    use std::env;
+
+    env::set_var("IRIS_JIT_QUANTUM", "1");
+
+    let args = vec!["price".to_string(), "vol".to_string(), "strike".to_string()];
+    let entries = compile_jit_quantum(
+        "price / strike + vol",
+        &args,
+        crate::py::jit::codegen::JitReturnType::Float,
+    );
+    assert!(
+        !entries.is_empty(),
+        "quantum compile should produce at least one variant"
+    );
+
+    let func_key = 123_456_790;
+    register_quantum_jit(func_key, entries);
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "from array import array\n\
+prices = array('d', [100.0, 101.0, 102.0])\n\
+vols = array('d', [0.2, 0.2, 0.2])\n\
+strikes = array('d', [105.0, 105.0, 105.0])",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+
+        let prices = locals.get_item("prices").unwrap();
+        let vols = locals.get_item("vols").unwrap();
+        let strikes = locals.get_item("strikes").unwrap();
+
+        let tuple = pyo3::types::PyTuple::new(py, &[prices, vols, strikes]);
+        let out_obj = execute_registered_jit(py, func_key, tuple)
+            .expect("quantum dispatcher should return a result")
+            .expect("quantum first-run multiarg execution should succeed");
+
+        let out: Vec<f64> = out_obj.extract(py).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!((out[0] - ((100.0 / 105.0) + 0.2)).abs() < 1e-12);
+        assert!((out[1] - ((101.0 / 105.0) + 0.2)).abs() < 1e-12);
+        assert!((out[2] - ((102.0 / 105.0) + 0.2)).abs() < 1e-12);
+    });
+
+    env::remove_var("IRIS_JIT_QUANTUM");
+}
+
+#[test]
 fn jit_builder_pic_flag_behavior() {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();

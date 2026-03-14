@@ -64,6 +64,13 @@ pub struct JitEntry {
     pub return_type: JitReturnType,
 }
 
+impl JitEntry {
+    /// Check if this entry has a valid, compiled function pointer.
+    pub fn is_valid(&self) -> bool {
+        self.func_ptr != 0
+    }
+}
+
 static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
     once_cell::sync::Lazy::new(|| AtomicUsize::new(0));
 
@@ -498,24 +505,42 @@ pub fn execute_registered_jit(
 
                         if use_quantum {
                             let idx = choose_quantum_index(state);
-                            let entry = Some(state.entries[idx].clone());
-                            let mut fallbacks = Vec::new();
-                            for (i, e) in state.entries.iter().enumerate() {
-                                if i != idx && state.active.get(i).copied().unwrap_or(false) {
-                                    fallbacks.push((i, e.clone()));
+                            let entry = state.entries[idx].clone();
+                            // Check if the selected entry is valid; if not, skip quantum and use baseline.
+                            if !entry.is_valid() {
+                                let baseline_idx = state.baseline_idx.min(state.entries.len() - 1);
+                                let baseline_entry = state.entries[baseline_idx].clone();
+                                if !baseline_entry.is_valid() {
+                                    // No valid entries at all; skip JIT
+                                    (None, 0usize, Vec::new(), false, 0usize)
+                                } else {
+                                    (Some(baseline_entry), baseline_idx, Vec::new(), false, active_count)
                                 }
+                            } else {
+                                let mut fallbacks = Vec::new();
+                                for (i, e) in state.entries.iter().enumerate() {
+                                    if i != idx && state.active.get(i).copied().unwrap_or(false) && e.is_valid() {
+                                        fallbacks.push((i, e.clone()));
+                                    }
+                                }
+                                (Some(entry), idx, fallbacks, true, active_count)
                             }
-                            (entry, idx, fallbacks, true, active_count)
                         } else {
                             // Baseline execution only
                             let baseline_idx = state.baseline_idx.min(state.entries.len() - 1);
-                            (
-                                Some(state.entries[baseline_idx].clone()),
-                                baseline_idx,
-                                Vec::new(),
-                                false,
-                                active_count,
-                            )
+                            let baseline_entry = state.entries[baseline_idx].clone();
+                            if !baseline_entry.is_valid() {
+                                // Baseline is invalid; skip JIT
+                                (None, 0usize, Vec::new(), false, active_count)
+                            } else {
+                                (
+                                    Some(baseline_entry),
+                                    baseline_idx,
+                                    Vec::new(),
+                                    false,
+                                    active_count,
+                                )
+                            }
                         }
                     }
                 } else {
@@ -828,23 +853,8 @@ pub fn compile_jit_with_return_type(
 
 /// Compile multiple speculative versions of the same expression in parallel.
 pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String], return_type: JitReturnType) -> Vec<JitEntry> {
-    let expr_opt = expr_str.to_string();
-    let expr_base = expr_str.to_string();
-    let args_opt = arg_names.to_vec();
-    let args_base = arg_names.to_vec();
-
-    let (optimized, baseline) = std::thread::scope(|scope| {
-        let h_opt = scope.spawn(move || {
-            compile_jit_impl(&expr_opt, &args_opt, true, return_type)
-        });
-        let h_base = scope.spawn(move || {
-            compile_jit_impl(&expr_base, &args_base, false, return_type)
-        });
-        (
-            h_opt.join().ok().flatten(),
-            h_base.join().ok().flatten(),
-        )
-    });
+    let optimized = compile_jit_impl(expr_str, arg_names, true, return_type);
+    let baseline = compile_jit_impl(expr_str, arg_names, false, return_type);
 
     let mut out = Vec::new();
     if let Some(e) = optimized {
@@ -2146,6 +2156,14 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
 #[cfg(feature = "pyo3")]
 #[inline(always)]
 pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::PyTuple) -> pyo3::PyResult<pyo3::PyObject> {
+    // Safety check: if func_ptr is zero (or invalid), cannot execute JIT.
+    // This can happen if quantum speculation is enabled but variants haven't been compiled yet.
+    if entry.func_ptr == 0 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "JIT function pointer is invalid or not yet compiled"
+        ));
+    }
+
     let arg_count = args.len();
     let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
 
