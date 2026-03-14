@@ -35,6 +35,7 @@ Iris uses a **cooperative reduction-based scheduler** for fairness, providing bu
 - **Global Discovery:** Register and resolve named services locally or over the network.
 - **Self-Healing:** Path-scoped supervisors and structured `EXIT` reasons for fault tolerance.
 - **JIT Acceleration:** Transparently compile Python math functions to native machine code.
+    - **Quantum Speculation:** Optional multi-variant JIT selection with runtime telemetry, bounded by compile budget and cooldown controls (see [JIT Internals & Configuration](docs/jit.md)).
 
 ---
 
