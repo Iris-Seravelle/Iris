@@ -13,6 +13,19 @@ use crate::py::jit::codegen::{
     SymbolAlias,
 };
 
+// Don't ever regress next time :(
+fn quantum_shared_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn lock_quantum_shared_test() -> std::sync::MutexGuard<'static, ()> {
+    match quantum_shared_test_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[test]
 fn compile_jit_basic_math() {
     let args = vec!["a".to_string(), "b".to_string()];
@@ -89,6 +102,8 @@ fn quantum_profile_snapshot_and_seed_roundtrip() {
 fn quantum_compile_budget_blocks_when_exhausted() {
     use std::env;
 
+    let _guard = lock_quantum_shared_test();
+
     reset_quantum_control_state();
     env::set_var("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS", "1");
     env::set_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS", "1000000");
@@ -105,6 +120,8 @@ fn quantum_compile_budget_blocks_when_exhausted() {
 #[test]
 fn quantum_cooldown_backoff_blocks_and_recovers() {
     use std::env;
+
+    let _guard = lock_quantum_shared_test();
 
     reset_quantum_control_state();
     env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS", "100");
@@ -136,6 +153,9 @@ fn quantum_stability_score_tracks_profile_consistency() {
         QuantumProfileSeed,
     };
 
+    let _guard = lock_quantum_shared_test();
+    reset_quantum_control_state();
+
     env::set_var("IRIS_JIT_QUANTUM_STABILITY_MIN_RUNS", "1");
 
     let args = vec!["x".to_string(), "y".to_string()];
@@ -164,6 +184,7 @@ fn quantum_stability_score_tracks_profile_consistency() {
 
     assert!(stable > unstable, "expected stable profile score to be greater");
     env::remove_var("IRIS_JIT_QUANTUM_STABILITY_MIN_RUNS");
+    reset_quantum_control_state();
 }
 
 #[test]
@@ -175,6 +196,9 @@ fn quantum_lifecycle_reclaims_repeated_failures() {
         seed_quantum_profile,
         QuantumProfileSeed,
     };
+
+    let _guard = lock_quantum_shared_test();
+    reset_quantum_control_state();
 
     env::set_var("IRIS_JIT_QUANTUM_VARIANT_FAILURE_LIMIT", "2");
     env::set_var("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS", "8");
@@ -199,6 +223,7 @@ fn quantum_lifecycle_reclaims_repeated_failures() {
 
     env::remove_var("IRIS_JIT_QUANTUM_VARIANT_FAILURE_LIMIT");
     env::remove_var("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS");
+    reset_quantum_control_state();
 }
 
 #[test]
@@ -210,6 +235,8 @@ fn quantum_rearms_from_single_variant_on_degradation() {
         register_quantum_jit,
         JitReturnType,
     };
+
+    let _guard = lock_quantum_shared_test();
 
     reset_quantum_control_state();
     env::set_var("IRIS_JIT_QUANTUM", "1");
@@ -254,6 +281,8 @@ fn quantum_rearm_requires_min_samples_for_sensitivity() {
         JitReturnType,
     };
 
+    let _guard = lock_quantum_shared_test();
+
     reset_quantum_control_state();
     env::set_var("IRIS_JIT_QUANTUM", "1");
     env::set_var("IRIS_JIT_QUANTUM_SPECULATION_NS", "0");
@@ -295,6 +324,9 @@ fn quantum_speculation_logs_choice_when_slow() {
     use pyo3::Python;
     use std::env;
     use std::sync::{Arc, Mutex};
+
+    let _guard = lock_quantum_shared_test();
+    reset_quantum_control_state();
 
     // force all logs on and make the threshold 0 so we can validate the text.
     env::set_var("IRIS_JIT_LOG", "1");
@@ -338,6 +370,9 @@ fn quantum_first_run_vector_container_reduction_executes() {
     use pyo3::Python;
     use std::env;
 
+    let _guard = lock_quantum_shared_test();
+    reset_quantum_control_state();
+
     env::set_var("IRIS_JIT_QUANTUM", "1");
 
     let args = vec!["x".to_string()];
@@ -374,6 +409,7 @@ fn quantum_first_run_vector_container_reduction_executes() {
     });
 
     env::remove_var("IRIS_JIT_QUANTUM");
+    reset_quantum_control_state();
 }
 
 #[test]
@@ -382,6 +418,9 @@ fn quantum_first_run_multiarg_vector_executes() {
     use crate::py::jit::{execute_registered_jit, register_quantum_jit};
     use pyo3::Python;
     use std::env;
+
+    let _guard = lock_quantum_shared_test();
+    reset_quantum_control_state();
 
     env::set_var("IRIS_JIT_QUANTUM", "1");
 
@@ -429,6 +468,7 @@ strikes = array('d', [105.0, 105.0, 105.0])",
     });
 
     env::remove_var("IRIS_JIT_QUANTUM");
+    reset_quantum_control_state();
 }
 
 #[test]
@@ -1189,6 +1229,7 @@ fn execute_jit_accepts_mixed_scalar_types() {
 
 #[test]
 fn execute_jit_vectorizes_non_f64_buffers() {
+    let _guard = quantum_shared_test_lock().lock().unwrap();
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let array_mod = py.import("array").unwrap();
