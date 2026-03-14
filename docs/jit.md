@@ -120,6 +120,9 @@ When enabled, Iris may compile multiple variants and select adaptively using run
 - Rearm cadence/trigger (ns):
   - Env: `IRIS_JIT_QUANTUM_REARM_INTERVAL_NS`, `IRIS_JIT_QUANTUM_REARM_MIN_OBSERVED_NS`
   - Behavior: controls how often a single-variant warm state may attempt multi-variant rearm, and the minimum observed latency required to trigger rearm.
+- Rearm sensitivity controls:
+  - Env: `IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES`, `IRIS_JIT_QUANTUM_REARM_MAX_VOLATILITY`
+  - Behavior: requires enough observations before rearm and suppresses rearm when per-run latency is too volatile.
 
 ## Warm-start metadata cache
 
@@ -153,6 +156,12 @@ Iris prioritizes correctness over acceleration:
 - Scalar fast path remains preferred for stable scalar workloads.
 - Single-arg kernels now include generic sequence fallback when typed-buffer fast paths do not apply.
 - Loop-step wrappers compile lowered runtime expressions (including `let_bind`) and evaluate safely in Python fallback mode when needed.
+
+## Rearm tuning guidance
+
+- One-shot / bursty workloads: increase `IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES` and/or lower `IRIS_JIT_QUANTUM_REARM_MAX_VOLATILITY` to avoid speculative churn.
+- Long-running stable workloads: keep `IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES` low (or default) and raise `IRIS_JIT_QUANTUM_REARM_MAX_VOLATILITY` moderately if rearm feels too conservative.
+- If runs differ heavily call-to-call, prefer stricter volatility gating before reducing rearm interval.
 
 ## Minimal example
 

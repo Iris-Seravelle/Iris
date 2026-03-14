@@ -61,6 +61,8 @@ static JIT_QUANTUM_VARIANT_FAILURE_LIMIT_ENV_VAR: OnceLock<RwLock<String>> = Onc
 static JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_REARM_INTERVAL_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_REARM_MIN_OBSERVED_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_REARM_MIN_SAMPLES_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_REARM_MAX_VOLATILITY_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 
 #[derive(Default)]
 struct QuantumCompileBudgetState {
@@ -82,12 +84,21 @@ static QUANTUM_REARM_PLANS: OnceLock<std::sync::Mutex<HashMap<usize, QuantumRear
     OnceLock::new();
 static QUANTUM_REARM_LAST_ATTEMPT: OnceLock<std::sync::Mutex<HashMap<usize, u64>>> =
     OnceLock::new();
+static QUANTUM_REARM_OBSERVED: OnceLock<std::sync::Mutex<HashMap<usize, QuantumRearmObserved>>> =
+    OnceLock::new();
 
 #[derive(Clone)]
 struct QuantumRearmPlan {
     expr: String,
     args: Vec<String>,
     return_type: JitReturnType,
+}
+
+#[derive(Default, Clone, Copy)]
+struct QuantumRearmObserved {
+    samples: u64,
+    ewma_ns: f64,
+    ewma_abs_delta_ns: f64,
 }
 
 fn jit_log_env_var() -> &'static RwLock<String> {
@@ -155,6 +166,16 @@ fn jit_quantum_rearm_interval_env_var() -> &'static RwLock<String> {
 fn jit_quantum_rearm_min_observed_env_var() -> &'static RwLock<String> {
     JIT_QUANTUM_REARM_MIN_OBSERVED_ENV_VAR
         .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_REARM_MIN_OBSERVED_NS".to_string()))
+}
+
+fn jit_quantum_rearm_min_samples_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_REARM_MIN_SAMPLES_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES".to_string()))
+}
+
+fn jit_quantum_rearm_max_volatility_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_REARM_MAX_VOLATILITY_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_REARM_MAX_VOLATILITY".to_string()))
 }
 
 fn now_ns() -> u64 {
@@ -330,14 +351,60 @@ pub(crate) fn quantum_rearm_interval_ns() -> u64 {
         .unwrap_or(DEFAULT)
 }
 
-    pub(crate) fn quantum_rearm_min_observed_ns() -> u64 {
-        const DEFAULT: u64 = 1_000_000; // 1ms minimum observed latency before rearm
-        let env_name = jit_quantum_rearm_min_observed_env_var().read().unwrap().clone();
-        std::env::var(env_name)
+pub(crate) fn quantum_rearm_min_observed_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000; // 1ms minimum observed latency before rearm
+    let env_name = jit_quantum_rearm_min_observed_env_var().read().unwrap().clone();
+    std::env::var(env_name)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_rearm_min_samples() -> u64 {
+    const DEFAULT: u64 = 3;
+    let env_name = jit_quantum_rearm_min_samples_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+        .max(1)
+}
+
+pub(crate) fn quantum_rearm_max_volatility() -> f64 {
+    const DEFAULT: f64 = 0.75;
+    let env_name = jit_quantum_rearm_max_volatility_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|v| v.clamp(0.0, 4.0))
+        .unwrap_or(DEFAULT)
+}
+
+fn record_quantum_rearm_observation(func_key: usize, observed_ns: u64) -> (u64, f64) {
+    const ALPHA: f64 = 0.25;
+    let observed = observed_ns as f64;
+    let state = QUANTUM_REARM_OBSERVED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = state.lock().unwrap();
+    let slot = guard.entry(func_key).or_default();
+
+    if slot.samples == 0 {
+        slot.samples = 1;
+        slot.ewma_ns = observed;
+        slot.ewma_abs_delta_ns = 0.0;
+    } else {
+        let delta = (observed - slot.ewma_ns).abs();
+        slot.ewma_ns = (1.0 - ALPHA) * slot.ewma_ns + ALPHA * observed;
+        slot.ewma_abs_delta_ns = (1.0 - ALPHA) * slot.ewma_abs_delta_ns + ALPHA * delta;
+        slot.samples = slot.samples.saturating_add(1);
     }
+
+    let volatility = if slot.ewma_ns > 0.0 {
+        (slot.ewma_abs_delta_ns / slot.ewma_ns).clamp(0.0, 4.0)
+    } else {
+        0.0
+    };
+    (slot.samples, volatility)
+}
 
 fn register_quantum_rearm_plan(func_key: usize, expr: &str, args: &[String], return_type: JitReturnType) {
     let plans = QUANTUM_REARM_PLANS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -356,7 +423,24 @@ pub(crate) fn maybe_rearm_quantum_compile(func_key: usize, observed_ns: u64, act
         return false;
     }
 
-    let observed_gate = quantum_speculation_threshold_ns().max(quantum_rearm_min_observed_ns());
+    let (samples, volatility) = record_quantum_rearm_observation(func_key, observed_ns);
+    let min_samples = quantum_rearm_min_samples();
+    if samples < min_samples {
+        return false;
+    }
+    if volatility > quantum_rearm_max_volatility() {
+        jit_log(|| {
+            format!(
+                "[Iris][jit] quantum rearm skipped for ptr={} due to volatility {:.3}",
+                func_key, volatility
+            )
+        });
+        return false;
+    }
+
+    let volatility_factor = (1.0 + volatility).clamp(1.0, 3.0);
+    let observed_gate = ((quantum_speculation_threshold_ns().max(quantum_rearm_min_observed_ns()) as f64)
+        * volatility_factor) as u64;
     if observed_ns < observed_gate {
         return false;
     }
@@ -370,7 +454,12 @@ pub(crate) fn maybe_rearm_quantum_compile(func_key: usize, observed_ns: u64, act
     };
 
     let now = now_ns();
-    let interval = quantum_rearm_interval_ns();
+    let interval_scale = if samples < min_samples.saturating_mul(2) {
+        2.0
+    } else {
+        1.0
+    };
+    let interval = ((quantum_rearm_interval_ns() as f64) * interval_scale * volatility_factor) as u64;
     {
         let attempts = QUANTUM_REARM_LAST_ATTEMPT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
         let mut guard = attempts.lock().unwrap();
@@ -430,6 +519,9 @@ pub(crate) fn clear_quantum_rearm_plan_for_test(func_key: usize) {
     }
     if let Some(attempts) = QUANTUM_REARM_LAST_ATTEMPT.get() {
         attempts.lock().unwrap().remove(&func_key);
+    }
+    if let Some(observed) = QUANTUM_REARM_OBSERVED.get() {
+        observed.lock().unwrap().remove(&func_key);
     }
 }
 
@@ -495,6 +587,9 @@ pub(crate) fn reset_quantum_control_state() {
         state.lock().unwrap().clear();
     }
     if let Some(state) = QUANTUM_REARM_LAST_ATTEMPT.get() {
+        state.lock().unwrap().clear();
+    }
+    if let Some(state) = QUANTUM_REARM_OBSERVED.get() {
         state.lock().unwrap().clear();
     }
 }

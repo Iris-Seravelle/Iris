@@ -218,6 +218,7 @@ fn quantum_rearms_from_single_variant_on_degradation() {
     env::set_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS", "1000000000");
     env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS", "0");
     env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS", "0");
+    env::set_var("IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES", "1");
 
     let args = vec!["x".to_string()];
     let entry = compile_jit_with_return_type("x + 1", &args, JitReturnType::Float)
@@ -240,6 +241,51 @@ fn quantum_rearms_from_single_variant_on_degradation() {
     env::remove_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS");
     env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS");
     env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES");
+}
+
+#[test]
+fn quantum_rearm_requires_min_samples_for_sensitivity() {
+    use std::env;
+    use crate::py::jit::codegen::{
+        compile_jit_with_return_type,
+        quantum_active_variant_count,
+        register_quantum_jit,
+        JitReturnType,
+    };
+
+    reset_quantum_control_state();
+    env::set_var("IRIS_JIT_QUANTUM", "1");
+    env::set_var("IRIS_JIT_QUANTUM_SPECULATION_NS", "0");
+    env::set_var("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS", "1000000000");
+    env::set_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS", "1000000000");
+    env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS", "0");
+    env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS", "0");
+    env::set_var("IRIS_JIT_QUANTUM_REARM_INTERVAL_NS", "0");
+    env::set_var("IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES", "3");
+
+    let args = vec!["x".to_string()];
+    let entry = compile_jit_with_return_type("x + 1", &args, JitReturnType::Float)
+        .expect("single compile for baseline state");
+    let func_key = 88_002;
+    register_quantum_jit(func_key, vec![entry]);
+    assert_eq!(quantum_active_variant_count(func_key).unwrap(), 1);
+
+    register_quantum_rearm_plan_for_test(func_key, "x + 1", &args, JitReturnType::Float);
+
+    assert!(!maybe_rearm_quantum_compile(func_key, 5_000_000, 1));
+    assert!(!maybe_rearm_quantum_compile(func_key, 5_000_000, 1));
+    assert!(maybe_rearm_quantum_compile(func_key, 5_000_000, 1));
+
+    clear_quantum_rearm_plan_for_test(func_key);
+    env::remove_var("IRIS_JIT_QUANTUM");
+    env::remove_var("IRIS_JIT_QUANTUM_SPECULATION_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_REARM_INTERVAL_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_REARM_MIN_SAMPLES");
 }
 
 #[test]
