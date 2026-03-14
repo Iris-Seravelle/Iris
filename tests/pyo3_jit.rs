@@ -251,6 +251,150 @@ def warm_noop(x):
 }
 
 #[tokio::test]
+async fn py_jit_warm_seed_prefers_single_variant_compile() {
+    pyo3::prepare_freethreaded_python();
+
+    let has_msgpack = Python::with_gil(|py| {
+        py.import("importlib.util")
+            .ok()
+            .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
+            .map(|spec| !spec.is_none())
+            .unwrap_or(false)
+    });
+    if !has_msgpack {
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("iris_jit_meta_warm_single_{}", nonce));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let module_path: PathBuf = temp_dir.join("warm_single_mod.py");
+
+    let module_src = r#"
+from iris.jit import offload
+
+@offload(strategy="jit", return_type="float")
+def warm_single(x):
+    return x + 1
+"#;
+    fs::write(&module_path, module_src).unwrap();
+
+    Python::with_gil(|py| {
+        let ext = iris::py::make_module(py).expect("make_module");
+        let sys = py.import("sys").unwrap();
+        let modules = sys.getattr("modules").unwrap().downcast::<PyDict>().unwrap();
+
+        let pkg = PyModule::new(py, "iris").unwrap();
+        let package_path = vec!["iris".to_string()];
+        pkg.setattr("__path__", package_path).unwrap();
+        pkg.setattr("iris", ext.clone_ref(py)).unwrap();
+
+        modules.set_item("iris", pkg).unwrap();
+        modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
+
+        let importlib_util = py.import("importlib.util").unwrap();
+        let module_name = "warm_single_mod";
+        let module_path_s = module_path.to_string_lossy().to_string();
+
+        let jit_mod = py.import("iris.jit").unwrap();
+        jit_mod
+            .setattr("_IRIS_META_FLUSH_MIN", 1_i64)
+            .unwrap();
+        jit_mod
+            .setattr("_IRIS_META_FLUSH_MAX", 1_i64)
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation")
+            .unwrap()
+            .call1((true, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation_threshold")
+            .unwrap()
+            .call1((0_i64, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_compile_budget")
+            .unwrap()
+            .call1((1_000_000_000_i64, 1_000_000_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_cooldown")
+            .unwrap()
+            .call1((0_i64, 0_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+
+        let spec1 = importlib_util
+            .getattr("spec_from_file_location")
+            .unwrap()
+            .call1((module_name, module_path_s.clone()))
+            .unwrap();
+        let module1 = importlib_util
+            .getattr("module_from_spec")
+            .unwrap()
+            .call1((spec1,))
+            .unwrap();
+        modules.set_item(module_name, module1).unwrap();
+        spec1
+            .getattr("loader")
+            .unwrap()
+            .call_method1("exec_module", (module1,))
+            .unwrap();
+
+        let warm_single_1 = module1.getattr("warm_single").unwrap();
+        for i in 0..12 {
+            let out: f64 = warm_single_1.call1((i as f64,)).unwrap().extract().unwrap();
+            assert_eq!(out, i as f64 + 1.0);
+        }
+
+        modules.del_item(module_name).unwrap();
+
+        let spec2 = importlib_util
+            .getattr("spec_from_file_location")
+            .unwrap()
+            .call1((module_name, module_path_s))
+            .unwrap();
+        let module2 = importlib_util
+            .getattr("module_from_spec")
+            .unwrap()
+            .call1((spec2,))
+            .unwrap();
+        modules.set_item(module_name, module2).unwrap();
+        spec2
+            .getattr("loader")
+            .unwrap()
+            .call_method1("exec_module", (module2,))
+            .unwrap();
+
+        let warm_single_2 = module2.getattr("warm_single").unwrap();
+        let warm_single_2_inner = warm_single_2.getattr("__wrapped__").unwrap();
+        let out2: f64 = warm_single_2.call1((10.0_f64,)).unwrap().extract().unwrap();
+        assert_eq!(out2, 11.0);
+
+        let get_quantum_profile = ext.getattr(py, "get_quantum_profile").unwrap();
+        let profile: Vec<(usize, f64, u64, u64)> = get_quantum_profile
+            .call1(py, (warm_single_2_inner.to_object(py),))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+
+        assert_eq!(
+            profile.len(),
+            1,
+            "expected warm-started second load to prefer single-variant compile"
+        );
+    });
+
+    let _ = fs::remove_file(&module_path);
+    let _ = fs::remove_file(temp_dir.join("__pycache__").join(".iris.meta.bin"));
+    let _ = fs::remove_dir_all(temp_dir.join("__pycache__"));
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn py_jit_quantum_profile_persists_and_warm_starts_from_pycache() {
     pyo3::prepare_freethreaded_python();
 

@@ -118,6 +118,22 @@ struct QuantumState {
 
 static QUANTUM_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, QuantumState>>> =
     once_cell::sync::OnceCell::new();
+static QUANTUM_PENDING_SEEDS: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, Vec<QuantumProfileSeed>>>> =
+    once_cell::sync::OnceCell::new();
+
+fn apply_quantum_seeds(state: &mut QuantumState, seeds: &[QuantumProfileSeed]) {
+    for seed in seeds {
+        if let Some(stats) = state.stats.get_mut(seed.index) {
+            stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
+                seed.ewma_ns
+            } else {
+                0.0
+            };
+            stats.runs = seed.runs;
+            stats.failures = seed.failures;
+        }
+    }
+}
 
 pub fn register_jit(func_key: usize, entry: JitEntry) {
     let map = JIT_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -191,7 +207,7 @@ pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
     // prefer optimized candidate (first) as baseline fallback mapping
     register_jit(func_key, entries[0].clone());
     let stats = vec![QuantumStats::default(); entries.len()];
-    let state = QuantumState {
+    let mut state = QuantumState {
         entries: std::mem::take(&mut entries),
         stats,
         active: vec![true; entry_count],
@@ -199,8 +215,22 @@ pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
         round_robin: 0,
         total_runs: 0,
     };
+
+    if let Some(pending_map) = QUANTUM_PENDING_SEEDS.get() {
+        if let Some(seeds) = pending_map.lock().unwrap().remove(&func_key) {
+            apply_quantum_seeds(&mut state, &seeds);
+        }
+    }
+
     let map = QUANTUM_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     map.lock().unwrap().insert(func_key, state);
+}
+
+pub fn quantum_has_seed_hint(func_key: usize) -> bool {
+    QUANTUM_PENDING_SEEDS
+        .get()
+        .and_then(|map| map.lock().unwrap().get(&func_key).map(|rows| !rows.is_empty()))
+        .unwrap_or(false)
 }
 
 fn active_indices(state: &QuantumState) -> Vec<usize> {
@@ -358,25 +388,20 @@ pub fn quantum_profile_snapshot(func_key: usize) -> Option<Vec<QuantumProfilePoi
 }
 
 pub fn seed_quantum_profile(func_key: usize, seeds: &[QuantumProfileSeed]) -> bool {
-    let Some(map) = QUANTUM_REGISTRY.get() else {
-        return false;
-    };
-    let mut guard = map.lock().unwrap();
-    let Some(state) = guard.get_mut(&func_key) else {
-        return false;
-    };
-
-    for seed in seeds {
-        if let Some(stats) = state.stats.get_mut(seed.index) {
-            stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
-                seed.ewma_ns
-            } else {
-                0.0
-            };
-            stats.runs = seed.runs;
-            stats.failures = seed.failures;
+    if let Some(map) = QUANTUM_REGISTRY.get() {
+        let mut guard = map.lock().unwrap();
+        if let Some(state) = guard.get_mut(&func_key) {
+            apply_quantum_seeds(state, seeds);
+            return true;
         }
     }
+
+    if seeds.is_empty() {
+        return false;
+    }
+
+    let pending = QUANTUM_PENDING_SEEDS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    pending.lock().unwrap().insert(func_key, seeds.to_vec());
     true
 }
 

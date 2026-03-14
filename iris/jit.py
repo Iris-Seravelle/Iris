@@ -278,27 +278,27 @@ def _seed_quantum_from_metadata(
     src: Optional[str],
     arg_names: Optional[list[str]],
     return_type: Optional[str],
-) -> None:
+) -> bool:
     if _msgpack is None or _seed_quantum_profile is None or src is None or arg_names is None:
         _jit_meta_log("seed skipped: missing msgpack/seed API/src/arg_names")
-        return
+        return False
     path = _metadata_cache_path(func)
     if path is None:
         _jit_meta_log("seed skipped: no source path for function")
-        return
+        return False
     if not os.path.exists(path):
         _jit_meta_log(f"seed miss: cache file not found path={path}")
-        return
+        return False
     key = _metadata_key(func, src, arg_names, return_type)
     doc = _read_metadata(path)
     entry = doc.get("entries", {}).get(key)
     if not isinstance(entry, dict):
         _jit_meta_log(f"seed miss: key not present key={key[:12]} path={path}")
-        return
+        return False
     rows = entry.get("profile")
     if not isinstance(rows, list) or not rows:
         _jit_meta_log(f"seed miss: empty profile key={key[:12]} path={path}")
-        return
+        return False
     normalized: list[tuple[int, float, int, int]] = []
     for row in rows:
         if not isinstance(row, list) or len(row) != 4:
@@ -309,14 +309,16 @@ def _seed_quantum_from_metadata(
             continue
     if not normalized:
         _jit_meta_log(f"seed miss: profile normalization empty key={key[:12]} path={path}")
-        return
+        return False
     try:
         ok = bool(_seed_quantum_profile(func, normalized))
         _jit_meta_log(
             f"seed {'ok' if ok else 'failed'}: rows={len(normalized)} key={key[:12]} path={path}"
         )
+        return ok
     except Exception as exc:
         _jit_meta_log(f"seed failed: key={key[:12]} path={path} err={exc}")
+        return False
 
 
 def _maybe_persist_quantum_metadata(
@@ -1329,10 +1331,14 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             except Exception:
                 pass
 
+        preseeded_quantum = False
+        if strategy == "jit":
+            preseeded_quantum = _seed_quantum_from_metadata(func, src, arg_names, return_type)
+
         if register_offload is not None:
             try:
                 register_offload(func, strategy, return_type, src, arg_names)
-                if strategy == "jit":
+                if strategy == "jit" and not preseeded_quantum:
                     _seed_quantum_from_metadata(func, src, arg_names, return_type)
             except Exception as e:  # pragma: no cover - defensive
                 warnings.warn(f"offload registration failed: {e}")

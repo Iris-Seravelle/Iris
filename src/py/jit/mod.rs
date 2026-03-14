@@ -32,6 +32,7 @@ use crate::py::jit::codegen::{
     compile_jit_with_return_type,
     execute_registered_jit,
     lookup_jit,
+    quantum_has_seed_hint,
     quantum_profile_snapshot,
     register_jit,
     register_quantum_jit,
@@ -690,6 +691,7 @@ fn register_offload(
                         .and_then(|n| n.extract::<String>().ok())
                 });
                 let return_type = parse_return_type(return_type.as_deref());
+                let warm_seed_hint = quantum_has_seed_hint(key);
 
                 let compile_single = || {
                     let maybe_entry = match catch_unwind(AssertUnwindSafe(|| {
@@ -713,37 +715,71 @@ fn register_offload(
                     }
                 };
 
-                if quantum_speculation_enabled() {
-                    let now = now_ns();
-                    if quantum_compile_may_run(key, now) {
-                        let started = Instant::now();
-                        let entries = match catch_unwind(AssertUnwindSafe(|| {
-                            compile_jit_quantum(&expr, &args, return_type)
-                        })) {
-                            Ok(entries) => entries,
-                            Err(payload) => {
-                                let msg = panic_payload_to_string(payload);
-                                jit_log(|| format!("[Iris][jit] panic while compiling quantum variants '{}': {}", expr, msg));
-                                Vec::new()
-                            }
-                        };
-                        let elapsed = started.elapsed().as_nanos() as u64;
-                        let success = !entries.is_empty();
-                        record_quantum_compile_attempt(key, now, elapsed, success);
+                let compile_single_quantum = || {
+                    let started = Instant::now();
+                    let maybe_entry = match catch_unwind(AssertUnwindSafe(|| {
+                        compile_jit_with_return_type(&expr, &args, return_type)
+                    })) {
+                        Ok(entry) => entry,
+                        Err(payload) => {
+                            let msg = panic_payload_to_string(payload);
+                            jit_log(|| format!("[Iris][jit] panic while compiling warm quantum expr '{}': {}", expr, msg));
+                            None
+                        }
+                    };
 
-                        if success {
-                            if let Some(name) = func_name.as_deref() {
-                                register_named_jit(name, entries[0].clone());
+                    let elapsed = started.elapsed().as_nanos() as u64;
+                    let success = maybe_entry.is_some();
+                    record_quantum_compile_attempt(key, now_ns(), elapsed, success);
+
+                    if let Some(entry) = maybe_entry {
+                        if let Some(name) = func_name.as_deref() {
+                            register_named_jit(name, entry.clone());
+                        }
+                        register_jit(key, entry.clone());
+                        register_quantum_jit(key, vec![entry]);
+                        jit_log(|| format!("[Iris][jit] warm-seeded single-variant compile for ptr={}", key));
+                    } else {
+                        jit_log(|| format!("[Iris][jit] failed warm-seeded single-variant compile: {}", expr));
+                        compile_single();
+                    }
+                };
+
+                if quantum_speculation_enabled() {
+                    if warm_seed_hint {
+                        compile_single_quantum();
+                    } else {
+                        let now = now_ns();
+                        if quantum_compile_may_run(key, now) {
+                            let started = Instant::now();
+                            let entries = match catch_unwind(AssertUnwindSafe(|| {
+                                compile_jit_quantum(&expr, &args, return_type)
+                            })) {
+                                Ok(entries) => entries,
+                                Err(payload) => {
+                                    let msg = panic_payload_to_string(payload);
+                                    jit_log(|| format!("[Iris][jit] panic while compiling quantum variants '{}': {}", expr, msg));
+                                    Vec::new()
+                                }
+                            };
+                            let elapsed = started.elapsed().as_nanos() as u64;
+                            let success = !entries.is_empty();
+                            record_quantum_compile_attempt(key, now, elapsed, success);
+
+                            if success {
+                                if let Some(name) = func_name.as_deref() {
+                                    register_named_jit(name, entries[0].clone());
+                                }
+                                register_quantum_jit(key, entries);
+                                jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
+                            } else {
+                                jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
+                                compile_single();
                             }
-                            register_quantum_jit(key, entries);
-                            jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
                         } else {
-                            jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
+                            jit_log(|| format!("[Iris][jit] quantum compile gated by cooldown/budget for ptr={}", key));
                             compile_single();
                         }
-                    } else {
-                        jit_log(|| format!("[Iris][jit] quantum compile gated by cooldown/budget for ptr={}", key));
-                        compile_single();
                     }
                 } else {
                     compile_single();
