@@ -25,6 +25,8 @@ try:
         is_jit_logging_enabled,
         configure_quantum_speculation,
         is_quantum_speculation_enabled,
+        configure_quantum_log_threshold as _configure_quantum_log_threshold,
+        get_quantum_log_threshold as _get_quantum_log_threshold,
     )  # pyo3 extension
 except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
@@ -90,6 +92,53 @@ def get_quantum_speculation() -> bool:
     if is_quantum_speculation_enabled is None:
         return False
     return bool(is_quantum_speculation_enabled())
+
+
+def set_quantum_speculation_threshold(threshold_ns: Optional[int] = None, env_var: Optional[str] = None) -> int:
+    """Configure how slow a function must be before quantum speculation kicks in.
+
+    Parameters
+    ----------
+    threshold_ns:
+        If provided, sets the minimum duration (in nanoseconds) required before
+        the runtime starts doing multi-variant speculation.
+        Set to 0 to always speculate.
+    env_var:
+        Optional env var name to use (defaults to ``IRIS_JIT_QUANTUM_SPECULATION_NS``).
+    """
+    if _configure_quantum_speculation_threshold is None:
+        return 0
+    return int(_configure_quantum_speculation_threshold(threshold_ns, env_var))
+
+
+def get_quantum_speculation_threshold() -> int:
+    """Return the current quantum speculation threshold in nanoseconds."""
+    if _get_quantum_speculation_threshold is None:
+        return 0
+    return int(_get_quantum_speculation_threshold())
+
+
+def set_quantum_log_threshold(threshold_ns: Optional[int] = None, env_var: Optional[str] = None) -> int:
+    """Configure how long a JIT quantum execution must run before emitting a log.
+
+    Parameters
+    ----------
+    threshold_ns:
+        If provided, sets the minimum duration (in nanoseconds) needed before
+        quantum decision logging emits.  Set to 0 to log all quantum invocations.
+    env_var:
+        Optional env var name to use (defaults to ``IRIS_JIT_QUANTUM_LOG_NS``).
+    """
+    if _configure_quantum_log_threshold is None:
+        return 0
+    return int(_configure_quantum_log_threshold(threshold_ns, env_var))
+
+
+def get_quantum_log_threshold() -> int:
+    """Return the current quantum log threshold in nanoseconds."""
+    if _get_quantum_log_threshold is None:
+        return 0
+    return int(_get_quantum_log_threshold())
 
 
 def _strip_docstring(stmts: list[ast.stmt]) -> list[ast.stmt]:

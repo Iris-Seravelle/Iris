@@ -87,6 +87,42 @@ async fn py_jit_offload_decorator_async() {
         assert!(q_now_on);
         let _: bool = cfg_quantum.call1(py, (Option::<bool>::None, Option::<String>::None)).unwrap().extract(py).unwrap();
 
+        // quantum speculation threshold API
+        let set_qs: i64 = module
+            .getattr(py, "set_quantum_speculation_threshold")
+            .unwrap()
+            .call1(py, (0_i64, Option::<String>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(set_qs, 0);
+        let get_qs: i64 = module
+            .getattr(py, "get_quantum_speculation_threshold")
+            .unwrap()
+            .call0(py)
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(get_qs, 0);
+
+        // quantum log threshold API
+        let set_qt: i64 = module
+            .getattr(py, "set_quantum_log_threshold")
+            .unwrap()
+            .call1(py, (0_i64, Option::<String>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(set_qt, 0);
+        let get_qt: i64 = module
+            .getattr(py, "get_quantum_log_threshold")
+            .unwrap()
+            .call0(py)
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(get_qt, 0);
+
         let locals = PyDict::new(py);
         py.run("def foo(x): return x * 2", None, Some(locals)).unwrap();
         let foo = locals.get_item("foo").unwrap().to_object(py);

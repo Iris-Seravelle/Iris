@@ -37,8 +37,13 @@ use crate::py::jit::codegen::{
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
 static JIT_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_LOG_HOOK: OnceLock<std::sync::Mutex<Option<Box<dyn Fn(String) + Send + Sync>>>> =
+    OnceLock::new();
+
 static JIT_QUANTUM_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
 static JIT_QUANTUM_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_SPECULATION_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 
 fn jit_log_env_var() -> &'static RwLock<String> {
     JIT_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_LOG".to_string()))
@@ -46,6 +51,15 @@ fn jit_log_env_var() -> &'static RwLock<String> {
 
 fn jit_quantum_env_var() -> &'static RwLock<String> {
     JIT_QUANTUM_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM".to_string()))
+}
+
+fn jit_quantum_log_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_LOG_NS".to_string()))
+}
+
+fn jit_quantum_speculation_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_SPECULATION_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_SPECULATION_NS".to_string()))
 }
 
 fn parse_bool_env(v: &str) -> bool {
@@ -69,13 +83,59 @@ pub(crate) fn jit_logging_enabled() -> bool {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn jit_log_hook<F>(hook: F)
+where
+    F: Fn(String) + Send + Sync + 'static,
+{
+    let lock = JIT_LOG_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = lock.lock().unwrap();
+    *guard = Some(Box::new(hook));
+}
+
+#[cfg(test)]
+pub(crate) fn jit_log_clear_hook() {
+    if let Some(lock) = JIT_LOG_HOOK.get() {
+        let mut guard = lock.lock().unwrap();
+        *guard = None;
+    }
+}
+
 pub(crate) fn jit_log<F>(msg: F)
 where
     F: FnOnce() -> String,
 {
-    if jit_logging_enabled() {
-        eprintln!("{}", msg());
+    if !jit_logging_enabled() {
+        return;
     }
+
+    if let Some(lock) = JIT_LOG_HOOK.get() {
+        let guard = lock.lock().unwrap();
+        if let Some(ref hook) = *guard {
+            hook(msg());
+            return;
+        }
+    }
+
+    eprintln!("{}", msg());
+}
+
+pub(crate) fn quantum_log_threshold_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000; // 1ms
+    let env_name = jit_quantum_log_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_speculation_threshold_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000; // 1ms
+    let env_name = jit_quantum_speculation_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
 }
 
 fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
@@ -191,6 +251,12 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(is_jit_logging_enabled, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(configure_quantum_speculation, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(is_quantum_speculation_enabled, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_quantum_speculation_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(get_quantum_speculation_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(set_quantum_speculation_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_quantum_log_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(get_quantum_log_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(set_quantum_log_threshold, m)?)?;
     Ok(())
 }
 
@@ -232,6 +298,56 @@ fn configure_quantum_speculation(enabled: Option<bool>, env_var: Option<String>)
 #[pyfunction]
 fn is_quantum_speculation_enabled() -> PyResult<bool> {
     Ok(quantum_speculation_enabled())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn configure_quantum_speculation_threshold(threshold_ns: Option<u64>, env_var: Option<String>) -> PyResult<u64> {
+    if let Some(name) = env_var {
+        *jit_quantum_speculation_env_var().write().unwrap() = name;
+    }
+    if let Some(ns) = threshold_ns {
+        let env_name = jit_quantum_speculation_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    Ok(quantum_speculation_threshold_ns())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn get_quantum_speculation_threshold() -> PyResult<u64> {
+    Ok(quantum_speculation_threshold_ns())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn set_quantum_speculation_threshold(threshold_ns: Option<u64>, env_var: Option<String>) -> PyResult<u64> {
+    configure_quantum_speculation_threshold(threshold_ns, env_var)
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn configure_quantum_log_threshold(threshold_ns: Option<u64>, env_var: Option<String>) -> PyResult<u64> {
+    if let Some(name) = env_var {
+        *jit_quantum_log_env_var().write().unwrap() = name;
+    }
+    if let Some(ns) = threshold_ns {
+        let env_name = jit_quantum_log_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    Ok(quantum_log_threshold_ns())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn get_quantum_log_threshold() -> PyResult<u64> {
+    Ok(quantum_log_threshold_ns())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn set_quantum_log_threshold(threshold_ns: Option<u64>, env_var: Option<String>) -> PyResult<u64> {
+    configure_quantum_log_threshold(threshold_ns, env_var)
 }
 
 /// Register a Python function for offloading.

@@ -3,7 +3,17 @@ import asyncio
 from typing import Optional, Callable, Union, Awaitable
 
 # bring JIT helpers into package namespace
-from .jit import offload, set_jit_logging, get_jit_logging, set_quantum_speculation, get_quantum_speculation
+from .jit import (
+    offload,
+    set_jit_logging,
+    get_jit_logging,
+    set_quantum_speculation,
+    get_quantum_speculation,
+    set_quantum_speculation_threshold,
+    get_quantum_speculation_threshold,
+    set_quantum_log_threshold,
+    get_quantum_log_threshold,
+)
 
 # import core symbols from the compiled extension.  `register_offload`
 # may not exist early in the build process, so import it conditionally.

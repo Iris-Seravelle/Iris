@@ -33,6 +33,49 @@ fn compile_jit_quantum_variants() {
 }
 
 #[test]
+#[cfg(feature = "pyo3")]
+fn quantum_speculation_logs_choice_when_slow() {
+    use crate::py::jit::{execute_registered_jit, jit_log_clear_hook, jit_log_hook, register_quantum_jit};
+    use pyo3::Python;
+    use std::env;
+    use std::sync::{Arc, Mutex};
+
+    // force all logs on and make the threshold 0 so we can validate the text.
+    env::set_var("IRIS_JIT_LOG", "1");
+    env::set_var("IRIS_JIT_QUANTUM", "1");
+    env::set_var("IRIS_JIT_QUANTUM_LOG_NS", "0");
+
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let logs_clone = logs.clone();
+    jit_log_hook(move |line| {
+        logs_clone.lock().unwrap().push(line);
+    });
+
+    let args = vec!["x".to_string()];
+    let entries = compile_jit_quantum("x + 1", &args);
+    assert!(!entries.is_empty());
+
+    let func_key = 12345;
+    register_quantum_jit(func_key, entries);
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let tup = pyo3::types::PyTuple::new(py, &[1.0_f64]);
+        let res = execute_registered_jit(py, func_key, tup).unwrap().unwrap();
+        let out: f64 = res.extract(py).unwrap();
+        assert_eq!(out, 2.0);
+    });
+
+    let logged = logs.lock().unwrap();
+    assert!(logged.iter().any(|line| line.contains("[Iris][jit][quantum]")));
+
+    jit_log_clear_hook();
+    env::remove_var("IRIS_JIT_LOG");
+    env::remove_var("IRIS_JIT_QUANTUM");
+    env::remove_var("IRIS_JIT_QUANTUM_LOG_NS");
+}
+
+#[test]
 fn jit_builder_pic_flag_behavior() {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();

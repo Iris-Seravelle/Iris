@@ -220,55 +220,111 @@ pub fn execute_registered_jit(
 ) -> Option<pyo3::PyResult<pyo3::PyObject>> {
     if crate::py::jit::quantum_speculation_enabled() {
         if let Some(map) = QUANTUM_REGISTRY.get() {
-            let (entry, idx, fallback_entries) = {
+            let (entry, idx, fallback_entries, should_use_quantum) = {
                 let mut guard = map.lock().unwrap();
                 if let Some(state) = guard.get_mut(&func_key) {
                     if state.entries.is_empty() {
-                        (None, 0usize, Vec::new())
+                        (None, 0usize, Vec::new(), false)
                     } else {
-                        let idx = choose_quantum_index(state);
-                        let entry = Some(state.entries[idx].clone());
-                        let mut fallbacks = Vec::new();
-                        for (i, e) in state.entries.iter().enumerate() {
-                            if i != idx {
-                                fallbacks.push((i, e.clone()));
+                        // Decide whether to use multi-variant quantum dispatch.
+                        // If the observed runtime remains below threshold, stick to the
+                        // baseline and avoid speculative overhead.
+                        let speculation_threshold_ns =
+                            crate::py::jit::quantum_speculation_threshold_ns();
+                        let best_ewma = state
+                            .stats
+                            .iter()
+                            .filter(|s| s.runs > 0)
+                            .map(|s| s.ewma_ns)
+                            .fold(f64::MAX, |a, b| a.min(b));
+                        let best_ewma = if best_ewma == f64::MAX { 0.0 } else { best_ewma };
+                        let use_quantum = best_ewma >= (speculation_threshold_ns as f64);
+
+                        if use_quantum {
+                            let idx = choose_quantum_index(state);
+                            let entry = Some(state.entries[idx].clone());
+                            let mut fallbacks = Vec::new();
+                            for (i, e) in state.entries.iter().enumerate() {
+                                if i != idx {
+                                    fallbacks.push((i, e.clone()));
+                                }
                             }
+                            (entry, idx, fallbacks, true)
+                        } else {
+                            // Baseline execution only
+                            (Some(state.entries[0].clone()), 0, Vec::new(), false)
                         }
-                        (entry, idx, fallbacks)
                     }
                 } else {
-                    (None, 0usize, Vec::new())
+                    (None, 0usize, Vec::new(), false)
                 }
             };
 
             if let Some(entry) = entry {
+                let quantum_total = 1 + fallback_entries.len();
+                let log_threshold_ns = crate::py::jit::quantum_log_threshold_ns();
+
+                let log_if_slow = |chosen: usize,
+                                   used: usize,
+                                   elapsed_ns: u64,
+                                   note: &str| {
+                    if crate::py::jit::jit_logging_enabled() && elapsed_ns >= log_threshold_ns {
+                        crate::py::jit::jit_log(|| {
+                            format!(
+                                "[Iris][jit][quantum] func_key={} chosen={}/{} used={} elapsed={}ns {}",
+                                func_key, chosen, quantum_total, used, elapsed_ns, note
+                            )
+                        });
+                    }
+                };
+
                 let start = Instant::now();
                 match execute_jit_func(py, &entry, args) {
                     Ok(obj) => {
-                        update_quantum_stats(func_key, idx, start.elapsed().as_nanos() as u64, true);
+                        let elapsed = start.elapsed().as_nanos() as u64;
+                        update_quantum_stats(func_key, idx, elapsed, true);
+                        log_if_slow(idx, idx, elapsed, if should_use_quantum { "success" } else { "baseline" });
                         return Some(Ok(obj));
                     }
                     Err(primary_err) => {
-                        update_quantum_stats(func_key, idx, start.elapsed().as_nanos() as u64, false);
-                        for (fb_idx, fb_entry) in fallback_entries {
-                            let start_fb = Instant::now();
-                            match execute_jit_func(py, &fb_entry, args) {
-                                Ok(obj) => {
-                                    update_quantum_stats(
-                                        func_key,
-                                        fb_idx,
-                                        start_fb.elapsed().as_nanos() as u64,
-                                        true,
-                                    );
-                                    return Some(Ok(obj));
-                                }
-                                Err(_) => {
-                                    update_quantum_stats(
-                                        func_key,
-                                        fb_idx,
-                                        start_fb.elapsed().as_nanos() as u64,
-                                        false,
-                                    );
+                        let elapsed = start.elapsed().as_nanos() as u64;
+                        update_quantum_stats(func_key, idx, elapsed, false);
+                        log_if_slow(idx, idx, elapsed, "primary_failed");
+                        if should_use_quantum {
+                            for (fb_idx, fb_entry) in fallback_entries {
+                                let start_fb = Instant::now();
+                                match execute_jit_func(py, &fb_entry, args) {
+                                    Ok(obj) => {
+                                        let elapsed_fb = start_fb.elapsed().as_nanos() as u64;
+                                        update_quantum_stats(
+                                            func_key,
+                                            fb_idx,
+                                            elapsed_fb,
+                                            true,
+                                        );
+                                        log_if_slow(
+                                            idx,
+                                            fb_idx,
+                                            elapsed_fb,
+                                            "fallback_success",
+                                        );
+                                        return Some(Ok(obj));
+                                    }
+                                    Err(_) => {
+                                        let elapsed_fb = start_fb.elapsed().as_nanos() as u64;
+                                        update_quantum_stats(
+                                            func_key,
+                                            fb_idx,
+                                            elapsed_fb,
+                                            false,
+                                        );
+                                        log_if_slow(
+                                            idx,
+                                            fb_idx,
+                                            elapsed_fb,
+                                            "fallback_failed",
+                                        );
+                                    }
                                 }
                             }
                         }
