@@ -284,8 +284,17 @@ def _seed_quantum_from_metadata(
     arg_names: Optional[list[str]],
     return_type: Optional[str],
 ) -> bool:
-    if _msgpack is None or _seed_quantum_profile is None or src is None or arg_names is None:
-        _jit_meta_log("seed skipped: missing msgpack/seed API/src/arg_names")
+    if _msgpack is None:
+        _jit_meta_log("seed skipped: msgpack unavailable")
+        return False
+    if _seed_quantum_profile is None:
+        _jit_meta_log("seed skipped: seed API unavailable")
+        return False
+    if src is None:
+        _jit_meta_log("seed skipped: source expression unavailable")
+        return False
+    if arg_names is None:
+        _jit_meta_log("seed skipped: arg_names unavailable")
         return False
     path = _metadata_cache_path(func)
     if path is None:
@@ -333,8 +342,17 @@ def _maybe_persist_quantum_metadata(
     return_type: Optional[str],
     force: bool = False,
 ) -> None:
-    if _msgpack is None or _get_quantum_profile is None or src is None or arg_names is None:
-        _jit_meta_log("persist skipped: missing msgpack/profile API/src/arg_names")
+    if _msgpack is None:
+        _jit_meta_log("persist skipped: msgpack unavailable")
+        return
+    if _get_quantum_profile is None:
+        _jit_meta_log("persist skipped: profile API unavailable")
+        return
+    if src is None:
+        _jit_meta_log("persist skipped: source expression unavailable")
+        return
+    if arg_names is None:
+        _jit_meta_log("persist skipped: arg_names unavailable")
         return
     path = _metadata_cache_path(func)
     if path is None:
@@ -1383,15 +1401,17 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             except Exception:
                 pass
 
+        effective_src: Optional[str] = src if src is not None else aggressive_src
+
         preseeded_quantum = False
         if strategy == "jit":
-            preseeded_quantum = _seed_quantum_from_metadata(func, src, arg_names, return_type)
+            preseeded_quantum = _seed_quantum_from_metadata(func, effective_src, arg_names, return_type)
 
         if register_offload is not None:
             try:
-                register_offload(func, strategy, return_type, src, arg_names)
+                register_offload(func, strategy, return_type, effective_src, arg_names)
                 if strategy == "jit" and not preseeded_quantum:
-                    _seed_quantum_from_metadata(func, src, arg_names, return_type)
+                    _seed_quantum_from_metadata(func, effective_src, arg_names, return_type)
             except Exception as e:  # pragma: no cover - defensive
                 warnings.warn(f"offload registration failed: {e}")
 
@@ -1404,18 +1424,15 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
             
         elif strategy == "jit" and call_jit is not None:
             if src is None and loop_plan is None and scalar_while_plan is None and scalar_for_plan is None:
-                if aggressive_src is not None and arg_names is not None and register_offload is not None:
-                    try:
-                        register_offload(func, strategy, return_type, aggressive_src, arg_names)
-                    except Exception:
-                        pass
-
+                if aggressive_src is not None and arg_names is not None:
                     @functools.wraps(func)
                     def aggressive_vector_wrapper(*args: Any, **kwargs: Any) -> Any:
                         has_vector = any(_is_vector_like(a) for a in args)
                         if has_vector:
                             try:
-                                return call_jit(func, args, kwargs)
+                                res = call_jit(func, args, kwargs)
+                                _maybe_persist_quantum_metadata(func, aggressive_src, arg_names, return_type)
+                                return res
                             except RuntimeError as e:
                                 msg = str(e)
                                 if (

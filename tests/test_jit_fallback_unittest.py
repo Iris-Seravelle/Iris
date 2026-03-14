@@ -158,6 +158,119 @@ class TestJitFallback(unittest.TestCase):
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
 
+    def test_aggressive_jit_path_persists_quantum_metadata(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+        original_maybe_persist = jit_mod._maybe_persist_quantum_metadata
+
+        seen = {"persist": [], "register": []}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                return 42.0
+
+            def fake_register_offload(_func, _strategy, _return_type, src, arg_names):
+                seen["register"].append((src, list(arg_names) if isinstance(arg_names, list) else arg_names))
+                return None
+
+            def fake_maybe_persist(func, src, arg_names, return_type, force=False):
+                seen["persist"].append((func.__name__, src, list(arg_names) if isinstance(arg_names, list) else arg_names, return_type, force))
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+            jit_mod._maybe_persist_quantum_metadata = fake_maybe_persist
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def branch_like(price, vol, strike):
+                x = price / strike
+                if x > 1.0:
+                    return x + vol
+                return x - vol
+
+            prices = array.array("d", [100.0, 101.0, 102.0])
+            vols = array.array("d", [0.2, 0.2, 0.2])
+            strikes = array.array("d", [105.0, 105.0, 105.0])
+            out = branch_like(prices, vols, strikes)
+
+            self.assertEqual(out, 42.0)
+            self.assertTrue(seen["persist"], "expected metadata persistence on aggressive JIT path")
+            _, persisted_src, persisted_args, persisted_return_type, persisted_force = seen["persist"][0]
+            self.assertIsNotNone(persisted_src)
+            self.assertEqual(persisted_args, ["price", "vol", "strike"])
+            self.assertEqual(persisted_return_type, "float")
+            self.assertFalse(persisted_force)
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+            jit_mod._maybe_persist_quantum_metadata = original_maybe_persist
+
+    def test_aggressive_path_uses_effective_src_for_seed_register_and_persist(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+        original_maybe_persist = jit_mod._maybe_persist_quantum_metadata
+        original_seed_from_metadata = jit_mod._seed_quantum_from_metadata
+        original_extract_return_expr_plan = jit_mod._extract_return_expr_plan
+        original_extract_inlined_expr_plan = jit_mod._extract_inlined_expr_plan
+        original_extract_stateful_loop_plan = jit_mod._extract_stateful_loop_plan
+        original_extract_scalar_while_plan = jit_mod._extract_scalar_while_plan
+        original_extract_scalar_for_plan = jit_mod._extract_scalar_for_plan
+        original_extract_last_return_expr = jit_mod._extract_last_return_expr
+
+        seen = {"seed": [], "register": [], "persist": []}
+
+        try:
+            jit_mod._extract_return_expr_plan = lambda *a, **k: None
+            jit_mod._extract_inlined_expr_plan = lambda *a, **k: None
+            jit_mod._extract_stateful_loop_plan = lambda *a, **k: None
+            jit_mod._extract_scalar_while_plan = lambda *a, **k: None
+            jit_mod._extract_scalar_for_plan = lambda *a, **k: None
+            jit_mod._extract_last_return_expr = lambda *a, **k: "x + 1"
+
+            def fake_seed(func, src, arg_names, return_type):
+                seen["seed"].append(src)
+                return False
+
+            def fake_register(_func, _strategy, _return_type, src, _arg_names):
+                seen["register"].append(src)
+                return None
+
+            def fake_persist(_func, src, _arg_names, _return_type, force=False):
+                seen["persist"].append((src, force))
+
+            def fake_call_jit(_func, _args, _kwargs):
+                return 99.0
+
+            jit_mod._seed_quantum_from_metadata = fake_seed
+            jit_mod.register_offload = fake_register
+            jit_mod._maybe_persist_quantum_metadata = fake_persist
+            jit_mod.call_jit = fake_call_jit
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def complex_branch(x):
+                if x > 0:
+                    return x + 1
+                return x - 1
+
+            out = complex_branch(array.array("d", [1.0, 2.0]))
+            self.assertEqual(out, 99.0)
+            self.assertTrue(seen["seed"], "expected seed attempts")
+            self.assertTrue(seen["register"], "expected register call")
+            self.assertTrue(seen["persist"], "expected persist call")
+            self.assertTrue(all(src == "x + 1" for src in seen["seed"]))
+            self.assertEqual(seen["register"], ["x + 1"])
+            self.assertEqual(seen["persist"], [("x + 1", False)])
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+            jit_mod._maybe_persist_quantum_metadata = original_maybe_persist
+            jit_mod._seed_quantum_from_metadata = original_seed_from_metadata
+            jit_mod._extract_return_expr_plan = original_extract_return_expr_plan
+            jit_mod._extract_inlined_expr_plan = original_extract_inlined_expr_plan
+            jit_mod._extract_stateful_loop_plan = original_extract_stateful_loop_plan
+            jit_mod._extract_scalar_while_plan = original_extract_scalar_while_plan
+            jit_mod._extract_scalar_for_plan = original_extract_scalar_for_plan
+            jit_mod._extract_last_return_expr = original_extract_last_return_expr
+
     def test_inlined_assignments_use_scalar_jit_path(self):
         original_call_jit = jit_mod.call_jit
         original_register_offload = jit_mod.register_offload
