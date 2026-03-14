@@ -53,6 +53,39 @@ fn compile_jit_quantum_variants() {
 }
 
 #[test]
+fn quantum_profile_snapshot_and_seed_roundtrip() {
+    use crate::py::jit::codegen::{
+        quantum_profile_snapshot,
+        seed_quantum_profile,
+        QuantumProfileSeed,
+    };
+
+    let args = vec!["x".to_string()];
+    let entries = compile_jit_quantum("x + 1", &args, crate::py::jit::codegen::JitReturnType::Float);
+    assert!(!entries.is_empty());
+
+    let func_key = 987_654;
+    register_quantum_jit(func_key, entries);
+
+    let before = quantum_profile_snapshot(func_key).expect("snapshot should exist");
+    assert!(!before.is_empty());
+    assert!(before.iter().all(|s| s.runs == 0));
+
+    let seeded = vec![QuantumProfileSeed {
+        index: 0,
+        ewma_ns: 1_500_000.0,
+        runs: 42,
+        failures: 1,
+    }];
+    assert!(seed_quantum_profile(func_key, &seeded));
+
+    let after = quantum_profile_snapshot(func_key).expect("snapshot should still exist");
+    assert_eq!(after[0].runs, 42);
+    assert_eq!(after[0].failures, 1);
+    assert!((after[0].ewma_ns - 1_500_000.0).abs() < f64::EPSILON);
+}
+
+#[test]
 #[cfg(feature = "pyo3")]
 fn quantum_speculation_logs_choice_when_slow() {
     use crate::py::jit::{execute_registered_jit, jit_log_clear_hook, jit_log_hook, register_quantum_jit};

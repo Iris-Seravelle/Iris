@@ -14,6 +14,12 @@ import textwrap
 import warnings
 import copy
 import array as _array
+import hashlib
+import json
+import os
+import platform
+import sys
+import time
 from typing import Callable, Optional, Any
 
 try:
@@ -25,6 +31,8 @@ try:
         is_jit_logging_enabled,
         configure_quantum_speculation,
         is_quantum_speculation_enabled,
+        get_quantum_profile as _get_quantum_profile,
+        seed_quantum_profile as _seed_quantum_profile,
         configure_quantum_speculation_threshold as _configure_quantum_speculation_threshold,
         get_quantum_speculation_threshold as _get_quantum_speculation_threshold,
         configure_quantum_log_threshold as _configure_quantum_log_threshold,
@@ -39,6 +47,8 @@ except ImportError:  # allow tests to import without extension built
     is_jit_logging_enabled = None  # type: ignore
     configure_quantum_speculation = None  # type: ignore
     is_quantum_speculation_enabled = None  # type: ignore
+    _get_quantum_profile = None  # type: ignore
+    _seed_quantum_profile = None  # type: ignore
     _configure_quantum_speculation_threshold = None  # type: ignore
     _get_quantum_speculation_threshold = None  # type: ignore
     _configure_quantum_log_threshold = None  # type: ignore
@@ -48,6 +58,154 @@ try:
     from .iris import call_jit_step_loop_f64  # type: ignore
 except Exception:
     call_jit_step_loop_f64 = None  # type: ignore
+
+
+_IRIS_META_SCHEMA = 1
+_IRIS_META_FILENAME = ".iris.meta.json"
+_IRIS_META_FLUSH_EVERY = 16
+_IRIS_META_COUNTERS: dict[str, int] = {}
+
+
+def _metadata_cache_path(func: Callable[..., Any]) -> Optional[str]:
+    try:
+        source_file = inspect.getsourcefile(func) or inspect.getfile(func)
+    except Exception:
+        return None
+    if not source_file:
+        return None
+    module_dir = os.path.dirname(os.path.abspath(source_file))
+    pycache_dir = os.path.join(module_dir, "__pycache__")
+    return os.path.join(pycache_dir, _IRIS_META_FILENAME)
+
+
+def _metadata_key(
+    func: Callable[..., Any],
+    src: str,
+    arg_names: list[str],
+    return_type: Optional[str],
+) -> str:
+    fn_module = getattr(func, "__module__", "")
+    fn_qualname = getattr(func, "__qualname__", getattr(func, "__name__", ""))
+    stable_payload = {
+        "module": fn_module,
+        "qualname": fn_qualname,
+        "src": src,
+        "args": arg_names,
+        "return_type": return_type or "float",
+        "py": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "arch": platform.machine(),
+    }
+    payload = json.dumps(stable_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_metadata(path: str) -> dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+        if int(doc.get("schema", 0)) != _IRIS_META_SCHEMA:
+            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+        entries = doc.get("entries")
+        if not isinstance(entries, dict):
+            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+        return doc
+    except Exception:
+        return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+
+
+def _write_metadata(path: str, doc: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, sort_keys=True, separators=(",", ":"))
+    os.replace(temp_path, path)
+
+
+def _seed_quantum_from_metadata(
+    func: Callable[..., Any],
+    src: Optional[str],
+    arg_names: Optional[list[str]],
+    return_type: Optional[str],
+) -> None:
+    if _seed_quantum_profile is None or src is None or arg_names is None:
+        return
+    path = _metadata_cache_path(func)
+    if path is None:
+        return
+    key = _metadata_key(func, src, arg_names, return_type)
+    doc = _read_metadata(path)
+    entry = doc.get("entries", {}).get(key)
+    if not isinstance(entry, dict):
+        return
+    rows = entry.get("profile")
+    if not isinstance(rows, list) or not rows:
+        return
+    normalized: list[tuple[int, float, int, int]] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 4:
+            continue
+        try:
+            normalized.append((int(row[0]), float(row[1]), int(row[2]), int(row[3])))
+        except Exception:
+            continue
+    if not normalized:
+        return
+    try:
+        _seed_quantum_profile(func, normalized)
+    except Exception:
+        pass
+
+
+def _maybe_persist_quantum_metadata(
+    func: Callable[..., Any],
+    src: Optional[str],
+    arg_names: Optional[list[str]],
+    return_type: Optional[str],
+) -> None:
+    if _get_quantum_profile is None or src is None or arg_names is None:
+        return
+    path = _metadata_cache_path(func)
+    if path is None:
+        return
+    key = _metadata_key(func, src, arg_names, return_type)
+    count = _IRIS_META_COUNTERS.get(key, 0) + 1
+    _IRIS_META_COUNTERS[key] = count
+    if count % _IRIS_META_FLUSH_EVERY != 0:
+        return
+    try:
+        rows = _get_quantum_profile(func)
+    except Exception:
+        return
+    if not rows:
+        return
+    normalized_rows: list[list[Any]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            continue
+        try:
+            normalized_rows.append([int(row[0]), float(row[1]), int(row[2]), int(row[3])])
+        except Exception:
+            continue
+    if not normalized_rows:
+        return
+
+    try:
+        doc = _read_metadata(path)
+        entries = doc.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            doc["entries"] = entries
+        entries[key] = {
+            "updated_ns": time.time_ns(),
+            "return_type": return_type or "float",
+            "arg_count": len(arg_names),
+            "profile": normalized_rows,
+        }
+        _write_metadata(path, doc)
+    except Exception:
+        pass
 
 
 def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:
@@ -834,6 +992,8 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
         if register_offload is not None:
             try:
                 register_offload(func, strategy, return_type, src, arg_names)
+                if strategy == "jit":
+                    _seed_quantum_from_metadata(func, src, arg_names, return_type)
             except Exception as e:  # pragma: no cover - defensive
                 warnings.warn(f"offload registration failed: {e}")
 
@@ -915,6 +1075,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                             return total
                     except Exception:
                         pass
+                    _maybe_persist_quantum_metadata(func, src, arg_names, return_type)
                     return res
 
                 return jit_wrapper

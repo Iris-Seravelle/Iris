@@ -80,6 +80,22 @@ struct QuantumStats {
     failures: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct QuantumProfilePoint {
+    pub index: usize,
+    pub ewma_ns: f64,
+    pub runs: u64,
+    pub failures: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuantumProfileSeed {
+    pub index: usize,
+    pub ewma_ns: f64,
+    pub runs: u64,
+    pub failures: u64,
+}
+
 impl Default for QuantumStats {
     fn default() -> Self {
         Self {
@@ -180,6 +196,47 @@ pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
     };
     let map = QUANTUM_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     map.lock().unwrap().insert(func_key, state);
+}
+
+pub fn quantum_profile_snapshot(func_key: usize) -> Option<Vec<QuantumProfilePoint>> {
+    QUANTUM_REGISTRY.get().and_then(|map| {
+        map.lock().unwrap().get(&func_key).map(|state| {
+            state
+                .stats
+                .iter()
+                .enumerate()
+                .map(|(index, stats)| QuantumProfilePoint {
+                    index,
+                    ewma_ns: stats.ewma_ns,
+                    runs: stats.runs,
+                    failures: stats.failures,
+                })
+                .collect()
+        })
+    })
+}
+
+pub fn seed_quantum_profile(func_key: usize, seeds: &[QuantumProfileSeed]) -> bool {
+    let Some(map) = QUANTUM_REGISTRY.get() else {
+        return false;
+    };
+    let mut guard = map.lock().unwrap();
+    let Some(state) = guard.get_mut(&func_key) else {
+        return false;
+    };
+
+    for seed in seeds {
+        if let Some(stats) = state.stats.get_mut(seed.index) {
+            stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
+                seed.ewma_ns
+            } else {
+                0.0
+            };
+            stats.runs = seed.runs;
+            stats.failures = seed.failures;
+        }
+    }
+    true
 }
 
 fn choose_quantum_index(state: &mut QuantumState) -> usize {

@@ -30,10 +30,13 @@ use crate::py::jit::codegen::{
     compile_jit_with_return_type,
     execute_registered_jit,
     lookup_jit,
+    quantum_profile_snapshot,
     register_jit,
     register_quantum_jit,
     register_named_jit,
+    seed_quantum_profile as seed_quantum_profile_state,
     JitReturnType,
+    QuantumProfileSeed,
 };
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -266,6 +269,8 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(configure_quantum_log_threshold, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(get_quantum_log_threshold, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(set_quantum_log_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(get_quantum_profile, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(seed_quantum_profile, m)?)?;
     Ok(())
 }
 
@@ -357,6 +362,33 @@ fn get_quantum_log_threshold() -> PyResult<u64> {
 #[pyfunction]
 fn set_quantum_log_threshold(threshold_ns: Option<u64>, env_var: Option<String>) -> PyResult<u64> {
     configure_quantum_log_threshold(threshold_ns, env_var)
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn get_quantum_profile(func: PyObject) -> PyResult<Vec<(usize, f64, u64, u64)>> {
+    let key = func.as_ptr() as usize;
+    let points = quantum_profile_snapshot(key).unwrap_or_default();
+    Ok(points
+        .into_iter()
+        .map(|point| (point.index, point.ewma_ns, point.runs, point.failures))
+        .collect())
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn seed_quantum_profile(func: PyObject, rows: Vec<(usize, f64, u64, u64)>) -> PyResult<bool> {
+    let key = func.as_ptr() as usize;
+    let seeds = rows
+        .into_iter()
+        .map(|(index, ewma_ns, runs, failures)| QuantumProfileSeed {
+            index,
+            ewma_ns,
+            runs,
+            failures,
+        })
+        .collect::<Vec<_>>();
+    Ok(seed_quantum_profile_state(key, &seeds))
 }
 
 /// Register a Python function for offloading.
