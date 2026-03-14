@@ -110,6 +110,8 @@ impl Default for QuantumStats {
 struct QuantumState {
     entries: Vec<JitEntry>,
     stats: Vec<QuantumStats>,
+    active: Vec<bool>,
+    baseline_idx: usize,
     round_robin: usize,
     total_runs: u64,
 }
@@ -185,17 +187,156 @@ pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
     if entries.is_empty() {
         return;
     }
+    let entry_count = entries.len();
     // prefer optimized candidate (first) as baseline fallback mapping
     register_jit(func_key, entries[0].clone());
     let stats = vec![QuantumStats::default(); entries.len()];
     let state = QuantumState {
         entries: std::mem::take(&mut entries),
         stats,
+        active: vec![true; entry_count],
+        baseline_idx: 0,
         round_robin: 0,
         total_runs: 0,
     };
     let map = QUANTUM_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     map.lock().unwrap().insert(func_key, state);
+}
+
+fn active_indices(state: &QuantumState) -> Vec<usize> {
+    state
+        .active
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, is_active)| if *is_active { Some(idx) } else { None })
+        .collect()
+}
+
+fn quantum_score(stats: &QuantumStats) -> f64 {
+    let penalty = 1.0 + (stats.failures as f64 * 0.25);
+    if stats.ewma_ns > 0.0 {
+        stats.ewma_ns * penalty
+    } else {
+        f64::MAX / 4.0
+    }
+}
+
+fn quantum_stability_score(state: &QuantumState) -> f64 {
+    let active = active_indices(state);
+    if active.len() <= 1 {
+        return 1.0;
+    }
+
+    let mut total_runs = 0u64;
+    let mut total_failures = 0u64;
+    let mut min_ewma: f64 = f64::MAX;
+    let mut max_ewma: f64 = 0.0;
+    let mut ewma_count = 0u64;
+
+    for idx in active {
+        let s = &state.stats[idx];
+        total_runs = total_runs.saturating_add(s.runs);
+        total_failures = total_failures.saturating_add(s.failures);
+        if s.runs > 0 && s.ewma_ns > 0.0 {
+            ewma_count = ewma_count.saturating_add(1);
+            min_ewma = min_ewma.min(s.ewma_ns);
+            max_ewma = max_ewma.max(s.ewma_ns);
+        }
+    }
+
+    let min_runs = crate::py::jit::quantum_stability_min_runs();
+    if total_runs < min_runs {
+        return 0.0;
+    }
+
+    let denom = (total_runs.saturating_add(total_failures)) as f64;
+    let failure_rate = if denom > 0.0 {
+        (total_failures as f64 / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let dispersion = if ewma_count >= 2 && max_ewma > 0.0 && min_ewma < f64::MAX {
+        ((max_ewma - min_ewma) / max_ewma).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    (1.0 - failure_rate) * (1.0 - dispersion)
+}
+
+fn reconcile_quantum_lifecycle_state(state: &mut QuantumState) {
+    if state.entries.is_empty() {
+        return;
+    }
+
+    let fail_limit = crate::py::jit::quantum_variant_failure_limit();
+    let promotion_min_runs = crate::py::jit::quantum_variant_promotion_min_runs();
+    let baseline = state.baseline_idx.min(state.entries.len() - 1);
+    state.baseline_idx = baseline;
+
+    for idx in 0..state.entries.len() {
+        if idx == baseline {
+            state.active[idx] = true;
+            continue;
+        }
+        if !state.active[idx] {
+            continue;
+        }
+        let s = &state.stats[idx];
+        if s.failures >= fail_limit && s.runs < promotion_min_runs {
+            state.active[idx] = false;
+        }
+    }
+
+    let baseline_score = quantum_score(&state.stats[baseline]);
+    let mut best_idx = baseline;
+    let mut best_score = baseline_score;
+    for idx in 0..state.entries.len() {
+        if !state.active[idx] {
+            continue;
+        }
+        let s = &state.stats[idx];
+        if s.runs < promotion_min_runs {
+            continue;
+        }
+        let score = quantum_score(s);
+        if score < best_score * 0.90 {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+    state.baseline_idx = best_idx;
+    state.active[state.baseline_idx] = true;
+}
+
+#[cfg(test)]
+pub(crate) fn reconcile_quantum_lifecycle(func_key: usize) -> bool {
+    let Some(map) = QUANTUM_REGISTRY.get() else {
+        return false;
+    };
+    let mut guard = map.lock().unwrap();
+    let Some(state) = guard.get_mut(&func_key) else {
+        return false;
+    };
+    reconcile_quantum_lifecycle_state(state);
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn quantum_active_variant_count(func_key: usize) -> Option<usize> {
+    QUANTUM_REGISTRY.get().and_then(|map| {
+        map.lock().unwrap().get(&func_key).map(|state| {
+            state.active.iter().filter(|a| **a).count()
+        })
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn quantum_stability_for(func_key: usize) -> Option<f64> {
+    QUANTUM_REGISTRY.get().and_then(|map| {
+        map.lock().unwrap().get(&func_key).map(quantum_stability_score)
+    })
 }
 
 pub fn quantum_profile_snapshot(func_key: usize) -> Option<Vec<QuantumProfilePoint>> {
@@ -241,20 +382,30 @@ pub fn seed_quantum_profile(func_key: usize, seeds: &[QuantumProfileSeed]) -> bo
 
 fn choose_quantum_index(state: &mut QuantumState) -> usize {
     for (idx, s) in state.stats.iter().enumerate() {
+        if !state.active.get(idx).copied().unwrap_or(false) {
+            continue;
+        }
         if s.runs == 0 {
             return idx;
         }
     }
+
+    let active = active_indices(state);
+    if active.is_empty() {
+        return state.baseline_idx.min(state.entries.len().saturating_sub(1));
+    }
+
     state.total_runs = state.total_runs.saturating_add(1);
     if state.total_runs % 16 == 0 {
-        state.round_robin = (state.round_robin + 1) % state.entries.len();
-        return state.round_robin;
+        let rr = state.round_robin % active.len();
+        state.round_robin = (rr + 1) % active.len();
+        return active[rr];
     }
-    let mut best_idx = 0usize;
+    let mut best_idx = state.baseline_idx.min(state.entries.len().saturating_sub(1));
     let mut best_score = f64::MAX;
-    for (idx, s) in state.stats.iter().enumerate() {
-        let penalty = 1.0 + (s.failures as f64 * 0.25);
-        let score = if s.ewma_ns > 0.0 { s.ewma_ns * penalty } else { f64::MAX / 4.0 };
+    for idx in active {
+        let s = &state.stats[idx];
+        let score = quantum_score(s);
         if score < best_score {
             best_score = score;
             best_idx = idx;
@@ -279,6 +430,7 @@ fn update_quantum_stats(func_key: usize, idx: usize, elapsed_ns: u64, success: b
                     stats.failures = stats.failures.saturating_add(1);
                 }
             }
+                reconcile_quantum_lifecycle_state(state);
         }
     }
 }
@@ -305,25 +457,34 @@ pub fn execute_registered_jit(
                         let best_ewma = state
                             .stats
                             .iter()
+                            .enumerate()
+                            .filter(|(idx, _)| state.active.get(*idx).copied().unwrap_or(false))
+                            .map(|(_, s)| s)
                             .filter(|s| s.runs > 0)
                             .map(|s| s.ewma_ns)
                             .fold(f64::MAX, |a, b| a.min(b));
                         let best_ewma = if best_ewma == f64::MAX { 0.0 } else { best_ewma };
-                        let use_quantum = best_ewma >= (speculation_threshold_ns as f64);
+                        let stability = quantum_stability_score(state);
+                        let min_stability = crate::py::jit::quantum_stability_min_score();
+                        let active_count = active_indices(state).len();
+                        let use_quantum = active_count > 1
+                            && best_ewma >= (speculation_threshold_ns as f64)
+                            && stability >= min_stability;
 
                         if use_quantum {
                             let idx = choose_quantum_index(state);
                             let entry = Some(state.entries[idx].clone());
                             let mut fallbacks = Vec::new();
                             for (i, e) in state.entries.iter().enumerate() {
-                                if i != idx {
+                                if i != idx && state.active.get(i).copied().unwrap_or(false) {
                                     fallbacks.push((i, e.clone()));
                                 }
                             }
                             (entry, idx, fallbacks, true)
                         } else {
                             // Baseline execution only
-                            (Some(state.entries[0].clone()), 0, Vec::new(), false)
+                            let baseline_idx = state.baseline_idx.min(state.entries.len() - 1);
+                            (Some(state.entries[baseline_idx].clone()), baseline_idx, Vec::new(), false)
                         }
                     }
                 } else {

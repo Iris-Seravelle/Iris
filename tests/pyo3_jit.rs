@@ -2,7 +2,253 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[tokio::test]
+async fn py_jit_quantum_profile_persists_in_short_run() {
+    pyo3::prepare_freethreaded_python();
+
+    let has_msgpack = Python::with_gil(|py| {
+        py.import("importlib.util")
+            .ok()
+            .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
+            .map(|spec| !spec.is_none())
+            .unwrap_or(false)
+    });
+    if !has_msgpack {
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("iris_jit_meta_short_{}", nonce));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let module_path: PathBuf = temp_dir.join("warm_short_mod.py");
+
+    let module_src = r#"
+from iris.jit import offload
+
+@offload(strategy="jit", return_type="float")
+def warm_add_short(x):
+    return x + 1
+"#;
+    fs::write(&module_path, module_src).unwrap();
+
+    Python::with_gil(|py| {
+        let ext = iris::py::make_module(py).expect("make_module");
+        let sys = py.import("sys").unwrap();
+        let modules = sys.getattr("modules").unwrap().downcast::<PyDict>().unwrap();
+
+        let pkg = PyModule::new(py, "iris").unwrap();
+        let package_path = vec!["iris".to_string()];
+        pkg.setattr("__path__", package_path).unwrap();
+        pkg.setattr("iris", ext.clone_ref(py)).unwrap();
+
+        modules.set_item("iris", pkg).unwrap();
+        modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
+
+        let importlib_util = py.import("importlib.util").unwrap();
+        let module_name = "warm_short_mod";
+        let module_path_s = module_path.to_string_lossy().to_string();
+
+        let spec = importlib_util
+            .getattr("spec_from_file_location")
+            .unwrap()
+            .call1((module_name, module_path_s.clone()))
+            .unwrap();
+        let module = importlib_util
+            .getattr("module_from_spec")
+            .unwrap()
+            .call1((spec,))
+            .unwrap();
+        modules.set_item(module_name, module).unwrap();
+
+        let jit_mod = py.import("iris.jit").unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation")
+            .unwrap()
+            .call1((true, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation_threshold")
+            .unwrap()
+            .call1((0_i64, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_compile_budget")
+            .unwrap()
+            .call1((1_000_000_000_i64, 1_000_000_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_cooldown")
+            .unwrap()
+            .call1((0_i64, 0_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+
+        spec.getattr("loader")
+            .unwrap()
+            .call_method1("exec_module", (module,))
+            .unwrap();
+
+        let warm_add = module.getattr("warm_add_short").unwrap();
+        for i in 0..8 {
+            let out: f64 = warm_add.call1((i as f64,)).unwrap().extract().unwrap();
+            assert_eq!(out, i as f64 + 1.0);
+        }
+
+        let meta_path = temp_dir.join("__pycache__").join(".iris.meta.bin");
+        assert!(meta_path.exists(), "expected persisted metadata file at {:?}", meta_path);
+    });
+
+    let _ = fs::remove_file(&module_path);
+    let _ = fs::remove_file(temp_dir.join("__pycache__").join(".iris.meta.bin"));
+    let _ = fs::remove_dir_all(temp_dir.join("__pycache__"));
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn py_jit_quantum_metadata_unchanged_does_not_rewrite() {
+    pyo3::prepare_freethreaded_python();
+
+    let has_msgpack = Python::with_gil(|py| {
+        py.import("importlib.util")
+            .ok()
+            .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
+            .map(|spec| !spec.is_none())
+            .unwrap_or(false)
+    });
+    if !has_msgpack {
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("iris_jit_meta_noop_{}", nonce));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let module_path: PathBuf = temp_dir.join("warm_noop_mod.py");
+
+    let module_src = r#"
+from iris.jit import offload
+
+@offload(strategy="jit", return_type="float")
+def warm_noop(x):
+    return x + 1
+"#;
+    fs::write(&module_path, module_src).unwrap();
+
+    Python::with_gil(|py| {
+        let ext = iris::py::make_module(py).expect("make_module");
+        let sys = py.import("sys").unwrap();
+        let modules = sys.getattr("modules").unwrap().downcast::<PyDict>().unwrap();
+
+        let pkg = PyModule::new(py, "iris").unwrap();
+        let package_path = vec!["iris".to_string()];
+        pkg.setattr("__path__", package_path).unwrap();
+        pkg.setattr("iris", ext.clone_ref(py)).unwrap();
+
+        modules.set_item("iris", pkg).unwrap();
+        modules.set_item("iris.iris", ext.clone_ref(py)).unwrap();
+
+        let importlib_util = py.import("importlib.util").unwrap();
+        let module_name = "warm_noop_mod";
+        let module_path_s = module_path.to_string_lossy().to_string();
+
+        let spec = importlib_util
+            .getattr("spec_from_file_location")
+            .unwrap()
+            .call1((module_name, module_path_s.clone()))
+            .unwrap();
+        let module = importlib_util
+            .getattr("module_from_spec")
+            .unwrap()
+            .call1((spec,))
+            .unwrap();
+        modules.set_item(module_name, module).unwrap();
+
+        let jit_mod = py.import("iris.jit").unwrap();
+        jit_mod
+            .setattr("_IRIS_META_FLUSH_MIN", 1_i64)
+            .unwrap();
+        jit_mod
+            .setattr("_IRIS_META_FLUSH_MAX", 1_i64)
+            .unwrap();
+        jit_mod
+            .setattr("_IRIS_META_REFRESH_NS", 60_000_000_000_i64)
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation")
+            .unwrap()
+            .call1((true, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_speculation_threshold")
+            .unwrap()
+            .call1((0_i64, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_compile_budget")
+            .unwrap()
+            .call1((1_000_000_000_i64, 1_000_000_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_cooldown")
+            .unwrap()
+            .call1((0_i64, 0_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+
+        spec.getattr("loader")
+            .unwrap()
+            .call_method1("exec_module", (module,))
+            .unwrap();
+
+        let warm_noop = module.getattr("warm_noop").unwrap();
+        for i in 0..4 {
+            let out: f64 = warm_noop.call1((i as f64,)).unwrap().extract().unwrap();
+            assert_eq!(out, i as f64 + 1.0);
+        }
+
+        let meta_path = temp_dir.join("__pycache__").join(".iris.meta.bin");
+        assert!(meta_path.exists(), "expected persisted metadata file at {:?}", meta_path);
+        let before = fs::metadata(&meta_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        thread::sleep(Duration::from_millis(25));
+
+        for i in 4..8 {
+            let out: f64 = warm_noop.call1((i as f64,)).unwrap().extract().unwrap();
+            assert_eq!(out, i as f64 + 1.0);
+        }
+
+        let after = fs::metadata(&meta_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        assert_eq!(
+            before, after,
+            "expected unchanged metadata to avoid rewrite, but mtime changed"
+        );
+    });
+
+    let _ = fs::remove_file(&module_path);
+    let _ = fs::remove_file(temp_dir.join("__pycache__").join(".iris.meta.bin"));
+    let _ = fs::remove_dir_all(temp_dir.join("__pycache__"));
+    let _ = fs::remove_dir_all(&temp_dir);
+}
 
 #[tokio::test]
 async fn py_jit_quantum_profile_persists_and_warm_starts_from_pycache() {

@@ -128,6 +128,80 @@ fn quantum_cooldown_backoff_blocks_and_recovers() {
 }
 
 #[test]
+fn quantum_stability_score_tracks_profile_consistency() {
+    use std::env;
+    use crate::py::jit::codegen::{
+        quantum_stability_for,
+        seed_quantum_profile,
+        QuantumProfileSeed,
+    };
+
+    env::set_var("IRIS_JIT_QUANTUM_STABILITY_MIN_RUNS", "1");
+
+    let args = vec!["x".to_string(), "y".to_string()];
+    let entries = compile_jit_quantum("x + y", &args, crate::py::jit::codegen::JitReturnType::Float);
+    assert!(!entries.is_empty());
+    let func_key = 77_001;
+    register_quantum_jit(func_key, entries);
+
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed { index: 0, ewma_ns: 1000.0, runs: 20, failures: 0 },
+            QuantumProfileSeed { index: 1, ewma_ns: 1100.0, runs: 20, failures: 0 },
+        ],
+    ));
+    let stable = quantum_stability_for(func_key).unwrap();
+
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed { index: 0, ewma_ns: 200.0, runs: 20, failures: 0 },
+            QuantumProfileSeed { index: 1, ewma_ns: 10_000.0, runs: 20, failures: 30 },
+        ],
+    ));
+    let unstable = quantum_stability_for(func_key).unwrap();
+
+    assert!(stable > unstable, "expected stable profile score to be greater");
+    env::remove_var("IRIS_JIT_QUANTUM_STABILITY_MIN_RUNS");
+}
+
+#[test]
+fn quantum_lifecycle_reclaims_repeated_failures() {
+    use std::env;
+    use crate::py::jit::codegen::{
+        quantum_active_variant_count,
+        reconcile_quantum_lifecycle,
+        seed_quantum_profile,
+        QuantumProfileSeed,
+    };
+
+    env::set_var("IRIS_JIT_QUANTUM_VARIANT_FAILURE_LIMIT", "2");
+    env::set_var("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS", "8");
+
+    let args = vec!["x".to_string(), "y".to_string()];
+    let entries = compile_jit_quantum("x + y", &args, crate::py::jit::codegen::JitReturnType::Float);
+    assert!(!entries.is_empty());
+    let func_key = 77_002;
+    register_quantum_jit(func_key, entries);
+
+    assert_eq!(quantum_active_variant_count(func_key).unwrap(), 2);
+
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed { index: 0, ewma_ns: 1000.0, runs: 30, failures: 0 },
+            QuantumProfileSeed { index: 1, ewma_ns: 2000.0, runs: 1, failures: 3 },
+        ],
+    ));
+    assert!(reconcile_quantum_lifecycle(func_key));
+    assert_eq!(quantum_active_variant_count(func_key).unwrap(), 1);
+
+    env::remove_var("IRIS_JIT_QUANTUM_VARIANT_FAILURE_LIMIT");
+    env::remove_var("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS");
+}
+
+#[test]
 #[cfg(feature = "pyo3")]
 fn quantum_speculation_logs_choice_when_slow() {
     use crate::py::jit::{execute_registered_jit, jit_log_clear_hook, jit_log_hook, register_quantum_jit};

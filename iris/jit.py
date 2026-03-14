@@ -20,6 +20,8 @@ import platform
 import sys
 import time
 import zlib
+import threading
+import atexit
 from typing import Callable, Optional, Any
 
 try:
@@ -83,9 +85,26 @@ _IRIS_META_MAX_ENTRIES = int(os.environ.get("IRIS_JIT_META_MAX_ENTRIES", "256"))
 _IRIS_META_FLUSH_MIN = int(os.environ.get("IRIS_JIT_META_FLUSH_MIN", "8"))
 _IRIS_META_FLUSH_MAX = int(os.environ.get("IRIS_JIT_META_FLUSH_MAX", "128"))
 _IRIS_META_COMPRESS_MIN_BYTES = int(os.environ.get("IRIS_JIT_META_COMPRESS_MIN_BYTES", "4096"))
+_IRIS_META_REFRESH_NS = int(os.environ.get("IRIS_JIT_META_REFRESH_NS", str(6 * 60 * 60 * 1_000_000_000)))
 _IRIS_META_COUNTERS: dict[str, int] = {}
 _IRIS_META_FLUSH_INTERVALS: dict[str, int] = {}
 _IRIS_META_LAST_SIGNATURES: dict[str, str] = {}
+_IRIS_META_LAST_DEFER_COUNTS: dict[str, int] = {}
+_IRIS_META_PENDING: dict[str, tuple[Callable[..., Any], str, list[str], Optional[str]]] = {}
+_IRIS_META_STATE_LOCK = threading.RLock()
+
+
+def _jit_meta_log(message: str) -> None:
+    try:
+        enabled = bool(get_jit_logging())
+    except Exception:
+        enabled = False
+    if not enabled:
+        return
+    try:
+        sys.stderr.write(f"[Iris][jit][meta] {message}\n")
+    except Exception:
+        pass
 
 
 def _empty_metadata_doc() -> dict[str, Any]:
@@ -128,6 +147,20 @@ def _prune_metadata_entries(entries: dict[str, Any], now_ns: int) -> dict[str, A
         kept = kept[:max_entries]
 
     return {key: value for key, value, _ in kept}
+
+
+def _profile_variant_shape(rows: Any) -> tuple[int, ...]:
+    if not isinstance(rows, list):
+        return tuple()
+    shape: list[int] = []
+    for row in rows:
+        if not isinstance(row, list) or not row:
+            continue
+        try:
+            shape.append(int(row[0]))
+        except Exception:
+            continue
+    return tuple(shape)
 
 
 def _metadata_cache_path(func: Callable[..., Any]) -> Optional[str]:
@@ -196,6 +229,7 @@ def _unpack_metadata_doc(raw: bytes) -> dict[str, Any]:
 
 def _read_metadata(path: str) -> dict[str, Any]:
     if _msgpack is None:
+        _jit_meta_log("read skipped: msgpack unavailable")
         return _empty_metadata_doc()
     try:
         with open(path, "rb") as f:
@@ -209,22 +243,34 @@ def _read_metadata(path: str) -> dict[str, Any]:
         if not isinstance(entries, dict):
             return _empty_metadata_doc()
         doc["entries"] = _prune_metadata_entries(entries, time.time_ns())
+        _jit_meta_log(
+            f"read ok: path={path} entries={len(doc.get('entries', {}))} bytes={len(raw)}"
+        )
         return doc
-    except Exception:
+    except Exception as exc:
+        _jit_meta_log(f"read failed: path={path} err={exc}")
         return _empty_metadata_doc()
 
 
 def _write_metadata(path: str, doc: dict[str, Any]) -> None:
     if _msgpack is None:
+        _jit_meta_log("write skipped: msgpack unavailable")
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp_path = f"{path}.tmp"
     payload = _pack_metadata_doc(doc)
     if not payload:
+        _jit_meta_log("write skipped: empty payload")
         return
-    with open(temp_path, "wb") as f:
-        f.write(payload)
-    os.replace(temp_path, path)
+    try:
+        with open(temp_path, "wb") as f:
+            f.write(payload)
+        os.replace(temp_path, path)
+        _jit_meta_log(
+            f"write ok: path={path} entries={len(doc.get('entries', {}))} bytes={len(payload)}"
+        )
+    except Exception as exc:
+        _jit_meta_log(f"write failed: path={path} err={exc}")
 
 
 def _seed_quantum_from_metadata(
@@ -234,17 +280,24 @@ def _seed_quantum_from_metadata(
     return_type: Optional[str],
 ) -> None:
     if _msgpack is None or _seed_quantum_profile is None or src is None or arg_names is None:
+        _jit_meta_log("seed skipped: missing msgpack/seed API/src/arg_names")
         return
     path = _metadata_cache_path(func)
     if path is None:
+        _jit_meta_log("seed skipped: no source path for function")
+        return
+    if not os.path.exists(path):
+        _jit_meta_log(f"seed miss: cache file not found path={path}")
         return
     key = _metadata_key(func, src, arg_names, return_type)
     doc = _read_metadata(path)
     entry = doc.get("entries", {}).get(key)
     if not isinstance(entry, dict):
+        _jit_meta_log(f"seed miss: key not present key={key[:12]} path={path}")
         return
     rows = entry.get("profile")
     if not isinstance(rows, list) or not rows:
+        _jit_meta_log(f"seed miss: empty profile key={key[:12]} path={path}")
         return
     normalized: list[tuple[int, float, int, int]] = []
     for row in rows:
@@ -255,11 +308,15 @@ def _seed_quantum_from_metadata(
         except Exception:
             continue
     if not normalized:
+        _jit_meta_log(f"seed miss: profile normalization empty key={key[:12]} path={path}")
         return
     try:
-        _seed_quantum_profile(func, normalized)
-    except Exception:
-        pass
+        ok = bool(_seed_quantum_profile(func, normalized))
+        _jit_meta_log(
+            f"seed {'ok' if ok else 'failed'}: rows={len(normalized)} key={key[:12]} path={path}"
+        )
+    except Exception as exc:
+        _jit_meta_log(f"seed failed: key={key[:12]} path={path} err={exc}")
 
 
 def _maybe_persist_quantum_metadata(
@@ -267,29 +324,48 @@ def _maybe_persist_quantum_metadata(
     src: Optional[str],
     arg_names: Optional[list[str]],
     return_type: Optional[str],
+    force: bool = False,
 ) -> None:
     if _msgpack is None or _get_quantum_profile is None or src is None or arg_names is None:
+        _jit_meta_log("persist skipped: missing msgpack/profile API/src/arg_names")
         return
     path = _metadata_cache_path(func)
     if path is None:
+        _jit_meta_log("persist skipped: no source path for function")
         return
     key = _metadata_key(func, src, arg_names, return_type)
-    min_flush, max_flush = _normalize_flush_window()
-    flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, _IRIS_META_FLUSH_EVERY)
-    if flush_interval < min_flush:
-        flush_interval = min_flush
-    if flush_interval > max_flush:
-        flush_interval = max_flush
+    with _IRIS_META_STATE_LOCK:
+        _IRIS_META_PENDING[key] = (func, src, list(arg_names), return_type)
+        min_flush, max_flush = _normalize_flush_window()
+        flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, min_flush)
+        if flush_interval < min_flush:
+            flush_interval = min_flush
+        if flush_interval > max_flush:
+            flush_interval = max_flush
 
-    count = _IRIS_META_COUNTERS.get(key, 0) + 1
-    _IRIS_META_COUNTERS[key] = count
-    if count % flush_interval != 0:
-        return
+        if not force:
+            count = _IRIS_META_COUNTERS.get(key, 0) + 1
+            _IRIS_META_COUNTERS[key] = count
+            remainder = count % flush_interval
+            if remainder != 0:
+                remaining = flush_interval - remainder
+                last_logged = _IRIS_META_LAST_DEFER_COUNTS.get(key, -1)
+                should_log = count == 1 or remaining == 1 or (count - last_logged) >= flush_interval
+                if should_log:
+                    _IRIS_META_LAST_DEFER_COUNTS[key] = count
+                    _jit_meta_log(
+                        f"persist deferred: count={count} interval={flush_interval} in={remaining} key={key[:12]}"
+                    )
+                return
+        else:
+            _jit_meta_log(f"persist forced: key={key[:12]}")
     try:
         rows = _get_quantum_profile(func)
-    except Exception:
+    except Exception as exc:
+        _jit_meta_log(f"persist skipped: profile fetch failed key={key[:12]} err={exc}")
         return
     if not rows:
+        _jit_meta_log(f"persist skipped: empty profile rows key={key[:12]}")
         return
     normalized_rows: list[list[Any]] = []
     for row in rows:
@@ -300,34 +376,112 @@ def _maybe_persist_quantum_metadata(
         except Exception:
             continue
     if not normalized_rows:
+        _jit_meta_log(f"persist skipped: normalized profile empty key={key[:12]}")
         return
 
     row_sig = hashlib.sha256(
         _msgpack.packb(normalized_rows, use_bin_type=True)
     ).hexdigest()
-    prev_sig = _IRIS_META_LAST_SIGNATURES.get(key)
-    if prev_sig == row_sig:
-        _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
-    else:
-        _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
-    _IRIS_META_LAST_SIGNATURES[key] = row_sig
+    with _IRIS_META_STATE_LOCK:
+        min_flush, max_flush = _normalize_flush_window()
+        flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, min_flush)
+        if flush_interval < min_flush:
+            flush_interval = min_flush
+        if flush_interval > max_flush:
+            flush_interval = max_flush
+
+        prev_sig = _IRIS_META_LAST_SIGNATURES.get(key)
+        if prev_sig == row_sig:
+            _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
+        else:
+            _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
+        _IRIS_META_LAST_SIGNATURES[key] = row_sig
 
     try:
         doc = _read_metadata(path)
+        now_ns = time.time_ns()
         entries = doc.setdefault("entries", {})
         if not isinstance(entries, dict):
             entries = {}
             doc["entries"] = entries
+
+        existing = entries.get(key)
+        if isinstance(existing, dict):
+            existing_rows = existing.get("profile")
+            existing_return_type = existing.get("return_type")
+            existing_arg_count = existing.get("arg_count")
+            existing_updated_raw = existing.get("updated_ns", 0)
+            try:
+                existing_updated_ns = int(existing_updated_raw)
+            except Exception:
+                existing_updated_ns = 0
+
+            refresh_ns = _IRIS_META_REFRESH_NS if _IRIS_META_REFRESH_NS > 0 else 0
+            existing_shape = _profile_variant_shape(existing_rows)
+            current_shape = _profile_variant_shape(normalized_rows)
+            unchanged = (
+                existing_shape == current_shape
+                and existing_return_type == (return_type or "float")
+                and int(existing_arg_count) == len(arg_names)
+            )
+            still_fresh = refresh_ns == 0 or (now_ns - existing_updated_ns) < refresh_ns
+            if unchanged and still_fresh:
+                _jit_meta_log(
+                    f"persist skipped: unchanged-shape key={key[:12]} age_ns={max(0, now_ns - existing_updated_ns)}"
+                )
+                return
+
         entries[key] = {
-            "updated_ns": time.time_ns(),
+            "updated_ns": now_ns,
             "return_type": return_type or "float",
             "arg_count": len(arg_names),
             "profile": normalized_rows,
         }
-        doc["entries"] = _prune_metadata_entries(entries, time.time_ns())
+        doc["entries"] = _prune_metadata_entries(entries, now_ns)
         _write_metadata(path, doc)
-    except Exception:
-        pass
+        _jit_meta_log(
+            f"persist ok: rows={len(normalized_rows)} entries={len(doc.get('entries', {}))} key={key[:12]}"
+        )
+    except Exception as exc:
+        _jit_meta_log(f"persist failed: key={key[:12]} path={path} err={exc}")
+
+
+def _flush_pending_quantum_metadata() -> None:
+    with _IRIS_META_STATE_LOCK:
+        pending_items = list(_IRIS_META_PENDING.items())
+        _IRIS_META_PENDING.clear()
+    if not pending_items:
+        return
+
+    _jit_meta_log(f"flush pending start: entries={len(pending_items)}")
+    forced = 0
+    failed = 0
+    written_paths: set[str] = set()
+
+    for key, (fn, src, arg_names, return_type) in pending_items:
+        forced += 1
+        try:
+            _maybe_persist_quantum_metadata(fn, src, arg_names, return_type, force=True)
+        except Exception as exc:
+            failed += 1
+            _jit_meta_log(f"flush pending failed: err={exc}")
+            continue
+
+        try:
+            path = _metadata_cache_path(fn)
+            if path is not None and os.path.exists(path):
+                written_paths.add(path)
+        except Exception:
+            pass
+
+        _jit_meta_log(f"flush pending key done: key={key[:12]}")
+
+    _jit_meta_log(
+        f"flush pending done: forced={forced} failed={failed} files={len(written_paths)}"
+    )
+
+
+atexit.register(_flush_pending_quantum_metadata)
 
 
 def set_jit_logging(enabled: Optional[bool] = None, env_var: Optional[str] = None) -> bool:

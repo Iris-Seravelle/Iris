@@ -54,6 +54,10 @@ static JIT_QUANTUM_COMPILE_BUDGET_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::
 static JIT_QUANTUM_COMPILE_WINDOW_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_COOLDOWN_BASE_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_COOLDOWN_MAX_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_STABILITY_MIN_SCORE_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_STABILITY_MIN_RUNS_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_VARIANT_FAILURE_LIMIT_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 
 #[derive(Default)]
 struct QuantumCompileBudgetState {
@@ -107,6 +111,26 @@ fn jit_quantum_cooldown_base_env_var() -> &'static RwLock<String> {
 fn jit_quantum_cooldown_max_env_var() -> &'static RwLock<String> {
     JIT_QUANTUM_COOLDOWN_MAX_ENV_VAR
         .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS".to_string()))
+}
+
+fn jit_quantum_stability_min_score_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_STABILITY_MIN_SCORE_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_STABILITY_MIN_SCORE".to_string()))
+}
+
+fn jit_quantum_stability_min_runs_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_STABILITY_MIN_RUNS_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_STABILITY_MIN_RUNS".to_string()))
+}
+
+fn jit_quantum_variant_failure_limit_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_VARIANT_FAILURE_LIMIT_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_VARIANT_FAILURE_LIMIT".to_string()))
+}
+
+fn jit_quantum_variant_promotion_min_runs_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS".to_string()))
 }
 
 fn now_ns() -> u64 {
@@ -230,6 +254,43 @@ pub(crate) fn quantum_cooldown_base_ns() -> u64 {
 pub(crate) fn quantum_cooldown_max_ns() -> u64 {
     const DEFAULT: u64 = 1_000_000_000; // 1s
     let env_name = jit_quantum_cooldown_max_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_stability_min_score() -> f64 {
+    const DEFAULT: f64 = 0.35;
+    let env_name = jit_quantum_stability_min_score_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_stability_min_runs() -> u64 {
+    const DEFAULT: u64 = 8;
+    let env_name = jit_quantum_stability_min_runs_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_variant_failure_limit() -> u64 {
+    const DEFAULT: u64 = 8;
+    let env_name = jit_quantum_variant_failure_limit_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_variant_promotion_min_runs() -> u64 {
+    const DEFAULT: u64 = 8;
+    let env_name = jit_quantum_variant_promotion_min_runs_env_var().read().unwrap().clone();
     std::env::var(env_name)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
