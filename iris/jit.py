@@ -102,6 +102,11 @@ def _jit_meta_log(message: str) -> None:
     if not enabled:
         return
     try:
+        if not bool(get_quantum_speculation()):
+            return
+    except Exception:
+        pass
+    try:
         sys.stderr.write(f"[Iris][jit][meta] {message}\n")
     except Exception:
         pass

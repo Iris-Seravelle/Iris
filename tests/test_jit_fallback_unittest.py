@@ -1,5 +1,7 @@
 import unittest
 import array
+import io
+import contextlib
 
 import iris.jit as jit_mod
 
@@ -548,6 +550,24 @@ class TestJitFallback(unittest.TestCase):
             jit_mod.call_jit = original_call_jit
             jit_mod.register_offload = original_register_offload
             jit_mod.call_jit_step_loop_f64 = original_step_loop
+
+    def test_meta_log_skips_when_quantum_speculation_disabled(self):
+        """Ensure meta logs do not emit when quantum speculation is off."""
+        original_get_jit_logging = jit_mod.get_jit_logging
+        original_get_quantum_speculation = jit_mod.get_quantum_speculation
+
+        try:
+            jit_mod.get_jit_logging = lambda: True
+            jit_mod.get_quantum_speculation = lambda: False
+
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                jit_mod._jit_meta_log("should not log")
+
+            self.assertEqual(buf.getvalue(), "")
+        finally:
+            jit_mod.get_jit_logging = original_get_jit_logging
+            jit_mod.get_quantum_speculation = original_get_quantum_speculation
 
 
 if __name__ == "__main__":
