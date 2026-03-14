@@ -25,6 +25,8 @@ try:
         is_jit_logging_enabled,
         configure_quantum_speculation,
         is_quantum_speculation_enabled,
+        configure_quantum_speculation_threshold as _configure_quantum_speculation_threshold,
+        get_quantum_speculation_threshold as _get_quantum_speculation_threshold,
         configure_quantum_log_threshold as _configure_quantum_log_threshold,
         get_quantum_log_threshold as _get_quantum_log_threshold,
     )  # pyo3 extension
@@ -37,6 +39,10 @@ except ImportError:  # allow tests to import without extension built
     is_jit_logging_enabled = None  # type: ignore
     configure_quantum_speculation = None  # type: ignore
     is_quantum_speculation_enabled = None  # type: ignore
+    _configure_quantum_speculation_threshold = None  # type: ignore
+    _get_quantum_speculation_threshold = None  # type: ignore
+    _configure_quantum_log_threshold = None  # type: ignore
+    _get_quantum_log_threshold = None  # type: ignore
 
 try:
     from .iris import call_jit_step_loop_f64  # type: ignore

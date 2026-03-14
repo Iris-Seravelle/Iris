@@ -43,11 +43,25 @@ pub enum ReductionMode {
     All,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JitReturnType {
+    Float,
+    Int,
+    Bool,
+}
+
+impl Default for JitReturnType {
+    fn default() -> Self {
+        JitReturnType::Float
+    }
+}
+
 #[derive(Clone)]
 pub struct JitEntry {
     pub func_ptr: usize,
     pub arg_count: usize,
     pub reduction: ReductionMode,
+    pub return_type: JitReturnType,
 }
 
 static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
@@ -422,7 +436,12 @@ where
     })
 }
 
-fn compile_jit_impl(expr_str: &str, arg_names: &[String], optimize_ast: bool) -> Option<JitEntry> {
+fn compile_jit_impl(
+    expr_str: &str,
+    arg_names: &[String],
+    optimize_ast: bool,
+    return_type: JitReturnType,
+) -> Option<JitEntry> {
     // tokenize and parse
     let tokens = crate::py::jit::parser::tokenize(expr_str);
     let mut parser = crate::py::jit::parser::Parser::new(tokens);
@@ -533,25 +552,39 @@ fn compile_jit_impl(expr_str: &str, arg_names: &[String], optimize_ast: bool) ->
             func_ptr: code_ptr,
             arg_count,
             reduction,
+            return_type,
         })
     })
 }
 
 /// Compile an expression string into a native function entry.
+#[allow(dead_code)]
 pub fn compile_jit(expr_str: &str, arg_names: &[String]) -> Option<JitEntry> {
-    compile_jit_impl(expr_str, arg_names, true)
+    compile_jit_with_return_type(expr_str, arg_names, JitReturnType::Float)
+}
+
+pub fn compile_jit_with_return_type(
+    expr_str: &str,
+    arg_names: &[String],
+    return_type: JitReturnType,
+) -> Option<JitEntry> {
+    compile_jit_impl(expr_str, arg_names, true, return_type)
 }
 
 /// Compile multiple speculative versions of the same expression in parallel.
-pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String]) -> Vec<JitEntry> {
+pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String], return_type: JitReturnType) -> Vec<JitEntry> {
     let expr_opt = expr_str.to_string();
     let expr_base = expr_str.to_string();
     let args_opt = arg_names.to_vec();
     let args_base = arg_names.to_vec();
 
     let (optimized, baseline) = std::thread::scope(|scope| {
-        let h_opt = scope.spawn(move || compile_jit_impl(&expr_opt, &args_opt, true));
-        let h_base = scope.spawn(move || compile_jit_impl(&expr_base, &args_base, false));
+        let h_opt = scope.spawn(move || {
+            compile_jit_impl(&expr_opt, &args_opt, true, return_type)
+        });
+        let h_base = scope.spawn(move || {
+            compile_jit_impl(&expr_base, &args_base, false, return_type)
+        });
         (
             h_opt.join().ok().flatten(),
             h_base.join().ok().flatten(),
@@ -1820,6 +1853,43 @@ fn reduction_step(mode: ReductionMode, acc: &mut f64, value: f64) -> bool {
 /// Handles zero-copy buffers (including multi-argument vectorization) and scalar argument unpacking via stack.
 #[cfg(feature = "pyo3")]
 #[inline(always)]
+fn jit_return_to_py(py: pyo3::Python, value: f64, return_type: JitReturnType) -> pyo3::PyObject {
+    match return_type {
+        JitReturnType::Float => value.into_py(py),
+        JitReturnType::Int => (value as i64).into_py(py),
+        JitReturnType::Bool => (value != 0.0).into_py(py),
+    }
+}
+
+#[cfg(feature = "pyo3")]
+#[inline(always)]
+fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -> pyo3::PyObject {
+    match return_type {
+        JitReturnType::Float => {
+            let byte_slice = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr() as *const u8,
+                    values.len() * std::mem::size_of::<f64>(),
+                )
+            };
+            let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
+            let array_mod = py.import("array").unwrap();
+            let array_obj = array_mod.getattr("array").unwrap().call1(("d", py_bytes)).unwrap();
+            array_obj.into_py(py)
+        }
+        JitReturnType::Int => {
+            let list = pyo3::types::PyList::new(py, values.iter().map(|v| *v as i64));
+            list.into_py(py)
+        }
+        JitReturnType::Bool => {
+            let list = pyo3::types::PyList::new(py, values.iter().map(|v| *v != 0.0));
+            list.into_py(py)
+        }
+    }
+}
+
+#[cfg(feature = "pyo3")]
+#[inline(always)]
 pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::PyTuple) -> pyo3::PyResult<pyo3::PyObject> {
     let arg_count = args.len();
     let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
@@ -1892,7 +1962,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                 if elem == BufferElemType::F64 {
                                     if view.is_aligned_for_f64() {
                                         let res = f(view.as_ptr_f64());
-                                        return Ok(res.into_py(py));
+                                        return Ok(jit_return_to_py(py, res, entry.return_type));
                                     }
                                 }
                                 let mut converted = Vec::with_capacity(expected);
@@ -1900,7 +1970,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                     converted.push(unsafe { read_buffer_f64(&view, i) });
                                 }
                                 let res = f(converted.as_ptr());
-                                return Ok(res.into_py(py));
+                                return Ok(jit_return_to_py(py, res, entry.return_type));
                             }
                         }
                     }
@@ -1963,7 +2033,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                     }
                                 }
                             }
-                            return Ok(acc.into_py(py));
+                            return Ok(jit_return_to_py(py, acc, entry.return_type));
                         }
 
                         let mut results = Vec::with_capacity(len);
@@ -1985,16 +2055,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                 results.push(f(iter_args.as_ptr()));
                             }
                         }
-                        let byte_slice = unsafe {
-                            std::slice::from_raw_parts(
-                                results.as_ptr() as *const u8,
-                                results.len() * std::mem::size_of::<f64>(),
-                            )
-                        };
-                        let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
-                        let array_mod = py.import("array")?;
-                        let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
-                        return Ok(array_obj.into_py(py));
+                        return Ok(vec_f64_to_py(py, &results, entry.return_type));
                     }
                 }
             }
@@ -2012,7 +2073,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             stack_args[i] = val;
                         }
                         let res = f(stack_args.as_ptr());
-                        return Ok(res.into_py(py));
+                        return Ok(jit_return_to_py(py, res, entry.return_type));
                     }
                 }
             }
@@ -2049,7 +2110,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             elem: view.elem_type,
                         },
                     );
-                    return Ok(res.into_py(py));
+                    return Ok(jit_return_to_py(py, res, entry.return_type));
                 }
             }
         }
@@ -2120,7 +2181,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             elem_types: views.iter().map(|v| v.elem_type).collect::<Vec<_>>(),
                         },
                     );
-                    return Ok(acc.into_py(py));
+                    return Ok(jit_return_to_py(py, acc, entry.return_type));
                 }
 
                 let mut results = Vec::with_capacity(len);
@@ -2163,16 +2224,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                     },
                 );
 
-                let byte_slice = unsafe {
-                    std::slice::from_raw_parts(
-                        results.as_ptr() as *const u8,
-                        results.len() * std::mem::size_of::<f64>(),
-                    )
-                };
-                let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
-                let array_mod = py.import("array")?;
-                let array_obj = array_mod.getattr("array")?.call1(("d", py_bytes))?;
-                return Ok(array_obj.into_py(py));
+                return Ok(vec_f64_to_py(py, &results, entry.return_type));
             }
         }
     }
@@ -2192,7 +2244,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                         break;
                     }
                 }
-                return Ok(acc.into_py(py));
+                return Ok(jit_return_to_py(py, acc, entry.return_type));
             }
         }
     }
@@ -2217,7 +2269,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
         }
         store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
         let res = f(stack_args.as_ptr());
-        return Ok(res.into_py(py));
+        return Ok(jit_return_to_py(py, res, entry.return_type));
     }
 
     // 4. Fallback for > 8 scalar args: heap allocation
@@ -2232,5 +2284,5 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
     }
     store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
     let res = f(heap_args.as_ptr());
-    Ok(res.into_py(py))
+    Ok(jit_return_to_py(py, res, entry.return_type))
 }

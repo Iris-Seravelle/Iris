@@ -6,6 +6,7 @@ use cranelift::prelude::settings;
 use cranelift::prelude::Configurable;
 use crate::py::jit::codegen::execute_jit_func;
 use crate::py::jit::codegen::{
+    compile_jit,
     lookup_named_jit,
     register_named_jit,
     resolve_symbol_alias,
@@ -23,9 +24,28 @@ fn compile_jit_basic_math() {
 }
 
 #[test]
+#[cfg(feature = "pyo3")]
+fn compile_jit_int_return() {
+    use crate::py::jit::codegen::{compile_jit_with_return_type, execute_jit_func, register_jit, JitReturnType};
+    use pyo3::Python;
+
+    let args = vec!["x".to_string()];
+    let entry = compile_jit_with_return_type("x + 1", &args, JitReturnType::Int).unwrap();
+    register_jit(999_999, entry.clone());
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let tup = pyo3::types::PyTuple::new(py, &[1.0_f64]);
+        let obj = execute_jit_func(py, &entry, tup).unwrap();
+        let val: i64 = obj.extract(py).unwrap();
+        assert_eq!(val, 2);
+    });
+}
+
+#[test]
 fn compile_jit_quantum_variants() {
     let args = vec!["x".to_string(), "y".to_string()];
-    let entries = compile_jit_quantum("x + y", &args);
+    let entries = compile_jit_quantum("x + y", &args, crate::py::jit::codegen::JitReturnType::Float);
     assert!(!entries.is_empty(), "quantum compile should produce at least one variant");
     for entry in entries {
         assert_eq!(entry.arg_count, 2);
@@ -52,7 +72,7 @@ fn quantum_speculation_logs_choice_when_slow() {
     });
 
     let args = vec!["x".to_string()];
-    let entries = compile_jit_quantum("x + 1", &args);
+    let entries = compile_jit_quantum("x + 1", &args, crate::py::jit::codegen::JitReturnType::Float);
     assert!(!entries.is_empty());
 
     let func_key = 12345;

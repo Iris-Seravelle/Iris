@@ -26,13 +26,14 @@ pub(crate) mod heuristics;
 
 // re-export helpers for convenience within this module
 use crate::py::jit::codegen::{
-    compile_jit,
     compile_jit_quantum,
+    compile_jit_with_return_type,
     execute_registered_jit,
     lookup_jit,
     register_jit,
     register_quantum_jit,
     register_named_jit,
+    JitReturnType,
 };
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -67,6 +68,14 @@ fn parse_bool_env(v: &str) -> bool {
         v.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "debug"
     )
+}
+
+fn parse_return_type(rt: Option<&str>) -> JitReturnType {
+    match rt {
+        Some("int") => JitReturnType::Int,
+        Some("bool") => JitReturnType::Bool,
+        _ => JitReturnType::Float,
+    }
 }
 
 pub(crate) fn jit_logging_enabled() -> bool {
@@ -372,8 +381,12 @@ fn register_offload(
                         .ok()
                         .and_then(|n| n.extract::<String>().ok())
                 });
+                let return_type = parse_return_type(return_type.as_deref());
+
                 if quantum_speculation_enabled() {
-                    let entries = match catch_unwind(AssertUnwindSafe(|| compile_jit_quantum(&expr, &args))) {
+                    let entries = match catch_unwind(AssertUnwindSafe(|| {
+                        compile_jit_quantum(&expr, &args, return_type)
+                    })) {
                         Ok(entries) => entries,
                         Err(payload) => {
                             let msg = panic_payload_to_string(payload);
@@ -391,7 +404,9 @@ fn register_offload(
                         jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
                     }
                 } else {
-                    let maybe_entry = match catch_unwind(AssertUnwindSafe(|| compile_jit(&expr, &args))) {
+                    let maybe_entry = match catch_unwind(AssertUnwindSafe(|| {
+                        compile_jit_with_return_type(&expr, &args, return_type)
+                    })) {
                         Ok(entry) => entry,
                         Err(payload) => {
                             let msg = panic_payload_to_string(payload);
