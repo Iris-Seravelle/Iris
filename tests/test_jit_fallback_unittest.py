@@ -510,6 +510,45 @@ class TestJitFallback(unittest.TestCase):
             jit_mod.register_offload = original_register_offload
             jit_mod.call_jit_step_loop_f64 = original_step_loop
 
+    def test_scalar_for_inlines_helper_with_declared_defaults_when_fully_applied(self):
+        original_call_jit = jit_mod.call_jit
+        original_register_offload = jit_mod.register_offload
+        original_step_loop = jit_mod.call_jit_step_loop_f64
+
+        seen = {"step_src": None}
+
+        try:
+            def fake_call_jit(_func, _args, _kwargs):
+                return _func(*_args)
+
+            def fake_register_offload(_func, _strategy, _return_type, src, _arg_names):
+                if src is not None and isinstance(_arg_names, list) and _arg_names == ["x", "i"]:
+                    seen["step_src"] = src
+                return None
+
+            jit_mod.call_jit = fake_call_jit
+            jit_mod.register_offload = fake_register_offload
+            jit_mod.call_jit_step_loop_f64 = None
+
+            def helper_calc(a, b=1.0):
+                return (a * b) + (a - b)
+
+            @jit_mod.offload(strategy="jit", return_type="float")
+            def scalar_for(seed, n):
+                x = seed
+                for i in range(int(n)):
+                    x += helper_calc(x * 0.0001, float(i) * 0.001)
+                return x
+
+            out = scalar_for(1.0, 3.0)
+            self.assertIsInstance(out, float)
+            self.assertIsNotNone(seen["step_src"])
+            self.assertNotIn("helper_calc", str(seen["step_src"]))
+        finally:
+            jit_mod.call_jit = original_call_jit
+            jit_mod.register_offload = original_register_offload
+            jit_mod.call_jit_step_loop_f64 = original_step_loop
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -695,8 +695,6 @@ def _extract_inline_template_from_callable(
     args = helper_node.args
     if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
         return None
-    if args.defaults or args.kw_defaults:
-        return None
 
     inlined = _extract_inlined_expr_plan(helper_node, fn_globals, inline_cache)
     if inlined is None:
