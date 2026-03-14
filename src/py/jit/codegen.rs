@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::py::jit::parser::Expr;
 use crate::py::jit::heuristics;
+use crate::py::jit::simd;
 
 // cranelift imports
 use cranelift::prelude::*;
@@ -685,6 +686,18 @@ where
             } else {
                 flag_builder.set("is_pic", "true").unwrap();
             }
+
+            let simd_plan = simd::auto_vectorization_plan();
+            simd::apply_cranelift_simd_flags(&mut flag_builder, simd_plan);
+            crate::py::jit::jit_log(|| {
+                format!(
+                    "[Iris][jit][simd] backend={:?} lane_bytes={} auto_vectorize={}",
+                    simd_plan.backend,
+                    simd_plan.lane_bytes,
+                    simd_plan.auto_vectorize
+                )
+            });
+
             let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
                 panic!("host machine is not supported: {}", msg);
             });

@@ -25,6 +25,7 @@ use pyo3::AsPyPointer;
 pub(crate) mod parser;
 pub(crate) mod codegen;
 pub(crate) mod heuristics;
+pub(crate) mod simd;
 
 // re-export helpers for convenience within this module
 use crate::py::jit::codegen::{
