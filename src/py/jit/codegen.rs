@@ -689,6 +689,7 @@ where
 
             let simd_plan = simd::auto_vectorization_plan();
             simd::apply_cranelift_simd_flags(&mut flag_builder, simd_plan);
+            let _ = flag_builder.set("opt_level", "speed");
             crate::py::jit::jit_log(|| {
                 format!(
                     "[Iris][jit][simd] backend={:?} lane_bytes={} auto_vectorize={}",
@@ -2127,6 +2128,21 @@ fn reduction_step(mode: ReductionMode, acc: &mut f64, value: f64) -> bool {
     }
 }
 
+#[inline(always)]
+fn simd_unroll_factor_for_plan(plan: simd::SimdPlan) -> usize {
+    if !plan.auto_vectorize {
+        return 1;
+    }
+
+    let lanes = (plan.lane_bytes / std::mem::size_of::<f64>()).max(1);
+    lanes.min(4)
+}
+
+#[inline(always)]
+fn simd_unroll_factor() -> usize {
+    simd_unroll_factor_for_plan(simd::auto_vectorization_plan())
+}
+
 /// Highly optimized helper to execute a JIT compiled function.
 /// Handles zero-copy buffers (including multi-argument vectorization) and scalar argument unpacking via stack.
 #[cfg(feature = "pyo3")]
@@ -2438,11 +2454,33 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
         if all_buffers {
             if let Some(len) = common_len {
+                let unroll = simd_unroll_factor();
                 if entry.reduction != ReductionMode::None {
                     let mut acc = reduction_identity(entry.reduction);
                     const MAX_FAST_ARGS: usize = 8;
                     if arg_count <= MAX_FAST_ARGS {
-                        for i in 0..len {
+                        let mut i = 0;
+                        let mut should_break = false;
+                        while i + unroll <= len {
+                            for lane in 0..unroll {
+                                let idx = i + lane;
+                                let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+                                for j in 0..arg_count {
+                                    iter_args[j] = unsafe { read_buffer_f64(&views[j], idx) };
+                                }
+                                let val = f(iter_args.as_ptr());
+                                if reduction_step(entry.reduction, &mut acc, val) {
+                                    should_break = true;
+                                    break;
+                                }
+                            }
+                            if should_break {
+                                break;
+                            }
+                            i += unroll;
+                        }
+
+                        while i < len {
                             let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
                             for j in 0..arg_count {
                                 iter_args[j] = unsafe { read_buffer_f64(&views[j], i) };
@@ -2451,9 +2489,31 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             if reduction_step(entry.reduction, &mut acc, val) {
                                 break;
                             }
+                            i += 1;
                         }
                     } else {
-                        for i in 0..len {
+                        let mut i = 0;
+                        let mut should_break = false;
+                        while i + unroll <= len {
+                            for lane in 0..unroll {
+                                let idx = i + lane;
+                                let mut iter_args = Vec::with_capacity(arg_count);
+                                for j in 0..arg_count {
+                                    iter_args.push(unsafe { read_buffer_f64(&views[j], idx) });
+                                }
+                                let val = f(iter_args.as_ptr());
+                                if reduction_step(entry.reduction, &mut acc, val) {
+                                    should_break = true;
+                                    break;
+                                }
+                            }
+                            if should_break {
+                                break;
+                            }
+                            i += unroll;
+                        }
+
+                        while i < len {
                             let mut iter_args = Vec::with_capacity(arg_count);
                             for j in 0..arg_count {
                                 iter_args.push(unsafe { read_buffer_f64(&views[j], i) });
@@ -2462,6 +2522,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             if reduction_step(entry.reduction, &mut acc, val) {
                                 break;
                             }
+                            i += 1;
                         }
                     }
 
@@ -2481,7 +2542,24 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
                 const MAX_FAST_ARGS: usize = 8;
                 if arg_count <= MAX_FAST_ARGS {
-                    for i in 0..len {
+                    let mut i = 0;
+                    while i + unroll <= len {
+                        for lane in 0..unroll {
+                            let idx = i + lane;
+                            let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
+                            for j in 0..arg_count {
+                                iter_args[j] = if all_f64 {
+                                    unsafe { read_buffer_f64(&views[j], idx) }
+                                } else {
+                                    unsafe { read_buffer_f64(&views[j], idx) }
+                                };
+                            }
+                            results.push(f(iter_args.as_ptr()));
+                        }
+                        i += unroll;
+                    }
+
+                    while i < len {
                         let mut iter_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
                         for j in 0..arg_count {
                             iter_args[j] = if all_f64 {
@@ -2491,9 +2569,28 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             };
                         }
                         results.push(f(iter_args.as_ptr()));
+                        i += 1;
                     }
                 } else {
-                    for i in 0..len {
+                    let mut i = 0;
+                    while i + unroll <= len {
+                        for lane in 0..unroll {
+                            let idx = i + lane;
+                            let mut iter_args = Vec::with_capacity(arg_count);
+                            for j in 0..arg_count {
+                                let val = if all_f64 {
+                                    unsafe { read_buffer_f64(&views[j], idx) }
+                                } else {
+                                    unsafe { read_buffer_f64(&views[j], idx) }
+                                };
+                                iter_args.push(val);
+                            }
+                            results.push(f(iter_args.as_ptr()));
+                        }
+                        i += unroll;
+                    }
+
+                    while i < len {
                         let mut iter_args = Vec::with_capacity(arg_count);
                         for j in 0..arg_count {
                             let val = if all_f64 {
@@ -2504,6 +2601,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                             iter_args.push(val);
                         }
                         results.push(f(iter_args.as_ptr()));
+                        i += 1;
                     }
                 }
 
@@ -2615,4 +2713,45 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
     store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
     let res = f(heap_args.as_ptr());
     Ok(jit_return_to_py(py, res, entry.return_type))
+}
+
+#[cfg(test)]
+mod simd_unroll_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_plan_uses_unroll_1() {
+        let plan = simd::SimdPlan {
+            backend: simd::SimdBackend::Scalar,
+            lane_bytes: 8,
+            auto_vectorize: false,
+        };
+        assert_eq!(simd_unroll_factor_for_plan(plan), 1);
+    }
+
+    #[test]
+    fn neon_plan_uses_unroll_2() {
+        let plan = simd::SimdPlan {
+            backend: simd::SimdBackend::ArmNeon,
+            lane_bytes: 16,
+            auto_vectorize: true,
+        };
+        assert_eq!(simd_unroll_factor_for_plan(plan), 2);
+    }
+
+    #[test]
+    fn wide_simd_plans_cap_at_unroll_4() {
+        let sve = simd::SimdPlan {
+            backend: simd::SimdBackend::ArmSve,
+            lane_bytes: 32,
+            auto_vectorize: true,
+        };
+        let avx2 = simd::SimdPlan {
+            backend: simd::SimdBackend::X86Avx2,
+            lane_bytes: 32,
+            auto_vectorize: true,
+        };
+        assert_eq!(simd_unroll_factor_for_plan(sve), 4);
+        assert_eq!(simd_unroll_factor_for_plan(avx2), 4);
+    }
 }
