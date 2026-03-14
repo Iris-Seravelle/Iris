@@ -116,259 +116,40 @@ fn invoke_named_entry(func_ptr: i64, args: &[f64]) -> f64 {
     f(args.as_ptr())
 }
 
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_0(func_ptr: i64) -> f64 {
-    let args: [f64; 0] = [];
-    invoke_named_entry(func_ptr, &args)
+macro_rules! make_invoke {
+    ($name:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name(func_ptr: i64) -> f64 {
+            let args: [f64; 0] = [];
+            invoke_named_entry(func_ptr, &args)
+        }
+    };
+    ($name:ident, $($arg:ident),+) => {
+        #[no_mangle]
+        pub extern "C" fn $name(func_ptr: i64, $($arg: f64),+) -> f64 {
+            let args = [$($arg),+];
+            invoke_named_entry(func_ptr, &args)
+        }
+    };
 }
 
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_1(func_ptr: i64, a0: f64) -> f64 {
-    let args = [a0];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_2(func_ptr: i64, a0: f64, a1: f64) -> f64 {
-    let args = [a0, a1];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_3(func_ptr: i64, a0: f64, a1: f64, a2: f64) -> f64 {
-    let args = [a0, a1, a2];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_4(func_ptr: i64, a0: f64, a1: f64, a2: f64, a3: f64) -> f64 {
-    let args = [a0, a1, a2, a3];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_5(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_6(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_7(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_8(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_9(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_10(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_11(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_12(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-    a11: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_13(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-    a11: f64,
-    a12: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_14(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-    a11: f64,
-    a12: f64,
-    a13: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_15(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-    a11: f64,
-    a12: f64,
-    a13: f64,
-    a14: f64,
-) -> f64 {
-    let args = [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14];
-    invoke_named_entry(func_ptr, &args)
-}
-
-#[no_mangle]
-pub extern "C" fn iris_jit_invoke_16(
-    func_ptr: i64,
-    a0: f64,
-    a1: f64,
-    a2: f64,
-    a3: f64,
-    a4: f64,
-    a5: f64,
-    a6: f64,
-    a7: f64,
-    a8: f64,
-    a9: f64,
-    a10: f64,
-    a11: f64,
-    a12: f64,
-    a13: f64,
-    a14: f64,
-    a15: f64,
-) -> f64 {
-    let args = [
-        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15,
-    ];
-    invoke_named_entry(func_ptr, &args)
-}
+make_invoke!(iris_jit_invoke_0);
+make_invoke!(iris_jit_invoke_1, a0);
+make_invoke!(iris_jit_invoke_2, a0, a1);
+make_invoke!(iris_jit_invoke_3, a0, a1, a2);
+make_invoke!(iris_jit_invoke_4, a0, a1, a2, a3);
+make_invoke!(iris_jit_invoke_5, a0, a1, a2, a3, a4);
+make_invoke!(iris_jit_invoke_6, a0, a1, a2, a3, a4, a5);
+make_invoke!(iris_jit_invoke_7, a0, a1, a2, a3, a4, a5, a6);
+make_invoke!(iris_jit_invoke_8, a0, a1, a2, a3, a4, a5, a6, a7);
+make_invoke!(iris_jit_invoke_9, a0, a1, a2, a3, a4, a5, a6, a7, a8);
+make_invoke!(iris_jit_invoke_10, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+make_invoke!(iris_jit_invoke_11, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+make_invoke!(iris_jit_invoke_12, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+make_invoke!(iris_jit_invoke_13, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+make_invoke!(iris_jit_invoke_14, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
+make_invoke!(iris_jit_invoke_15, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+make_invoke!(iris_jit_invoke_16, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
 
 pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
     if entries.is_empty() {
