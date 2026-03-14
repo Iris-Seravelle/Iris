@@ -84,6 +84,7 @@ Supported buffer element types include:
 When enabled, Iris may compile multiple variants and select adaptively using runtime telemetry.
 
 - Selection is runtime-driven from per-variant execution stats.
+- Warm-seeded startup may intentionally compile a single variant first, then rearm to multi-variant when observed latency degrades.
 - If speculation is gated by runtime controls, Iris falls back to single-variant compile.
 - Failures or mismatches fall back safely to Python execution path.
 
@@ -116,6 +117,9 @@ When enabled, Iris may compile multiple variants and select adaptively using run
 - Cooldown backoff bounds (ns):
   - Env: `IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS`, `IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS`
   - API: `iris.jit.set_quantum_cooldown(...)`, `iris.jit.get_quantum_cooldown()`
+- Rearm cadence/trigger (ns):
+  - Env: `IRIS_JIT_QUANTUM_REARM_INTERVAL_NS`, `IRIS_JIT_QUANTUM_REARM_MIN_OBSERVED_NS`
+  - Behavior: controls how often a single-variant warm state may attempt multi-variant rearm, and the minimum observed latency required to trigger rearm.
 
 ## Warm-start metadata cache
 
@@ -128,6 +132,13 @@ Quantum telemetry is persisted for restart-time warm-up.
   - `IRIS_JIT_META_MAX_ENTRIES`
   - `IRIS_JIT_META_FLUSH_MIN`, `IRIS_JIT_META_FLUSH_MAX`
   - `IRIS_JIT_META_COMPRESS_MIN_BYTES`
+  - `IRIS_JIT_META_REFRESH_NS`
+
+Metadata lifecycle notes:
+
+- Warm seeds are loaded during registration and may be staged before full quantum state is initialized.
+- Writes are adaptive/deferred during execution and force-flushed at process exit for short-lived runs.
+- Unchanged profile *shape* may skip rewrite within the refresh window to reduce churn/noise.
 
 ## Failure model
 
@@ -136,6 +147,12 @@ Iris prioritizes correctness over acceleration:
 - Unsupported syntax or compile misses: Python fallback.
 - Runtime panic/mismatch in JIT path: guarded fallback.
 - Quantum variant errors: fallback variant or Python path.
+
+## Fallback behavior highlights
+
+- Scalar fast path remains preferred for stable scalar workloads.
+- Single-arg kernels now include generic sequence fallback when typed-buffer fast paths do not apply.
+- Loop-step wrappers compile lowered runtime expressions (including `let_bind`) and evaluate safely in Python fallback mode when needed.
 
 ## Minimal example
 
