@@ -59,6 +59,8 @@ static JIT_QUANTUM_STABILITY_MIN_SCORE_ENV_VAR: OnceLock<RwLock<String>> = OnceL
 static JIT_QUANTUM_STABILITY_MIN_RUNS_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_VARIANT_FAILURE_LIMIT_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_REARM_INTERVAL_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_REARM_MIN_OBSERVED_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 
 #[derive(Default)]
 struct QuantumCompileBudgetState {
@@ -76,6 +78,17 @@ static QUANTUM_COMPILE_BUDGET_STATE: OnceLock<std::sync::Mutex<QuantumCompileBud
     OnceLock::new();
 static QUANTUM_COOLDOWN_STATE: OnceLock<std::sync::Mutex<HashMap<usize, QuantumCooldownState>>> =
     OnceLock::new();
+static QUANTUM_REARM_PLANS: OnceLock<std::sync::Mutex<HashMap<usize, QuantumRearmPlan>>> =
+    OnceLock::new();
+static QUANTUM_REARM_LAST_ATTEMPT: OnceLock<std::sync::Mutex<HashMap<usize, u64>>> =
+    OnceLock::new();
+
+#[derive(Clone)]
+struct QuantumRearmPlan {
+    expr: String,
+    args: Vec<String>,
+    return_type: JitReturnType,
+}
 
 fn jit_log_env_var() -> &'static RwLock<String> {
     JIT_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_LOG".to_string()))
@@ -132,6 +145,16 @@ fn jit_quantum_variant_failure_limit_env_var() -> &'static RwLock<String> {
 fn jit_quantum_variant_promotion_min_runs_env_var() -> &'static RwLock<String> {
     JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS_ENV_VAR
         .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_VARIANT_PROMOTION_MIN_RUNS".to_string()))
+}
+
+fn jit_quantum_rearm_interval_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_REARM_INTERVAL_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_REARM_INTERVAL_NS".to_string()))
+}
+
+fn jit_quantum_rearm_min_observed_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_REARM_MIN_OBSERVED_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_REARM_MIN_OBSERVED_NS".to_string()))
 }
 
 fn now_ns() -> u64 {
@@ -298,6 +321,118 @@ pub(crate) fn quantum_variant_promotion_min_runs() -> u64 {
         .unwrap_or(DEFAULT)
 }
 
+pub(crate) fn quantum_rearm_interval_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000_000; // 1s between rearm attempts per function
+    let env_name = jit_quantum_rearm_interval_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+    pub(crate) fn quantum_rearm_min_observed_ns() -> u64 {
+        const DEFAULT: u64 = 1_000_000; // 1ms minimum observed latency before rearm
+        let env_name = jit_quantum_rearm_min_observed_env_var().read().unwrap().clone();
+        std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+    }
+
+fn register_quantum_rearm_plan(func_key: usize, expr: &str, args: &[String], return_type: JitReturnType) {
+    let plans = QUANTUM_REARM_PLANS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    plans.lock().unwrap().insert(
+        func_key,
+        QuantumRearmPlan {
+            expr: expr.to_string(),
+            args: args.to_vec(),
+            return_type,
+        },
+    );
+}
+
+pub(crate) fn maybe_rearm_quantum_compile(func_key: usize, observed_ns: u64, active_variants: usize) -> bool {
+    if active_variants > 1 || !quantum_speculation_enabled() {
+        return false;
+    }
+
+    let observed_gate = quantum_speculation_threshold_ns().max(quantum_rearm_min_observed_ns());
+    if observed_ns < observed_gate {
+        return false;
+    }
+
+    let plan = {
+        let plans = QUANTUM_REARM_PLANS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        plans.lock().unwrap().get(&func_key).cloned()
+    };
+    let Some(plan) = plan else {
+        return false;
+    };
+
+    let now = now_ns();
+    let interval = quantum_rearm_interval_ns();
+    {
+        let attempts = QUANTUM_REARM_LAST_ATTEMPT.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut guard = attempts.lock().unwrap();
+        if let Some(last) = guard.get(&func_key).copied() {
+            if now.saturating_sub(last) < interval {
+                return false;
+            }
+        }
+        guard.insert(func_key, now);
+    }
+
+    if !quantum_compile_may_run(func_key, now) {
+        jit_log(|| format!("[Iris][jit] quantum rearm gated by cooldown/budget for ptr={}", func_key));
+        return false;
+    }
+
+    let started = Instant::now();
+    let entries = match catch_unwind(AssertUnwindSafe(|| {
+        compile_jit_quantum(&plan.expr, &plan.args, plan.return_type)
+    })) {
+        Ok(entries) => entries,
+        Err(payload) => {
+            let msg = panic_payload_to_string(payload);
+            jit_log(|| format!("[Iris][jit] panic during quantum rearm for ptr={}: {}", func_key, msg));
+            Vec::new()
+        }
+    };
+
+    let elapsed = started.elapsed().as_nanos() as u64;
+    let success = entries.len() > 1;
+    record_quantum_compile_attempt(func_key, now, elapsed, success);
+
+    if success {
+        register_quantum_jit(func_key, entries);
+        jit_log(|| format!("[Iris][jit] quantum rearmed variants for ptr={}", func_key));
+        true
+    } else {
+        jit_log(|| format!("[Iris][jit] quantum rearm skipped (insufficient variants) for ptr={}", func_key));
+        false
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_quantum_rearm_plan_for_test(
+    func_key: usize,
+    expr: &str,
+    args: &[String],
+    return_type: JitReturnType,
+) {
+    register_quantum_rearm_plan(func_key, expr, args, return_type);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_quantum_rearm_plan_for_test(func_key: usize) {
+    if let Some(plans) = QUANTUM_REARM_PLANS.get() {
+        plans.lock().unwrap().remove(&func_key);
+    }
+    if let Some(attempts) = QUANTUM_REARM_LAST_ATTEMPT.get() {
+        attempts.lock().unwrap().remove(&func_key);
+    }
+}
+
 pub(crate) fn quantum_compile_may_run(func_key: usize, now_ns: u64) -> bool {
     let cooldown_map = QUANTUM_COOLDOWN_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Some(state) = cooldown_map.lock().unwrap().get(&func_key).copied() {
@@ -357,6 +492,9 @@ pub(crate) fn reset_quantum_control_state() {
         guard.consumed_ns = 0;
     }
     if let Some(state) = QUANTUM_COOLDOWN_STATE.get() {
+        state.lock().unwrap().clear();
+    }
+    if let Some(state) = QUANTUM_REARM_LAST_ATTEMPT.get() {
         state.lock().unwrap().clear();
     }
 }
@@ -691,6 +829,7 @@ fn register_offload(
                         .and_then(|n| n.extract::<String>().ok())
                 });
                 let return_type = parse_return_type(return_type.as_deref());
+                register_quantum_rearm_plan(key, &expr, &args, return_type);
                 let warm_seed_hint = quantum_has_seed_hint(key);
 
                 let compile_single = || {

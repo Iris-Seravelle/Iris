@@ -468,11 +468,11 @@ pub fn execute_registered_jit(
 ) -> Option<pyo3::PyResult<pyo3::PyObject>> {
     if crate::py::jit::quantum_speculation_enabled() {
         if let Some(map) = QUANTUM_REGISTRY.get() {
-            let (entry, idx, fallback_entries, should_use_quantum) = {
+            let (entry, idx, fallback_entries, should_use_quantum, active_count) = {
                 let mut guard = map.lock().unwrap();
                 if let Some(state) = guard.get_mut(&func_key) {
                     if state.entries.is_empty() {
-                        (None, 0usize, Vec::new(), false)
+                        (None, 0usize, Vec::new(), false, 0usize)
                     } else {
                         // Decide whether to use multi-variant quantum dispatch.
                         // If the observed runtime remains below threshold, stick to the
@@ -505,15 +505,21 @@ pub fn execute_registered_jit(
                                     fallbacks.push((i, e.clone()));
                                 }
                             }
-                            (entry, idx, fallbacks, true)
+                            (entry, idx, fallbacks, true, active_count)
                         } else {
                             // Baseline execution only
                             let baseline_idx = state.baseline_idx.min(state.entries.len() - 1);
-                            (Some(state.entries[baseline_idx].clone()), baseline_idx, Vec::new(), false)
+                            (
+                                Some(state.entries[baseline_idx].clone()),
+                                baseline_idx,
+                                Vec::new(),
+                                false,
+                                active_count,
+                            )
                         }
                     }
                 } else {
-                    (None, 0usize, Vec::new(), false)
+                    (None, 0usize, Vec::new(), false, 0usize)
                 }
             };
 
@@ -540,12 +546,18 @@ pub fn execute_registered_jit(
                     Ok(obj) => {
                         let elapsed = start.elapsed().as_nanos() as u64;
                         update_quantum_stats(func_key, idx, elapsed, true);
+                        if !should_use_quantum {
+                            let _ = crate::py::jit::maybe_rearm_quantum_compile(func_key, elapsed, active_count);
+                        }
                         log_if_slow(idx, idx, elapsed, if should_use_quantum { "success" } else { "baseline" });
                         return Some(Ok(obj));
                     }
                     Err(primary_err) => {
                         let elapsed = start.elapsed().as_nanos() as u64;
                         update_quantum_stats(func_key, idx, elapsed, false);
+                        if !should_use_quantum {
+                            let _ = crate::py::jit::maybe_rearm_quantum_compile(func_key, elapsed, active_count);
+                        }
                         log_if_slow(idx, idx, elapsed, "primary_failed");
                         if should_use_quantum {
                             for (fb_idx, fb_entry) in fallback_entries {
@@ -2307,16 +2319,21 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                     const MAX_FAST_ARGS: usize = 8;
                     if arg_count <= MAX_FAST_ARGS {
                         let mut stack_args = [0.0_f64; MAX_FAST_ARGS];
+                        let mut scalar_mismatch = false;
                         for i in 0..arg_count {
                             let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
                             let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                             if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                                return Err(pyo3::PyErr::fetch(py));
+                                unsafe { pyo3::ffi::PyErr_Clear() };
+                                scalar_mismatch = true;
+                                break;
                             }
                             stack_args[i] = val;
                         }
-                        let res = f(stack_args.as_ptr());
-                        return Ok(jit_return_to_py(py, res, entry.return_type));
+                        if !scalar_mismatch {
+                            let res = f(stack_args.as_ptr());
+                            return Ok(jit_return_to_py(py, res, entry.return_type));
+                        }
                     }
                 }
             }
@@ -2468,6 +2485,45 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                 );
 
                 return Ok(vec_f64_to_py(py, &results, entry.return_type));
+            }
+        }
+    }
+
+    // 2.25 Generic sequence fallback for single-arg kernels when buffer fast paths miss.
+    // This keeps scalar-profiled functions robust when later called with vector-like inputs
+    // that don't satisfy the typed-buffer fast path.
+    if arg_count == 1 && entry.arg_count == 1 {
+        if let Ok(item) = args.get_item(0) {
+            let is_text_like = item
+                .is_instance_of::<pyo3::types::PyString>()
+                || item.is_instance_of::<pyo3::types::PyBytes>()
+                || item.is_instance_of::<pyo3::types::PyByteArray>();
+
+            if !is_text_like {
+                if let Ok(len) = item.len() {
+                    if entry.reduction != ReductionMode::None {
+                        let mut acc = reduction_identity(entry.reduction);
+                        for i in 0..len {
+                            let elem = item.get_item(i)?;
+                            let val: f64 = elem.extract()?;
+                            let arg0 = [val];
+                            let out = f(arg0.as_ptr());
+                            if reduction_step(entry.reduction, &mut acc, out) {
+                                break;
+                            }
+                        }
+                        return Ok(jit_return_to_py(py, acc, entry.return_type));
+                    }
+
+                    let mut results = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let elem = item.get_item(i)?;
+                        let val: f64 = elem.extract()?;
+                        let arg0 = [val];
+                        results.push(f(arg0.as_ptr()));
+                    }
+                    return Ok(vec_f64_to_py(py, &results, entry.return_type));
+                }
             }
         }
     }

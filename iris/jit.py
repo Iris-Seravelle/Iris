@@ -885,6 +885,48 @@ def _contains_unsupported_ast(node: ast.AST) -> bool:
     return False
 
 
+class _RuntimeLetBindTransformer(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        node = self.generic_visit(node)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "let_bind"
+            and len(node.args) == 3
+            and isinstance(node.args[0], ast.Name)
+        ):
+            bind_name = node.args[0].id
+            val_expr = node.args[1]
+            body_expr = node.args[2]
+            assign_expr = ast.NamedExpr(
+                target=ast.Name(id=bind_name, ctx=ast.Store()),
+                value=val_expr,
+            )
+            seq_expr = ast.Tuple(elts=[assign_expr, body_expr], ctx=ast.Load())
+            return ast.Subscript(value=seq_expr, slice=ast.Constant(value=1), ctx=ast.Load())
+        return node
+
+
+def _compile_runtime_expr(expr_src: str) -> Optional[Any]:
+    try:
+        tree = ast.parse(expr_src, mode="eval")
+        tree = _RuntimeLetBindTransformer().visit(tree)
+        tree = ast.fix_missing_locations(tree)
+        return compile(tree, "<iris-jit-step>", "eval")
+    except Exception:
+        return None
+
+
+def _eval_runtime_expr(
+    expr_src: str,
+    globals_ns: dict[str, Any],
+    locals_ns: dict[str, Any],
+    compiled: Optional[Any],
+) -> Any:
+    if compiled is not None:
+        return eval(compiled, globals_ns, locals_ns)
+    return eval(expr_src, globals_ns, locals_ns)
+
+
 def _extract_inlined_expr_plan(
     fn_node: ast.FunctionDef,
     fn_globals: Optional[dict[str, Any]] = None,
@@ -1002,8 +1044,15 @@ def _extract_stateful_loop_plan(
     ):
         return None
 
+    pre_append_body = loop_body[:-1]
+    allowed_stmt_types = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr, ast.Pass)
+    if any(not isinstance(stmt, allowed_stmt_types) for stmt in pre_append_body):
+        return None
+    if any(isinstance(stmt, ast.If) for stmt in pre_append_body):
+        return None
+
     state_expr: ast.AST = ast.Name(id=state_var, ctx=ast.Load())
-    step_expr = _lower_to_expr(loop_body[:-1], state_expr, fn_globals, inline_cache)
+    step_expr = _lower_to_expr(pre_append_body, state_expr, fn_globals, inline_cache)
     if step_expr is None:
         return None
 
@@ -1432,10 +1481,12 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                 seed_src = loop_plan["seed_src"]
                 count_arg = loop_plan["count_arg"]
                 iter_var = loop_plan["iter_var"]
+                step_code = _compile_runtime_expr(step_src)
+                seed_code = _compile_runtime_expr(seed_src)
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, jit_eval_globals, namespace))
+                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1454,7 +1505,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
+                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1475,7 +1526,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, jit_eval_globals, local_ns))
+                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
                             else:
                                 raise
                         out.append(state)
@@ -1489,10 +1540,12 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                 count_arg = scalar_while_plan["count_arg"]
                 iter_var = scalar_while_plan["iter_var"]
                 seed_src = scalar_while_plan["seed_src"]
+                step_code = _compile_runtime_expr(step_src)
+                seed_code = _compile_runtime_expr(seed_src)
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, jit_eval_globals, namespace))
+                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1514,7 +1567,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
+                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1547,7 +1600,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, jit_eval_globals, local_ns))
+                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
                             else:
                                 raise
                     return state
@@ -1560,10 +1613,12 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                 count_arg = scalar_for_plan["count_arg"]
                 iter_var = scalar_for_plan["iter_var"]
                 seed_src = scalar_for_plan["seed_src"]
+                step_code = _compile_runtime_expr(step_src)
+                seed_code = _compile_runtime_expr(seed_src)
 
                 def _iris_step(x: float, i: float) -> float:
                     namespace = {step_args[0]: x, step_args[1]: i}
-                    return float(eval(step_src, jit_eval_globals, namespace))
+                    return float(_eval_runtime_expr(step_src, jit_eval_globals, namespace, step_code))
 
                 try:
                     register_offload(_iris_step, "jit", "float", step_src, step_args)
@@ -1585,7 +1640,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
 
                     local_seed_ns = dict(bound.arguments)
                     try:
-                        state = float(eval(seed_src, jit_eval_globals, local_seed_ns))
+                        state = float(_eval_runtime_expr(seed_src, jit_eval_globals, local_seed_ns, seed_code))
                         count = int(bound.arguments[count_arg])
                     except Exception:
                         return func(*args, **kwargs)
@@ -1618,7 +1673,7 @@ def offload(strategy: str = "actor", return_type: Optional[str] = None) -> Calla
                                 or "jit panic" in msg
                             ):
                                 local_ns = {step_args[0]: state, iter_var: i, step_args[1]: iter_val}
-                                state = float(eval(step_src, jit_eval_globals, local_ns))
+                                state = float(_eval_runtime_expr(step_src, jit_eval_globals, local_ns, step_code))
                             else:
                                 raise
                     return state
