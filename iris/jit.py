@@ -15,12 +15,17 @@ import warnings
 import copy
 import array as _array
 import hashlib
-import json
 import os
 import platform
 import sys
 import time
+import zlib
 from typing import Callable, Optional, Any
+
+try:
+    import msgpack as _msgpack
+except Exception:  # pragma: no cover - optional at runtime
+    _msgpack = None  # type: ignore
 
 try:
     from .iris import (
@@ -37,6 +42,10 @@ try:
         get_quantum_speculation_threshold as _get_quantum_speculation_threshold,
         configure_quantum_log_threshold as _configure_quantum_log_threshold,
         get_quantum_log_threshold as _get_quantum_log_threshold,
+        configure_quantum_compile_budget as _configure_quantum_compile_budget,
+        get_quantum_compile_budget as _get_quantum_compile_budget,
+        configure_quantum_cooldown as _configure_quantum_cooldown,
+        get_quantum_cooldown as _get_quantum_cooldown,
     )  # pyo3 extension
 except ImportError:  # allow tests to import without extension built
     register_offload = None  # type: ignore
@@ -53,6 +62,10 @@ except ImportError:  # allow tests to import without extension built
     _get_quantum_speculation_threshold = None  # type: ignore
     _configure_quantum_log_threshold = None  # type: ignore
     _get_quantum_log_threshold = None  # type: ignore
+    _configure_quantum_compile_budget = None  # type: ignore
+    _get_quantum_compile_budget = None  # type: ignore
+    _configure_quantum_cooldown = None  # type: ignore
+    _get_quantum_cooldown = None  # type: ignore
 
 try:
     from .iris import call_jit_step_loop_f64  # type: ignore
@@ -61,9 +74,60 @@ except Exception:
 
 
 _IRIS_META_SCHEMA = 1
-_IRIS_META_FILENAME = ".iris.meta.json"
+_IRIS_META_FILENAME = ".iris.meta.bin"
+_IRIS_META_MAGIC = b"IRSMETA1"
+_IRIS_META_FLAG_COMPRESSED = 0x1
 _IRIS_META_FLUSH_EVERY = 16
+_IRIS_META_TTL_NS = int(os.environ.get("IRIS_JIT_META_TTL_NS", str(7 * 24 * 60 * 60 * 1_000_000_000)))
+_IRIS_META_MAX_ENTRIES = int(os.environ.get("IRIS_JIT_META_MAX_ENTRIES", "256"))
+_IRIS_META_FLUSH_MIN = int(os.environ.get("IRIS_JIT_META_FLUSH_MIN", "8"))
+_IRIS_META_FLUSH_MAX = int(os.environ.get("IRIS_JIT_META_FLUSH_MAX", "128"))
+_IRIS_META_COMPRESS_MIN_BYTES = int(os.environ.get("IRIS_JIT_META_COMPRESS_MIN_BYTES", "4096"))
 _IRIS_META_COUNTERS: dict[str, int] = {}
+_IRIS_META_FLUSH_INTERVALS: dict[str, int] = {}
+_IRIS_META_LAST_SIGNATURES: dict[str, str] = {}
+
+
+def _empty_metadata_doc() -> dict[str, Any]:
+    return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+
+
+def _normalize_metadata_policy() -> tuple[int, int]:
+    ttl_ns = _IRIS_META_TTL_NS if _IRIS_META_TTL_NS > 0 else 7 * 24 * 60 * 60 * 1_000_000_000
+    max_entries = _IRIS_META_MAX_ENTRIES if _IRIS_META_MAX_ENTRIES > 0 else 256
+    return ttl_ns, max_entries
+
+
+def _normalize_flush_window() -> tuple[int, int]:
+    min_flush = _IRIS_META_FLUSH_MIN if _IRIS_META_FLUSH_MIN > 0 else _IRIS_META_FLUSH_EVERY
+    max_flush = _IRIS_META_FLUSH_MAX if _IRIS_META_FLUSH_MAX > 0 else max(min_flush, _IRIS_META_FLUSH_EVERY)
+    if max_flush < min_flush:
+        max_flush = min_flush
+    return min_flush, max_flush
+
+
+def _prune_metadata_entries(entries: dict[str, Any], now_ns: int) -> dict[str, Any]:
+    ttl_ns, max_entries = _normalize_metadata_policy()
+    min_updated = now_ns - ttl_ns
+    kept: list[tuple[str, dict[str, Any], int]] = []
+
+    for key, value in entries.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        updated_ns_raw = value.get("updated_ns", 0)
+        try:
+            updated_ns = int(updated_ns_raw)
+        except Exception:
+            updated_ns = 0
+        if updated_ns < min_updated:
+            continue
+        kept.append((key, value, updated_ns))
+
+    kept.sort(key=lambda item: item[2], reverse=True)
+    if len(kept) > max_entries:
+        kept = kept[:max_entries]
+
+    return {key: value for key, value, _ in kept}
 
 
 def _metadata_cache_path(func: Callable[..., Any]) -> Optional[str]:
@@ -86,40 +150,80 @@ def _metadata_key(
 ) -> str:
     fn_module = getattr(func, "__module__", "")
     fn_qualname = getattr(func, "__qualname__", getattr(func, "__name__", ""))
-    stable_payload = {
-        "module": fn_module,
-        "qualname": fn_qualname,
-        "src": src,
-        "args": arg_names,
-        "return_type": return_type or "float",
-        "py": f"{sys.version_info.major}.{sys.version_info.minor}",
-        "arch": platform.machine(),
-    }
-    payload = json.dumps(stable_payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    stable_payload = (
+        fn_module,
+        fn_qualname,
+        src,
+        tuple(arg_names),
+        return_type or "float",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
+        platform.machine(),
+    )
+    if _msgpack is not None:
+        payload_bytes = _msgpack.packb(stable_payload, use_bin_type=True)
+    else:
+        payload_bytes = repr(stable_payload).encode("utf-8")
+    return hashlib.sha256(payload_bytes).hexdigest()
+
+
+def _pack_metadata_doc(doc: dict[str, Any]) -> bytes:
+    if _msgpack is None:
+        return b""
+    payload = _msgpack.packb(doc, use_bin_type=True)
+    flags = 0
+    if _IRIS_META_COMPRESS_MIN_BYTES > 0 and len(payload) >= _IRIS_META_COMPRESS_MIN_BYTES:
+        payload = zlib.compress(payload)
+        flags |= _IRIS_META_FLAG_COMPRESSED
+    return _IRIS_META_MAGIC + bytes([flags]) + payload
+
+
+def _unpack_metadata_doc(raw: bytes) -> dict[str, Any]:
+    if _msgpack is None or len(raw) < len(_IRIS_META_MAGIC) + 1:
+        return _empty_metadata_doc()
+    if raw[: len(_IRIS_META_MAGIC)] != _IRIS_META_MAGIC:
+        return _empty_metadata_doc()
+
+    flags = raw[len(_IRIS_META_MAGIC)]
+    payload = raw[len(_IRIS_META_MAGIC) + 1 :]
+    if flags & _IRIS_META_FLAG_COMPRESSED:
+        payload = zlib.decompress(payload)
+
+    doc = _msgpack.unpackb(payload, raw=False)
+    if not isinstance(doc, dict):
+        return _empty_metadata_doc()
+    return doc
 
 
 def _read_metadata(path: str) -> dict[str, Any]:
+    if _msgpack is None:
+        return _empty_metadata_doc()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            doc = json.load(f)
+        with open(path, "rb") as f:
+            raw = f.read()
+        doc = _unpack_metadata_doc(raw)
         if not isinstance(doc, dict):
-            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+            return _empty_metadata_doc()
         if int(doc.get("schema", 0)) != _IRIS_META_SCHEMA:
-            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+            return _empty_metadata_doc()
         entries = doc.get("entries")
         if not isinstance(entries, dict):
-            return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+            return _empty_metadata_doc()
+        doc["entries"] = _prune_metadata_entries(entries, time.time_ns())
         return doc
     except Exception:
-        return {"schema": _IRIS_META_SCHEMA, "entries": {}}
+        return _empty_metadata_doc()
 
 
 def _write_metadata(path: str, doc: dict[str, Any]) -> None:
+    if _msgpack is None:
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp_path = f"{path}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, sort_keys=True, separators=(",", ":"))
+    payload = _pack_metadata_doc(doc)
+    if not payload:
+        return
+    with open(temp_path, "wb") as f:
+        f.write(payload)
     os.replace(temp_path, path)
 
 
@@ -129,7 +233,7 @@ def _seed_quantum_from_metadata(
     arg_names: Optional[list[str]],
     return_type: Optional[str],
 ) -> None:
-    if _seed_quantum_profile is None or src is None or arg_names is None:
+    if _msgpack is None or _seed_quantum_profile is None or src is None or arg_names is None:
         return
     path = _metadata_cache_path(func)
     if path is None:
@@ -164,15 +268,22 @@ def _maybe_persist_quantum_metadata(
     arg_names: Optional[list[str]],
     return_type: Optional[str],
 ) -> None:
-    if _get_quantum_profile is None or src is None or arg_names is None:
+    if _msgpack is None or _get_quantum_profile is None or src is None or arg_names is None:
         return
     path = _metadata_cache_path(func)
     if path is None:
         return
     key = _metadata_key(func, src, arg_names, return_type)
+    min_flush, max_flush = _normalize_flush_window()
+    flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, _IRIS_META_FLUSH_EVERY)
+    if flush_interval < min_flush:
+        flush_interval = min_flush
+    if flush_interval > max_flush:
+        flush_interval = max_flush
+
     count = _IRIS_META_COUNTERS.get(key, 0) + 1
     _IRIS_META_COUNTERS[key] = count
-    if count % _IRIS_META_FLUSH_EVERY != 0:
+    if count % flush_interval != 0:
         return
     try:
         rows = _get_quantum_profile(func)
@@ -191,6 +302,16 @@ def _maybe_persist_quantum_metadata(
     if not normalized_rows:
         return
 
+    row_sig = hashlib.sha256(
+        _msgpack.packb(normalized_rows, use_bin_type=True)
+    ).hexdigest()
+    prev_sig = _IRIS_META_LAST_SIGNATURES.get(key)
+    if prev_sig == row_sig:
+        _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
+    else:
+        _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
+    _IRIS_META_LAST_SIGNATURES[key] = row_sig
+
     try:
         doc = _read_metadata(path)
         entries = doc.setdefault("entries", {})
@@ -203,6 +324,7 @@ def _maybe_persist_quantum_metadata(
             "arg_count": len(arg_names),
             "profile": normalized_rows,
         }
+        doc["entries"] = _prune_metadata_entries(entries, time.time_ns())
         _write_metadata(path, doc)
     except Exception:
         pass
@@ -303,6 +425,70 @@ def get_quantum_log_threshold() -> int:
     if _get_quantum_log_threshold is None:
         return 0
     return int(_get_quantum_log_threshold())
+
+
+def set_quantum_compile_budget(
+    budget_ns: Optional[int] = None,
+    window_ns: Optional[int] = None,
+    budget_env_var: Optional[str] = None,
+    window_env_var: Optional[str] = None,
+) -> tuple[int, int]:
+    """Configure quantum compile-time budget and accounting window.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(budget_ns, window_ns)`` currently in effect.
+    """
+    if _configure_quantum_compile_budget is None:
+        return (0, 0)
+    budget, window = _configure_quantum_compile_budget(
+        budget_ns,
+        window_ns,
+        budget_env_var,
+        window_env_var,
+    )
+    return int(budget), int(window)
+
+
+def get_quantum_compile_budget() -> tuple[int, int]:
+    """Return the current quantum compile budget tuple ``(budget_ns, window_ns)``."""
+    if _get_quantum_compile_budget is None:
+        return (0, 0)
+    budget, window = _get_quantum_compile_budget()
+    return int(budget), int(window)
+
+
+def set_quantum_cooldown(
+    base_ns: Optional[int] = None,
+    max_ns: Optional[int] = None,
+    base_env_var: Optional[str] = None,
+    max_env_var: Optional[str] = None,
+) -> tuple[int, int]:
+    """Configure quantum compile cooldown backoff bounds.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(base_ns, max_ns)`` currently in effect.
+    """
+    if _configure_quantum_cooldown is None:
+        return (0, 0)
+    base, maxv = _configure_quantum_cooldown(
+        base_ns,
+        max_ns,
+        base_env_var,
+        max_env_var,
+    )
+    return int(base), int(maxv)
+
+
+def get_quantum_cooldown() -> tuple[int, int]:
+    """Return the current quantum cooldown tuple ``(base_ns, max_ns)``."""
+    if _get_quantum_cooldown is None:
+        return (0, 0)
+    base, maxv = _get_quantum_cooldown()
+    return int(base), int(maxv)
 
 
 def _strip_docstring(stmts: list[ast.stmt]) -> list[ast.stmt]:

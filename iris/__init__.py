@@ -1,8 +1,6 @@
 # iris/__init__.py
 import asyncio
 from typing import Optional, Callable, Union, Awaitable
-
-# bring JIT helpers into package namespace
 from .jit import (
     offload,
     set_jit_logging,
@@ -13,10 +11,11 @@ from .jit import (
     get_quantum_speculation_threshold,
     set_quantum_log_threshold,
     get_quantum_log_threshold,
+    set_quantum_compile_budget,
+    get_quantum_compile_budget,
+    set_quantum_cooldown,
+    get_quantum_cooldown,
 )
-
-# import core symbols from the compiled extension.  `register_offload`
-# may not exist early in the build process, so import it conditionally.
 try:
     from .iris import PyRuntime, PySystemMessage, version, allocate_buffer, PyMailbox, register_offload
 except ImportError:

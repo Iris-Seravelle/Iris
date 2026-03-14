@@ -11,6 +11,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::collections::HashMap;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{any::Any, panic::{catch_unwind, AssertUnwindSafe}};
 
 #[cfg(feature = "pyo3")]
@@ -48,6 +50,27 @@ static JIT_QUANTUM_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 o
 static JIT_QUANTUM_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_LOG_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
 static JIT_QUANTUM_SPECULATION_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_COMPILE_BUDGET_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_COMPILE_WINDOW_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_COOLDOWN_BASE_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+static JIT_QUANTUM_COOLDOWN_MAX_ENV_VAR: OnceLock<RwLock<String>> = OnceLock::new();
+
+#[derive(Default)]
+struct QuantumCompileBudgetState {
+    window_start_ns: u64,
+    consumed_ns: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct QuantumCooldownState {
+    failures: u32,
+    cooldown_until_ns: u64,
+}
+
+static QUANTUM_COMPILE_BUDGET_STATE: OnceLock<std::sync::Mutex<QuantumCompileBudgetState>> =
+    OnceLock::new();
+static QUANTUM_COOLDOWN_STATE: OnceLock<std::sync::Mutex<HashMap<usize, QuantumCooldownState>>> =
+    OnceLock::new();
 
 fn jit_log_env_var() -> &'static RwLock<String> {
     JIT_LOG_ENV_VAR.get_or_init(|| RwLock::new("IRIS_JIT_LOG".to_string()))
@@ -64,6 +87,33 @@ fn jit_quantum_log_env_var() -> &'static RwLock<String> {
 fn jit_quantum_speculation_env_var() -> &'static RwLock<String> {
     JIT_QUANTUM_SPECULATION_ENV_VAR
         .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_SPECULATION_NS".to_string()))
+}
+
+fn jit_quantum_compile_budget_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_COMPILE_BUDGET_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS".to_string()))
+}
+
+fn jit_quantum_compile_window_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_COMPILE_WINDOW_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS".to_string()))
+}
+
+fn jit_quantum_cooldown_base_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_COOLDOWN_BASE_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS".to_string()))
+}
+
+fn jit_quantum_cooldown_max_env_var() -> &'static RwLock<String> {
+    JIT_QUANTUM_COOLDOWN_MAX_ENV_VAR
+        .get_or_init(|| RwLock::new("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS".to_string()))
+}
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 fn parse_bool_env(v: &str) -> bool {
@@ -148,6 +198,105 @@ pub(crate) fn quantum_speculation_threshold_ns() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_compile_budget_ns() -> u64 {
+    const DEFAULT: u64 = 50_000_000; // 50ms compile budget per window
+    let env_name = jit_quantum_compile_budget_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_compile_window_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000_000; // 1s
+    let env_name = jit_quantum_compile_window_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_cooldown_base_ns() -> u64 {
+    const DEFAULT: u64 = 5_000_000; // 5ms
+    let env_name = jit_quantum_cooldown_base_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_cooldown_max_ns() -> u64 {
+    const DEFAULT: u64 = 1_000_000_000; // 1s
+    let env_name = jit_quantum_cooldown_max_env_var().read().unwrap().clone();
+    std::env::var(env_name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT)
+}
+
+pub(crate) fn quantum_compile_may_run(func_key: usize, now_ns: u64) -> bool {
+    let cooldown_map = QUANTUM_COOLDOWN_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(state) = cooldown_map.lock().unwrap().get(&func_key).copied() {
+        if now_ns < state.cooldown_until_ns {
+            return false;
+        }
+    }
+
+    let window_ns = quantum_compile_window_ns();
+    let budget_ns = quantum_compile_budget_ns();
+    let budget_state = QUANTUM_COMPILE_BUDGET_STATE
+        .get_or_init(|| std::sync::Mutex::new(QuantumCompileBudgetState::default()));
+    let mut budget = budget_state.lock().unwrap();
+    if budget.window_start_ns == 0 || now_ns.saturating_sub(budget.window_start_ns) >= window_ns {
+        budget.window_start_ns = now_ns;
+        budget.consumed_ns = 0;
+    }
+    budget.consumed_ns < budget_ns
+}
+
+pub(crate) fn record_quantum_compile_attempt(func_key: usize, now_ns: u64, elapsed_ns: u64, success: bool) {
+    let window_ns = quantum_compile_window_ns();
+    let budget_state = QUANTUM_COMPILE_BUDGET_STATE
+        .get_or_init(|| std::sync::Mutex::new(QuantumCompileBudgetState::default()));
+    {
+        let mut budget = budget_state.lock().unwrap();
+        if budget.window_start_ns == 0 || now_ns.saturating_sub(budget.window_start_ns) >= window_ns {
+            budget.window_start_ns = now_ns;
+            budget.consumed_ns = 0;
+        }
+        budget.consumed_ns = budget.consumed_ns.saturating_add(elapsed_ns);
+    }
+
+    let cooldown_map = QUANTUM_COOLDOWN_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = cooldown_map.lock().unwrap();
+    let state = guard.entry(func_key).or_default();
+    if success {
+        state.failures = 0;
+        state.cooldown_until_ns = 0;
+        return;
+    }
+
+    state.failures = state.failures.saturating_add(1);
+    let base = quantum_cooldown_base_ns();
+    let max = quantum_cooldown_max_ns();
+    let shift = (state.failures.saturating_sub(1)).min(20);
+    let mult = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let cooldown = base.saturating_mul(mult).min(max);
+    state.cooldown_until_ns = now_ns.saturating_add(cooldown);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_quantum_control_state() {
+    if let Some(state) = QUANTUM_COMPILE_BUDGET_STATE.get() {
+        let mut guard = state.lock().unwrap();
+        guard.window_start_ns = 0;
+        guard.consumed_ns = 0;
+    }
+    if let Some(state) = QUANTUM_COOLDOWN_STATE.get() {
+        state.lock().unwrap().clear();
+    }
 }
 
 fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
@@ -269,6 +418,10 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(configure_quantum_log_threshold, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(get_quantum_log_threshold, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(set_quantum_log_threshold, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_quantum_compile_budget, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(get_quantum_compile_budget, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_quantum_cooldown, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(get_quantum_cooldown, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(get_quantum_profile, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(seed_quantum_profile, m)?)?;
     Ok(())
@@ -366,6 +519,68 @@ fn set_quantum_log_threshold(threshold_ns: Option<u64>, env_var: Option<String>)
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
+fn configure_quantum_compile_budget(
+    budget_ns: Option<u64>,
+    window_ns: Option<u64>,
+    budget_env_var: Option<String>,
+    window_env_var: Option<String>,
+) -> PyResult<(u64, u64)> {
+    if let Some(name) = budget_env_var {
+        *jit_quantum_compile_budget_env_var().write().unwrap() = name;
+    }
+    if let Some(name) = window_env_var {
+        *jit_quantum_compile_window_env_var().write().unwrap() = name;
+    }
+    if let Some(ns) = budget_ns {
+        let env_name = jit_quantum_compile_budget_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    if let Some(ns) = window_ns {
+        let env_name = jit_quantum_compile_window_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    Ok((quantum_compile_budget_ns(), quantum_compile_window_ns()))
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn get_quantum_compile_budget() -> PyResult<(u64, u64)> {
+    Ok((quantum_compile_budget_ns(), quantum_compile_window_ns()))
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn configure_quantum_cooldown(
+    base_ns: Option<u64>,
+    max_ns: Option<u64>,
+    base_env_var: Option<String>,
+    max_env_var: Option<String>,
+) -> PyResult<(u64, u64)> {
+    if let Some(name) = base_env_var {
+        *jit_quantum_cooldown_base_env_var().write().unwrap() = name;
+    }
+    if let Some(name) = max_env_var {
+        *jit_quantum_cooldown_max_env_var().write().unwrap() = name;
+    }
+    if let Some(ns) = base_ns {
+        let env_name = jit_quantum_cooldown_base_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    if let Some(ns) = max_ns {
+        let env_name = jit_quantum_cooldown_max_env_var().read().unwrap().clone();
+        std::env::set_var(env_name, ns.to_string());
+    }
+    Ok((quantum_cooldown_base_ns(), quantum_cooldown_max_ns()))
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+fn get_quantum_cooldown() -> PyResult<(u64, u64)> {
+    Ok((quantum_cooldown_base_ns(), quantum_cooldown_max_ns()))
+}
+
+#[cfg(feature = "pyo3")]
+#[pyfunction]
 fn get_quantum_profile(func: PyObject) -> PyResult<Vec<(usize, f64, u64, u64)>> {
     let key = func.as_ptr() as usize;
     let points = quantum_profile_snapshot(key).unwrap_or_default();
@@ -415,27 +630,7 @@ fn register_offload(
                 });
                 let return_type = parse_return_type(return_type.as_deref());
 
-                if quantum_speculation_enabled() {
-                    let entries = match catch_unwind(AssertUnwindSafe(|| {
-                        compile_jit_quantum(&expr, &args, return_type)
-                    })) {
-                        Ok(entries) => entries,
-                        Err(payload) => {
-                            let msg = panic_payload_to_string(payload);
-                            jit_log(|| format!("[Iris][jit] panic while compiling quantum variants '{}': {}", expr, msg));
-                            Vec::new()
-                        }
-                    };
-                    if !entries.is_empty() {
-                        if let Some(name) = func_name.as_deref() {
-                            register_named_jit(name, entries[0].clone());
-                        }
-                        register_quantum_jit(key, entries);
-                        jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
-                    } else {
-                        jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
-                    }
-                } else {
+                let compile_single = || {
                     let maybe_entry = match catch_unwind(AssertUnwindSafe(|| {
                         compile_jit_with_return_type(&expr, &args, return_type)
                     })) {
@@ -455,6 +650,42 @@ fn register_offload(
                     } else {
                         jit_log(|| format!("[Iris][jit] failed to compile expr: {}", expr));
                     }
+                };
+
+                if quantum_speculation_enabled() {
+                    let now = now_ns();
+                    if quantum_compile_may_run(key, now) {
+                        let started = Instant::now();
+                        let entries = match catch_unwind(AssertUnwindSafe(|| {
+                            compile_jit_quantum(&expr, &args, return_type)
+                        })) {
+                            Ok(entries) => entries,
+                            Err(payload) => {
+                                let msg = panic_payload_to_string(payload);
+                                jit_log(|| format!("[Iris][jit] panic while compiling quantum variants '{}': {}", expr, msg));
+                                Vec::new()
+                            }
+                        };
+                        let elapsed = started.elapsed().as_nanos() as u64;
+                        let success = !entries.is_empty();
+                        record_quantum_compile_attempt(key, now, elapsed, success);
+
+                        if success {
+                            if let Some(name) = func_name.as_deref() {
+                                register_named_jit(name, entries[0].clone());
+                            }
+                            register_quantum_jit(key, entries);
+                            jit_log(|| format!("[Iris][jit] compiled quantum JIT variants for ptr={}", key));
+                        } else {
+                            jit_log(|| format!("[Iris][jit] failed to compile quantum variants: {}", expr));
+                            compile_single();
+                        }
+                    } else {
+                        jit_log(|| format!("[Iris][jit] quantum compile gated by cooldown/budget for ptr={}", key));
+                        compile_single();
+                    }
+                } else {
+                    compile_single();
                 }
             }
         }

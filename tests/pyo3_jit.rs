@@ -8,6 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 async fn py_jit_quantum_profile_persists_and_warm_starts_from_pycache() {
     pyo3::prepare_freethreaded_python();
 
+    let has_msgpack = Python::with_gil(|py| {
+        py.import("importlib.util")
+            .ok()
+            .and_then(|u| u.call_method1("find_spec", ("msgpack",)).ok())
+            .map(|spec| !spec.is_none())
+            .unwrap_or(false)
+    });
+    if !has_msgpack {
+        return;
+    }
+
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -65,6 +76,16 @@ def warm_add(x):
             .unwrap()
             .call1((0_i64, Option::<String>::None))
             .unwrap();
+        jit_mod
+            .getattr("set_quantum_compile_budget")
+            .unwrap()
+            .call1((1_000_000_000_i64, 1_000_000_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
+        jit_mod
+            .getattr("set_quantum_cooldown")
+            .unwrap()
+            .call1((0_i64, 0_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap();
 
         spec.getattr("loader")
             .unwrap()
@@ -87,8 +108,80 @@ def warm_add(x):
         assert!(!initial_profile.is_empty());
         assert!(initial_profile.iter().any(|(_, _, runs, _)| *runs > 0));
 
-        let meta_path = temp_dir.join("__pycache__").join(".iris.meta.json");
+        let meta_path = temp_dir.join("__pycache__").join(".iris.meta.bin");
         assert!(meta_path.exists(), "expected persisted metadata file at {:?}", meta_path);
+
+        let locals2 = PyDict::new(py);
+        locals2
+            .set_item("meta_path", meta_path.to_string_lossy().to_string())
+            .unwrap();
+        py.run(
+            r#"
+import msgpack, time
+MAGIC = b"IRSMETA1"
+with open(meta_path, "rb") as f:
+    raw = f.read()
+assert raw[:len(MAGIC)] == MAGIC
+flags = raw[len(MAGIC)]
+payload = raw[len(MAGIC)+1:]
+if flags & 0x1:
+    import zlib
+    payload = zlib.decompress(payload)
+doc = msgpack.unpackb(payload, raw=False)
+entries = doc.get("entries", {})
+for i in range(400):
+    entries[f"junk_{i}"] = {
+        "updated_ns": time.time_ns(),
+        "return_type": "float",
+        "arg_count": 1,
+        "profile": [[0, 1.0, 1, 0]],
+    }
+entries["stale_entry"] = {
+    "updated_ns": 0,
+    "return_type": "float",
+    "arg_count": 1,
+    "profile": [[0, 1.0, 1, 0]],
+}
+doc["entries"] = entries
+payload2 = msgpack.packb(doc, use_bin_type=True)
+with open(meta_path, "wb") as f:
+    f.write(MAGIC + bytes([0]) + payload2)
+"#,
+            None,
+            Some(locals2),
+        )
+        .unwrap();
+
+        for i in 32..48 {
+            let out: f64 = warm_add.call1((i as f64,)).unwrap().extract().unwrap();
+            assert_eq!(out, i as f64 + 1.0);
+        }
+
+        let locals3 = PyDict::new(py);
+        locals3
+            .set_item("meta_path", meta_path.to_string_lossy().to_string())
+            .unwrap();
+        py.run(
+            r#"
+import msgpack
+MAGIC = b"IRSMETA1"
+with open(meta_path, "rb") as f:
+    raw = f.read()
+assert raw[:len(MAGIC)] == MAGIC
+flags = raw[len(MAGIC)]
+payload = raw[len(MAGIC)+1:]
+if flags & 0x1:
+    import zlib
+    payload = zlib.decompress(payload)
+doc = msgpack.unpackb(payload, raw=False)
+entries = doc.get("entries", {})
+assert "stale_entry" not in entries
+assert len(entries) <= 256
+"#,
+            None,
+            Some(locals3),
+        )
+        .unwrap();
 
         modules.del_item(module_name).unwrap();
 
@@ -124,7 +217,7 @@ def warm_add(x):
     });
 
     let _ = fs::remove_file(&module_path);
-    let _ = fs::remove_file(temp_dir.join("__pycache__").join(".iris.meta.json"));
+    let _ = fs::remove_file(temp_dir.join("__pycache__").join(".iris.meta.bin"));
     let _ = fs::remove_dir_all(temp_dir.join("__pycache__"));
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -250,6 +343,42 @@ async fn py_jit_offload_decorator_async() {
             .extract(py)
             .unwrap();
         assert_eq!(get_qt, 0);
+
+        // quantum compile budget API
+        let set_budget: (i64, i64) = module
+            .getattr(py, "configure_quantum_compile_budget")
+            .unwrap()
+            .call1(py, (5_000_000_i64, 1_000_000_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(set_budget, (5_000_000, 1_000_000_000));
+        let get_budget: (i64, i64) = module
+            .getattr(py, "get_quantum_compile_budget")
+            .unwrap()
+            .call0(py)
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(get_budget, (5_000_000, 1_000_000_000));
+
+        // quantum cooldown API
+        let set_cd: (i64, i64) = module
+            .getattr(py, "configure_quantum_cooldown")
+            .unwrap()
+            .call1(py, (1_000_i64, 10_000_i64, Option::<String>::None, Option::<String>::None))
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(set_cd, (1_000, 10_000));
+        let get_cd: (i64, i64) = module
+            .getattr(py, "get_quantum_cooldown")
+            .unwrap()
+            .call0(py)
+            .unwrap()
+            .extract(py)
+            .unwrap();
+        assert_eq!(get_cd, (1_000, 10_000));
 
         let locals = PyDict::new(py);
         py.run("def foo(x): return x * 2", None, Some(locals)).unwrap();

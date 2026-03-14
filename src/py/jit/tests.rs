@@ -86,6 +86,48 @@ fn quantum_profile_snapshot_and_seed_roundtrip() {
 }
 
 #[test]
+fn quantum_compile_budget_blocks_when_exhausted() {
+    use std::env;
+
+    reset_quantum_control_state();
+    env::set_var("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS", "1");
+    env::set_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS", "1000000");
+
+    let now = 1_000_000_u64;
+    assert!(quantum_compile_may_run(11, now));
+    record_quantum_compile_attempt(11, now, 10, true);
+    assert!(!quantum_compile_may_run(11, now + 1));
+
+    env::remove_var("IRIS_JIT_QUANTUM_COMPILE_BUDGET_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COMPILE_WINDOW_NS");
+}
+
+#[test]
+fn quantum_cooldown_backoff_blocks_and_recovers() {
+    use std::env;
+
+    reset_quantum_control_state();
+    env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS", "100");
+    env::set_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS", "1000");
+
+    let now = 2_000_u64;
+    assert!(quantum_compile_may_run(22, now));
+    record_quantum_compile_attempt(22, now, 5, false);
+    assert!(!quantum_compile_may_run(22, now + 50));
+    assert!(quantum_compile_may_run(22, now + 100));
+
+    record_quantum_compile_attempt(22, now + 100, 5, false);
+    assert!(!quantum_compile_may_run(22, now + 299));
+    assert!(quantum_compile_may_run(22, now + 300));
+
+    record_quantum_compile_attempt(22, now + 300, 5, true);
+    assert!(quantum_compile_may_run(22, now + 301));
+
+    env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_BASE_NS");
+    env::remove_var("IRIS_JIT_QUANTUM_COOLDOWN_MAX_NS");
+}
+
+#[test]
 #[cfg(feature = "pyo3")]
 fn quantum_speculation_logs_choice_when_slow() {
     use crate::py::jit::{execute_registered_jit, jit_log_clear_hook, jit_log_hook, register_quantum_jit};
