@@ -1,7 +1,7 @@
 // src/py/jit/codegen.rs
 //! Core JIT compilation logic, including registry and Cranelift codegen.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -253,6 +253,28 @@ static QUANTUM_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usiz
     once_cell::sync::OnceCell::new();
 static QUANTUM_PENDING_SEEDS: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, Vec<QuantumProfileSeed>>>> =
     once_cell::sync::OnceCell::new();
+static LOWERED_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
+    once_cell::sync::OnceCell::new();
+
+fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
+    let Some(kernel) = entry.lowered_kernel else {
+        return;
+    };
+
+    let set = LOWERED_EXEC_LOGGED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let mut guard = set.lock().unwrap();
+    if !guard.insert(entry.func_ptr) {
+        return;
+    }
+
+    let math_mode = simd_math_mode_from_env();
+    crate::py::jit::jit_log(|| {
+        format!(
+            "[Iris][jit][lower] execute kernel={:?} reduction={:?} len={} math_mode={:?}",
+            kernel, entry.reduction, len, math_mode
+        )
+    });
+}
 
 fn apply_quantum_seeds(state: &mut QuantumState, seeds: &[QuantumProfileSeed]) {
     for seed in seeds {
@@ -803,33 +825,56 @@ where
     TLS_JIT_MODULE.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
-            // lazily construct the module the first time for this thread
-            let mut flag_builder = settings::builder();
-            flag_builder.set("use_colocated_libcalls", "false").unwrap();
-            if cfg!(target_arch = "aarch64") {
-                flag_builder.set("is_pic", "false").unwrap();
-            } else {
-                flag_builder.set("is_pic", "true").unwrap();
-            }
+            let build_isa = |plan: simd::SimdPlan| {
+                let mut flag_builder = settings::builder();
+                flag_builder.set("use_colocated_libcalls", "false").unwrap();
+                if cfg!(target_arch = "aarch64") {
+                    flag_builder.set("is_pic", "false").unwrap();
+                } else {
+                    flag_builder.set("is_pic", "true").unwrap();
+                }
+                simd::apply_cranelift_simd_flags(&mut flag_builder, plan);
+                let _ = flag_builder.set("opt_level", "speed");
 
-            let simd_plan = simd::auto_vectorization_plan();
-            simd::apply_cranelift_simd_flags(&mut flag_builder, simd_plan);
-            let _ = flag_builder.set("opt_level", "speed");
+                let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
+                    panic!("host machine is not supported: {}", msg);
+                });
+                isa_builder.finish(settings::Flags::new(flag_builder))
+            };
+
+            let requested_plan = simd::auto_vectorization_plan();
+            let (isa, active_plan) = match build_isa(requested_plan) {
+                Ok(isa) => (isa, requested_plan),
+                Err(err) if requested_plan.auto_vectorize => {
+                    let fallback_plan = simd::SimdPlan::default();
+                    crate::py::jit::jit_log(|| {
+                        format!(
+                            "[Iris][jit][simd] host rejected SIMD plan {:?} (err={:?}); falling back to scalar",
+                            requested_plan, err
+                        )
+                    });
+                    match build_isa(fallback_plan) {
+                        Ok(isa) => (isa, fallback_plan),
+                        Err(fallback_err) => {
+                            panic!(
+                                "failed to create ISA with SIMD plan ({:?}) and scalar fallback ({:?})",
+                                err, fallback_err
+                            )
+                        }
+                    }
+                }
+                Err(err) => panic!("failed to create ISA: {:?}", err),
+            };
+
             crate::py::jit::jit_log(|| {
                 format!(
                     "[Iris][jit][simd] backend={:?} lane_bytes={} auto_vectorize={}",
-                    simd_plan.backend,
-                    simd_plan.lane_bytes,
-                    simd_plan.auto_vectorize
+                    active_plan.backend,
+                    active_plan.lane_bytes,
+                    active_plan.auto_vectorize
                 )
             });
 
-            let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
-                panic!("host machine is not supported: {}", msg);
-            });
-            let isa = isa_builder
-                .finish(settings::Flags::new(flag_builder))
-                .expect("failed to create ISA");
             let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
             builder.symbol("iris_jit_invoke_0", iris_jit_invoke_0 as *const u8);
             builder.symbol("iris_jit_invoke_1", iris_jit_invoke_1 as *const u8);
@@ -2732,6 +2777,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                     if matched {
                         let len = common_len.unwrap_or(0);
                         if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                            log_lowered_exec_once(entry, len);
                             match lowered {
                                 LoweredVectorResult::Vector(results) => {
                                     return Ok(vec_f64_to_py(py, &results, entry.return_type));
@@ -2955,6 +3001,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
         if all_buffers {
             if let Some(len) = common_len {
                 if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                    log_lowered_exec_once(entry, len);
                     store_exec_profile(
                         entry.func_ptr,
                         JitExecProfile::VectorizedBuffers {
