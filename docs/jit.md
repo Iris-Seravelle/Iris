@@ -11,6 +11,19 @@ Iris JIT acceleration now has four layers that can stack:
 3. SIMD-aware loop unrolling in hot runtime vector-buffer execution paths.
 4. Direct lowered-kernel execution for common elementwise math kernels (including trig), bypassing per-element JIT dispatch overhead.
 
+## Build-time JIT toggle
+
+JIT is now a build feature.
+
+- Default build includes JIT: `pyo3 + jit`.
+- Actors-only Python build (exclude JIT):
+
+```bash
+cargo build --no-default-features --features pyo3
+```
+
+This mode keeps runtime/actor APIs available while omitting Cranelift/JIT internals.
+
 ## Decorator API
 
 ```python

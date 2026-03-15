@@ -7,7 +7,10 @@ pub mod utils;
 pub mod mailbox;
 pub mod runtime;
 pub mod wrappers;
+#[cfg(feature = "jit")]
 pub mod jit;
+#[cfg(not(feature = "jit"))]
+pub mod jit_stub;
 
 // re-export a few helpers for external callers (tests, build scripts, etc.)
 pub use wrappers::{make_module, init};

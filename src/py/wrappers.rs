@@ -154,8 +154,10 @@ fn populate_module(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(path_supervisor_watch, m)?)?;
     m.add_function(wrap_pyfunction!(path_supervisor_children, m)?)?;
     // JIT/offload helpers
-    #[cfg(feature = "pyo3")]
+    #[cfg(all(feature = "pyo3", feature = "jit"))]
     crate::py::jit::init_py(m)?;
+    #[cfg(all(feature = "pyo3", not(feature = "jit")))]
+    crate::py::jit_stub::init_py(m)?;
     Ok(())
 }
 

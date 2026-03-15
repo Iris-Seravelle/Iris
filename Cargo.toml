@@ -13,10 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 num_cpus = "*"
-cranelift = "0.87"
-cranelift-module = "0.87"
-cranelift-jit = "0.87"
-cranelift-native = "0.87"
+cranelift = { version = "0.87", optional = true }
+cranelift-module = { version = "0.87", optional = true }
+cranelift-jit = { version = "0.87", optional = true }
+cranelift-native = { version = "0.87", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 dashmap = "5"
 parking_lot = "0.12"
@@ -38,8 +38,9 @@ napi-derive = { version = "2.14", optional = true }
 napi-build = { version = "2.0", optional = true }
 
 [features]
-default = ["pyo3"]
+default = ["pyo3", "jit"]
 pyo3 = ["dep:pyo3", "dep:pyo3-asyncio"]
+jit = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
 node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
 
 [dev-dependencies]
