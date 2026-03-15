@@ -64,6 +64,7 @@ pub struct JitEntry {
     pub reduction: ReductionMode,
     pub return_type: JitReturnType,
     lowered_kernel: Option<LoweredKernel>,
+    variant_strategy: QuantumVariantStrategy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +104,13 @@ enum SimdMathMode {
     FastApprox,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuantumVariantStrategy {
+    Auto,
+    ScalarFallback,
+    FastTrigExperiment,
+}
+
 fn simd_math_mode_from_env() -> SimdMathMode {
     match std::env::var("IRIS_JIT_SIMD_MATH") {
         Ok(v) => {
@@ -114,6 +122,13 @@ fn simd_math_mode_from_env() -> SimdMathMode {
             }
         }
         Err(_) => SimdMathMode::Accurate,
+    }
+}
+
+fn jit_dump_clif_enabled() -> bool {
+    match std::env::var("IRIS_JIT_DUMP_CLIF") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
     }
 }
 
@@ -195,6 +210,29 @@ impl JitEntry {
     pub fn is_valid(&self) -> bool {
         self.func_ptr != 0
     }
+
+    fn with_strategy(mut self, strategy: QuantumVariantStrategy) -> Self {
+        self.variant_strategy = strategy;
+        self
+    }
+
+    fn allows_lowered_kernel(&self) -> bool {
+        self.variant_strategy != QuantumVariantStrategy::ScalarFallback
+    }
+
+    fn loop_unroll_for_entry(&self) -> usize {
+        match self.variant_strategy {
+            QuantumVariantStrategy::ScalarFallback => 1,
+            _ => simd_unroll_factor(),
+        }
+    }
+
+    fn math_mode_for_entry(&self) -> SimdMathMode {
+        match self.variant_strategy {
+            QuantumVariantStrategy::FastTrigExperiment => SimdMathMode::FastApprox,
+            _ => simd_math_mode_from_env(),
+        }
+    }
 }
 
 static JIT_FUNC_COUNTER: once_cell::sync::Lazy<AtomicUsize> =
@@ -255,6 +293,8 @@ static QUANTUM_PENDING_SEEDS: once_cell::sync::OnceCell<std::sync::Mutex<HashMap
     once_cell::sync::OnceCell::new();
 static LOWERED_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
     once_cell::sync::OnceCell::new();
+static UNROLL_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
+    once_cell::sync::OnceCell::new();
 
 fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
     let Some(kernel) = entry.lowered_kernel else {
@@ -267,11 +307,28 @@ fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
         return;
     }
 
-    let math_mode = simd_math_mode_from_env();
+    let math_mode = entry.math_mode_for_entry();
     crate::py::jit::jit_log(|| {
         format!(
-            "[Iris][jit][lower] execute kernel={:?} reduction={:?} len={} math_mode={:?}",
-            kernel, entry.reduction, len, math_mode
+            "[Iris][jit][lower] execute kernel={:?} reduction={:?} len={} math_mode={:?} variant={:?}",
+            kernel, entry.reduction, len, math_mode, entry.variant_strategy
+        )
+    });
+}
+
+fn log_unroll_exec_once(entry: &JitEntry, len: usize, unroll: usize, path: &'static str) {
+    if unroll <= 1 || len < unroll {
+        return;
+    }
+    let set = UNROLL_EXEC_LOGGED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let mut guard = set.lock().unwrap();
+    if !guard.insert(entry.func_ptr) {
+        return;
+    }
+    crate::py::jit::jit_log(|| {
+        format!(
+            "[Iris][jit][unroll] execute path={} len={} unroll={} variant={:?}",
+            path, len, unroll, entry.variant_strategy
         )
     });
 }
@@ -999,6 +1056,10 @@ fn compile_jit_impl(
             fb.finalize();
         }
 
+        if jit_dump_clif_enabled() {
+            crate::py::jit::jit_log(|| format!("[Iris][jit][clif] {}", ctx.func.display()));
+        }
+
         let idx = JIT_FUNC_COUNTER.fetch_add(1, Ordering::SeqCst);
         let func_name = format!("jit_func_{}", idx);
         let id = module
@@ -1022,6 +1083,7 @@ fn compile_jit_impl(
             reduction,
             return_type,
             lowered_kernel,
+            variant_strategy: QuantumVariantStrategy::Auto,
         })
     })
 }
@@ -1047,11 +1109,19 @@ pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String], return_type: Ji
 
     let mut out = Vec::new();
     if let Some(e) = optimized {
-        out.push(e);
+        out.push(e.with_strategy(QuantumVariantStrategy::Auto));
     }
     if let Some(e) = baseline {
-        out.push(e);
+        out.push(e.with_strategy(QuantumVariantStrategy::ScalarFallback));
     }
+
+    if let Some(exp) = compile_jit_impl(expr_str, arg_names, true, return_type)
+        .map(|e| e.with_strategy(QuantumVariantStrategy::FastTrigExperiment))
+    {
+        out.push(exp);
+    }
+
+    crate::py::jit::jit_log(|| format!("[Iris][jit][quantum] built {} variants", out.len()));
     out
 }
 
@@ -2332,7 +2402,10 @@ fn try_execute_lowered_vector_kernel(
     len: usize,
     unroll: usize,
 ) -> Option<LoweredVectorResult> {
-    let mode = simd_math_mode_from_env();
+    if !entry.allows_lowered_kernel() {
+        return None;
+    }
+    let mode = entry.math_mode_for_entry();
 
     let kernel = entry.lowered_kernel?;
 
@@ -2645,7 +2718,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
     let arg_count = args.len();
     let f: extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(entry.func_ptr) };
-    let loop_unroll = simd_unroll_factor();
+    let loop_unroll = entry.loop_unroll_for_entry();
 
     // 0. Trailing-count vectorization mode: call with N scalar args matching
     // the compiled signature, plus one final integer count to request a
@@ -2662,6 +2735,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
                 const MAX_FAST_ARGS: usize = 8;
                 let mut results = Vec::with_capacity(count);
+                log_unroll_exec_once(entry, count, loop_unroll, "trailing-count");
                 if entry.arg_count <= MAX_FAST_ARGS {
                     let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
                     for i in 0..entry.arg_count {
@@ -2776,6 +2850,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
                     if matched {
                         let len = common_len.unwrap_or(0);
+                        log_unroll_exec_once(entry, len, loop_unroll, "profiled-vector-buffers");
                         if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
                             log_lowered_exec_once(entry, len);
                             match lowered {
@@ -3000,6 +3075,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
         if all_buffers {
             if let Some(len) = common_len {
+                log_unroll_exec_once(entry, len, loop_unroll, "generic-vector-buffers");
                 if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
                     log_lowered_exec_once(entry, len);
                     store_exec_profile(
@@ -3194,6 +3270,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
             if !is_text_like {
                 if let Ok(len) = item.len() {
+                    log_unroll_exec_once(entry, len, loop_unroll, "sequence-fallback");
                     if entry.reduction != ReductionMode::None {
                         let mut acc = reduction_identity(entry.reduction);
                         let mut i = 0;
