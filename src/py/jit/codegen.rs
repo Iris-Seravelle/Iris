@@ -88,7 +88,25 @@ enum LoweredBinaryKernel {
     Div,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+enum LoweredExpr {
+    Const(f64),
+    Input(usize),
+    Add(Box<LoweredExpr>, Box<LoweredExpr>),
+    Sub(Box<LoweredExpr>, Box<LoweredExpr>),
+    Mul(Box<LoweredExpr>, Box<LoweredExpr>),
+    Div(Box<LoweredExpr>, Box<LoweredExpr>),
+    Neg(Box<LoweredExpr>),
+    Abs(Box<LoweredExpr>),
+    Sin(Box<LoweredExpr>),
+    Cos(Box<LoweredExpr>),
+    Tan(Box<LoweredExpr>),
+    Exp(Box<LoweredExpr>),
+    Log(Box<LoweredExpr>),
+    Sqrt(Box<LoweredExpr>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum LoweredKernel {
     Unary { op: LoweredUnaryKernel, input: usize },
     Binary {
@@ -96,6 +114,7 @@ enum LoweredKernel {
         lhs: usize,
         rhs: usize,
     },
+    Expr(LoweredExpr),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +220,49 @@ fn detect_lowered_kernel(expr: &Expr, arg_names: &[String]) -> Option<LoweredKer
                 rhs: rhs_idx,
             })
         }
+        _ => detect_lowered_expr(expr, arg_names).map(LoweredKernel::Expr),
+    }
+}
+
+fn detect_lowered_expr(expr: &Expr, arg_names: &[String]) -> Option<LoweredExpr> {
+    match expr {
+        Expr::Const(v) => Some(LoweredExpr::Const(*v)),
+        Expr::Var(name) => {
+            let idx = arg_index_of_var(arg_names, name)?;
+            Some(LoweredExpr::Input(idx))
+        }
+        Expr::UnaryOp('-', sub) => {
+            let inner = detect_lowered_expr(sub, arg_names)?;
+            Some(LoweredExpr::Neg(Box::new(inner)))
+        }
+        Expr::Call(name, args) => {
+            if args.len() != 1 {
+                return None;
+            }
+            let inner = detect_lowered_expr(&args[0], arg_names)?;
+            let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
+                "abs" | "fabs" => LoweredExpr::Abs(Box::new(inner)),
+                "sin" => LoweredExpr::Sin(Box::new(inner)),
+                "cos" => LoweredExpr::Cos(Box::new(inner)),
+                "tan" => LoweredExpr::Tan(Box::new(inner)),
+                "exp" => LoweredExpr::Exp(Box::new(inner)),
+                "log" | "ln" => LoweredExpr::Log(Box::new(inner)),
+                "sqrt" => LoweredExpr::Sqrt(Box::new(inner)),
+                _ => return None,
+            };
+            Some(op)
+        }
+        Expr::BinOp(lhs, op, rhs) => {
+            let l = detect_lowered_expr(lhs, arg_names)?;
+            let r = detect_lowered_expr(rhs, arg_names)?;
+            match op.as_str() {
+                "+" => Some(LoweredExpr::Add(Box::new(l), Box::new(r))),
+                "-" => Some(LoweredExpr::Sub(Box::new(l), Box::new(r))),
+                "*" => Some(LoweredExpr::Mul(Box::new(l), Box::new(r))),
+                "/" => Some(LoweredExpr::Div(Box::new(l), Box::new(r))),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -297,7 +359,7 @@ static UNROLL_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<us
     once_cell::sync::OnceCell::new();
 
 fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
-    let Some(kernel) = entry.lowered_kernel else {
+    let Some(kernel) = entry.lowered_kernel.as_ref() else {
         return;
     };
 
@@ -754,7 +816,8 @@ pub fn execute_registered_jit(
             };
 
             if let Some(entry) = entry {
-                let quantum_total = 1 + fallback_entries.len();
+                let quantum_total = active_count.max(1);
+                let chosen_strategy = entry.variant_strategy;
                 let log_threshold_ns = crate::py::jit::quantum_log_threshold_ns();
 
                 let log_if_slow = |chosen: usize,
@@ -764,8 +827,8 @@ pub fn execute_registered_jit(
                     if crate::py::jit::jit_logging_enabled() && elapsed_ns >= log_threshold_ns {
                         crate::py::jit::jit_log(|| {
                             format!(
-                                "[Iris][jit][quantum] func_key={} chosen={}/{} used={} elapsed={}ns {}",
-                                func_key, chosen, quantum_total, used, elapsed_ns, note
+                                "[Iris][jit][quantum] func_key={} chosen={}/{} used={} elapsed={}ns {} active={} strategy={:?}",
+                                func_key, chosen, quantum_total, used, elapsed_ns, note, active_count, chosen_strategy
                             )
                         });
                     }
@@ -1031,7 +1094,7 @@ fn compile_jit_impl(
     }
     let arg_count = adjusted_args.len();
     let lowered_kernel = detect_lowered_kernel(&expr, &adjusted_args);
-    if let Some(kernel) = lowered_kernel {
+    if let Some(kernel) = lowered_kernel.as_ref() {
         crate::py::jit::jit_log(|| format!("[Iris][jit][lower] selected kernel={:?}", kernel));
     }
 
@@ -2390,6 +2453,60 @@ fn lowered_binary_eval(op: LoweredBinaryKernel, lhs: f64, rhs: f64) -> f64 {
     }
 }
 
+fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode: SimdMathMode) -> Option<f64> {
+    match expr {
+        LoweredExpr::Const(v) => Some(*v),
+        LoweredExpr::Input(input_idx) => {
+            let view = views.get(*input_idx)?;
+            Some(unsafe { read_buffer_f64(view, idx) })
+        }
+        LoweredExpr::Add(a, b) => Some(
+            lowered_expr_eval(a, views, idx, mode)? + lowered_expr_eval(b, views, idx, mode)?,
+        ),
+        LoweredExpr::Sub(a, b) => Some(
+            lowered_expr_eval(a, views, idx, mode)? - lowered_expr_eval(b, views, idx, mode)?,
+        ),
+        LoweredExpr::Mul(a, b) => Some(
+            lowered_expr_eval(a, views, idx, mode)? * lowered_expr_eval(b, views, idx, mode)?,
+        ),
+        LoweredExpr::Div(a, b) => Some(
+            lowered_expr_eval(a, views, idx, mode)? / lowered_expr_eval(b, views, idx, mode)?,
+        ),
+        LoweredExpr::Neg(a) => Some(-lowered_expr_eval(a, views, idx, mode)?),
+        LoweredExpr::Abs(a) => Some(lowered_expr_eval(a, views, idx, mode)?.abs()),
+        LoweredExpr::Sin(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Sin,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+        LoweredExpr::Cos(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Cos,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+        LoweredExpr::Tan(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Tan,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+        LoweredExpr::Exp(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Exp,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+        LoweredExpr::Log(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Log,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+        LoweredExpr::Sqrt(a) => Some(lowered_unary_eval(
+            LoweredUnaryKernel::Sqrt,
+            lowered_expr_eval(a, views, idx, mode)?,
+            mode,
+        )),
+    }
+}
+
 enum LoweredVectorResult {
     Vector(Vec<f64>),
     Reduced(f64),
@@ -2407,7 +2524,7 @@ fn try_execute_lowered_vector_kernel(
     }
     let mode = entry.math_mode_for_entry();
 
-    let kernel = entry.lowered_kernel?;
+    let kernel = entry.lowered_kernel.clone()?;
 
     let eval_unary = |op: LoweredUnaryKernel, view: &BufferView, idx: usize| {
         let x = unsafe { read_buffer_f64(view, idx) };
@@ -2547,6 +2664,67 @@ fn try_execute_lowered_vector_kernel(
                     ReductionMode::None => {}
                 }
             }
+            LoweredKernel::Expr(expr) => {
+                match entry.reduction {
+                    ReductionMode::Sum => {
+                        let mut lane_acc = [0.0_f64; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_acc[lane] += lowered_expr_eval(&expr, views, i + lane, mode)?;
+                            }
+                            i += lanes;
+                        }
+                        let mut acc = lane_acc[..lanes].iter().copied().sum::<f64>();
+                        while i < len {
+                            acc += lowered_expr_eval(&expr, views, i, mode)?;
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(acc));
+                    }
+                    ReductionMode::Any => {
+                        let mut lane_any = [false; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_any[lane] |= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                            }
+                            if lane_any[..lanes].iter().any(|v| *v) {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if lowered_expr_eval(&expr, views, i, mode)? != 0.0 {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(0.0));
+                    }
+                    ReductionMode::All => {
+                        let mut lane_all = [true; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_all[lane] &= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                            }
+                            if lane_all[..lanes].iter().any(|v| !*v) {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if lowered_expr_eval(&expr, views, i, mode)? == 0.0 {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(1.0));
+                    }
+                    ReductionMode::None => {}
+                }
+            }
         }
         return None;
     }
@@ -2583,6 +2761,20 @@ fn try_execute_lowered_vector_kernel(
             }
             while i < len {
                 results.push(eval_binary(op, lhs_view, rhs_view, i));
+                i += 1;
+            }
+            Some(LoweredVectorResult::Vector(results))
+        }
+        LoweredKernel::Expr(expr) => {
+            let mut i = 0;
+            while i + unroll <= len {
+                for lane in 0..unroll {
+                    results.push(lowered_expr_eval(&expr, views, i + lane, mode)?);
+                }
+                i += unroll;
+            }
+            while i < len {
+                results.push(lowered_expr_eval(&expr, views, i, mode)?);
                 i += 1;
             }
             Some(LoweredVectorResult::Vector(results))
