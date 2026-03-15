@@ -2,7 +2,7 @@
 
 ![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=200&color=FFB6C1)
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-0.5.0-blue.svg?style=for-the-badge)
 ![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 
