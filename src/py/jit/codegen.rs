@@ -2764,6 +2764,172 @@ fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode:
     }
 }
 
+#[inline(always)]
+fn lowered_unary_eval_pair_any(
+    op: LoweredUnaryKernel,
+    x0: f64,
+    x1: f64,
+    mode: SimdMathMode,
+) -> (f64, f64) {
+    if let Some((y0, y1)) = lowered_unary_eval_pair(op, x0, x1, mode) {
+        (y0, y1)
+    } else {
+        (lowered_unary_eval(op, x0, mode), lowered_unary_eval(op, x1, mode))
+    }
+}
+
+fn lowered_expr_eval_pair(
+    expr: &LoweredExpr,
+    views: &[BufferView],
+    idx0: usize,
+    idx1: usize,
+    mode: SimdMathMode,
+) -> Option<(f64, f64)> {
+    match expr {
+        LoweredExpr::Const(v) => Some((*v, *v)),
+        LoweredExpr::Input(input_idx) => {
+            let view = views.get(*input_idx)?;
+            Some((
+                unsafe { read_buffer_f64(view, idx0) },
+                unsafe { read_buffer_f64(view, idx1) },
+            ))
+        }
+        LoweredExpr::Add(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((a0 + b0, a1 + b1))
+        }
+        LoweredExpr::Sub(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((a0 - b0, a1 - b1))
+        }
+        LoweredExpr::Mul(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((a0 * b0, a1 * b1))
+        }
+        LoweredExpr::Div(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((a0 / b0, a1 / b1))
+        }
+        LoweredExpr::Mod(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((a0 % b0, a1 % b1))
+        }
+        LoweredExpr::Eq(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 == b0 { 1.0 } else { 0.0 }, if a1 == b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Ne(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 != b0 { 1.0 } else { 0.0 }, if a1 != b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Lt(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 < b0 { 1.0 } else { 0.0 }, if a1 < b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Gt(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 > b0 { 1.0 } else { 0.0 }, if a1 > b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Le(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 <= b0 { 1.0 } else { 0.0 }, if a1 <= b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Ge(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((if a0 >= b0 { 1.0 } else { 0.0 }, if a1 >= b1 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::And(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((
+                if a0 != 0.0 && b0 != 0.0 { 1.0 } else { 0.0 },
+                if a1 != 0.0 && b1 != 0.0 { 1.0 } else { 0.0 },
+            ))
+        }
+        LoweredExpr::Or(a, b) => {
+            let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
+            Some((
+                if a0 != 0.0 || b0 != 0.0 { 1.0 } else { 0.0 },
+                if a1 != 0.0 || b1 != 0.0 { 1.0 } else { 0.0 },
+            ))
+        }
+        LoweredExpr::Neg(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some((-x0, -x1))
+        }
+        LoweredExpr::Not(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some((if x0 == 0.0 { 1.0 } else { 0.0 }, if x1 == 0.0 { 1.0 } else { 0.0 }))
+        }
+        LoweredExpr::Abs(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some((x0.abs(), x1.abs()))
+        }
+        LoweredExpr::Sin(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Sin, x0, x1, mode))
+        }
+        LoweredExpr::Cos(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Cos, x0, x1, mode))
+        }
+        LoweredExpr::Tan(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Tan, x0, x1, mode))
+        }
+        LoweredExpr::Exp(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Exp, x0, x1, mode))
+        }
+        LoweredExpr::Log(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Log, x0, x1, mode))
+        }
+        LoweredExpr::Sqrt(a) => {
+            let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
+            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Sqrt, x0, x1, mode))
+        }
+        LoweredExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            let (c0, c1) = lowered_expr_eval_pair(cond, views, idx0, idx1, mode)?;
+            let c0_true = c0 != 0.0;
+            let c1_true = c1 != 0.0;
+            match (c0_true, c1_true) {
+                (true, true) => lowered_expr_eval_pair(then_expr, views, idx0, idx1, mode),
+                (false, false) => lowered_expr_eval_pair(else_expr, views, idx0, idx1, mode),
+                _ => {
+                    let v0 = if c0_true {
+                        lowered_expr_eval(then_expr, views, idx0, mode)?
+                    } else {
+                        lowered_expr_eval(else_expr, views, idx0, mode)?
+                    };
+                    let v1 = if c1_true {
+                        lowered_expr_eval(then_expr, views, idx1, mode)?
+                    } else {
+                        lowered_expr_eval(else_expr, views, idx1, mode)?
+                    };
+                    Some((v0, v1))
+                }
+            }
+        }
+    }
+}
+
 enum LoweredVectorResult {
     Vector(Vec<f64>),
     Reduced(f64),
@@ -2940,8 +3106,19 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_acc = [0.0_f64; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
+                            let mut lane = 0;
+                            while lane < lanes {
+                                if lane + 1 < lanes {
+                                    let idx0 = i + lane;
+                                    let idx1 = i + lane + 1;
+                                    let (v0, v1) = lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
+                                    lane_acc[lane] += v0;
+                                    lane_acc[lane + 1] += v1;
+                                    lane += 2;
+                                    continue;
+                                }
                                 lane_acc[lane] += lowered_expr_eval(&expr, views, i + lane, mode)?;
+                                lane += 1;
                             }
                             i += lanes;
                         }
@@ -3052,8 +3229,19 @@ fn try_execute_lowered_vector_kernel(
         LoweredKernel::Expr(expr) => {
             let mut i = 0;
             while i + unroll <= len {
-                for lane in 0..unroll {
+                let mut lane = 0;
+                while lane < unroll {
+                    if lane + 1 < unroll {
+                        let idx0 = i + lane;
+                        let idx1 = i + lane + 1;
+                        let (v0, v1) = lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
+                        results.push(v0);
+                        results.push(v1);
+                        lane += 2;
+                        continue;
+                    }
                     results.push(lowered_expr_eval(&expr, views, i + lane, mode)?);
+                    lane += 1;
                 }
                 i += unroll;
             }
@@ -4047,5 +4235,30 @@ mod simd_unroll_tests {
             false,
         );
         assert!(use_quantum_hot);
+    }
+
+    #[test]
+    fn lowered_unary_eval_pair_any_matches_scalar_in_accurate_mode() {
+        let x0 = 0.123_f64;
+        let x1 = -1.234_f64;
+
+        let (sin0, sin1) = lowered_unary_eval_pair_any(
+            LoweredUnaryKernel::Sin,
+            x0,
+            x1,
+            SimdMathMode::Accurate,
+        );
+        let (exp0, exp1) = lowered_unary_eval_pair_any(
+            LoweredUnaryKernel::Exp,
+            x0,
+            x1,
+            SimdMathMode::Accurate,
+        );
+
+        let eps = 1e-12;
+        assert!((sin0 - x0.sin()).abs() < eps);
+        assert!((sin1 - x1.sin()).abs() < eps);
+        assert!((exp0 - x0.exp()).abs() < eps);
+        assert!((exp1 - x1.exp()).abs() < eps);
     }
 }
