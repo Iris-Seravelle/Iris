@@ -6,6 +6,9 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 use crate::py::jit::parser::Expr;
 use crate::py::jit::heuristics;
 use crate::py::jit::simd;
@@ -169,56 +172,61 @@ fn detect_lowered_kernel(expr: &Expr, arg_names: &[String]) -> Option<LoweredKer
             })
         }
         Expr::UnaryOp('-', sub) => {
-            let Expr::Var(name) = sub.as_ref() else {
-                return None;
-            };
-            let input = arg_index_of_var(arg_names, name)?;
-            Some(LoweredKernel::Unary {
-                op: LoweredUnaryKernel::Neg,
-                input,
-            })
+            if let Expr::Var(name) = sub.as_ref() {
+                if let Some(input) = arg_index_of_var(arg_names, name) {
+                    return Some(LoweredKernel::Unary {
+                        op: LoweredUnaryKernel::Neg,
+                        input,
+                    });
+                }
+            }
+            detect_lowered_expr(expr, arg_names).map(LoweredKernel::Expr)
         }
         Expr::Call(name, args) => {
-            if args.len() != 1 {
-                return None;
+            if args.len() == 1 {
+                if let Expr::Var(var_name) = &args[0] {
+                    if let Some(input) = arg_index_of_var(arg_names, var_name) {
+                        let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
+                            "abs" | "fabs" => Some(LoweredUnaryKernel::Abs),
+                            "sin" => Some(LoweredUnaryKernel::Sin),
+                            "cos" => Some(LoweredUnaryKernel::Cos),
+                            "tan" => Some(LoweredUnaryKernel::Tan),
+                            "exp" => Some(LoweredUnaryKernel::Exp),
+                            "log" | "ln" => Some(LoweredUnaryKernel::Log),
+                            "sqrt" => Some(LoweredUnaryKernel::Sqrt),
+                            _ => None,
+                        };
+                        if let Some(op) = op {
+                            return Some(LoweredKernel::Unary { op, input });
+                        }
+                    }
+                }
             }
-            let Expr::Var(var_name) = &args[0] else {
-                return None;
-            };
-            let input = arg_index_of_var(arg_names, var_name)?;
-            let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
-                "abs" | "fabs" => LoweredUnaryKernel::Abs,
-                "sin" => LoweredUnaryKernel::Sin,
-                "cos" => LoweredUnaryKernel::Cos,
-                "tan" => LoweredUnaryKernel::Tan,
-                "exp" => LoweredUnaryKernel::Exp,
-                "log" | "ln" => LoweredUnaryKernel::Log,
-                "sqrt" => LoweredUnaryKernel::Sqrt,
-                _ => return None,
-            };
-            Some(LoweredKernel::Unary { op, input })
+            detect_lowered_expr(expr, arg_names).map(LoweredKernel::Expr)
         }
         Expr::BinOp(lhs, op, rhs) => {
-            let Expr::Var(lhs_name) = lhs.as_ref() else {
-                return None;
-            };
-            let Expr::Var(rhs_name) = rhs.as_ref() else {
-                return None;
-            };
-            let lhs_idx = arg_index_of_var(arg_names, lhs_name)?;
-            let rhs_idx = arg_index_of_var(arg_names, rhs_name)?;
-            let op = match op.as_str() {
-                "+" => LoweredBinaryKernel::Add,
-                "-" => LoweredBinaryKernel::Sub,
-                "*" => LoweredBinaryKernel::Mul,
-                "/" => LoweredBinaryKernel::Div,
-                _ => return None,
-            };
-            Some(LoweredKernel::Binary {
-                op,
-                lhs: lhs_idx,
-                rhs: rhs_idx,
-            })
+            if let (Expr::Var(lhs_name), Expr::Var(rhs_name)) = (lhs.as_ref(), rhs.as_ref()) {
+                if let (Some(lhs_idx), Some(rhs_idx)) = (
+                    arg_index_of_var(arg_names, lhs_name),
+                    arg_index_of_var(arg_names, rhs_name),
+                ) {
+                    let op = match op.as_str() {
+                        "+" => Some(LoweredBinaryKernel::Add),
+                        "-" => Some(LoweredBinaryKernel::Sub),
+                        "*" => Some(LoweredBinaryKernel::Mul),
+                        "/" => Some(LoweredBinaryKernel::Div),
+                        _ => None,
+                    };
+                    if let Some(op) = op {
+                        return Some(LoweredKernel::Binary {
+                            op,
+                            lhs: lhs_idx,
+                            rhs: rhs_idx,
+                        });
+                    }
+                }
+            }
+            detect_lowered_expr(expr, arg_names).map(LoweredKernel::Expr)
         }
         _ => detect_lowered_expr(expr, arg_names).map(LoweredKernel::Expr),
     }
@@ -357,6 +365,8 @@ static LOWERED_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<u
     once_cell::sync::OnceCell::new();
 static UNROLL_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
     once_cell::sync::OnceCell::new();
+static SIMD_MATH_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
+    once_cell::sync::OnceCell::new();
 
 fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
     let Some(kernel) = entry.lowered_kernel.as_ref() else {
@@ -391,6 +401,21 @@ fn log_unroll_exec_once(entry: &JitEntry, len: usize, unroll: usize, path: &'sta
         format!(
             "[Iris][jit][unroll] execute path={} len={} unroll={} variant={:?}",
             path, len, unroll, entry.variant_strategy
+        )
+    });
+}
+
+fn log_simd_math_exec_once(entry: &JitEntry, op: LoweredUnaryKernel) {
+    let set = SIMD_MATH_EXEC_LOGGED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let mut guard = set.lock().unwrap();
+    if !guard.insert(entry.func_ptr) {
+        return;
+    }
+
+    crate::py::jit::jit_log(|| {
+        format!(
+            "[Iris][jit][simd-math] backend=neon-f64x2 op={:?} variant={:?}",
+            op, entry.variant_strategy
         )
     });
 }
@@ -2410,6 +2435,96 @@ fn fast_cos_approx(x: f64) -> f64 {
     fast_sin_approx(x + std::f64::consts::FRAC_PI_2)
 }
 
+#[cfg(target_arch = "aarch64")]
+fn fast_sin_reduce_for_poly(x: f64) -> (f64, f64) {
+    const PI: f64 = std::f64::consts::PI;
+    const TAU: f64 = std::f64::consts::TAU;
+    const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
+
+    let mut y = x % TAU;
+    if y > PI {
+        y -= TAU;
+    } else if y < -PI {
+        y += TAU;
+    }
+
+    let mut sign = 1.0;
+    if y > HALF_PI {
+        y = PI - y;
+    } else if y < -HALF_PI {
+        y = -PI - y;
+        sign = -1.0;
+    }
+
+    (y, sign)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn fast_sin_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
+    let (y0, s0) = fast_sin_reduce_for_poly(x0);
+    let (y1, s1) = fast_sin_reduce_for_poly(x1);
+
+    let y_arr = [y0, y1];
+    let sign_arr = [s0, s1];
+    let y = vld1q_f64(y_arr.as_ptr());
+    let sign = vld1q_f64(sign_arr.as_ptr());
+    let z = vmulq_f64(y, y);
+
+    let c1 = vdupq_n_f64(-1.0 / 6.0);
+    let c2 = vdupq_n_f64(1.0 / 120.0);
+    let c3 = vdupq_n_f64(-1.0 / 5040.0);
+    let c4 = vdupq_n_f64(1.0 / 362880.0);
+
+    let p3 = vaddq_f64(c3, vmulq_f64(z, c4));
+    let p2 = vaddq_f64(c2, vmulq_f64(z, p3));
+    let p1 = vaddq_f64(c1, vmulq_f64(z, p2));
+    let poly = vaddq_f64(vdupq_n_f64(1.0), vmulq_f64(z, p1));
+    let out = vmulq_f64(sign, vmulq_f64(y, poly));
+
+    let mut out_arr = [0.0_f64; 2];
+    vst1q_f64(out_arr.as_mut_ptr(), out);
+    (out_arr[0], out_arr[1])
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn fast_cos_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
+    fast_sin_approx_pair_neon(x0 + std::f64::consts::FRAC_PI_2, x1 + std::f64::consts::FRAC_PI_2)
+}
+
+#[inline(always)]
+fn lowered_unary_eval_pair(
+    op: LoweredUnaryKernel,
+    x0: f64,
+    x1: f64,
+    mode: SimdMathMode,
+) -> Option<(f64, f64)> {
+    if mode != SimdMathMode::FastApprox {
+        return None;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return match op {
+            LoweredUnaryKernel::Sin => Some(fast_sin_approx_pair_neon(x0, x1)),
+            LoweredUnaryKernel::Cos => Some(fast_cos_approx_pair_neon(x0, x1)),
+            LoweredUnaryKernel::Tan => {
+                let (s0, s1) = fast_sin_approx_pair_neon(x0, x1);
+                let (c0, c1) = fast_cos_approx_pair_neon(x0, x1);
+                Some((s0 / c0, s1 / c1))
+            }
+            _ => None,
+        };
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = (op, x0, x1);
+        None
+    }
+}
+
 #[inline(always)]
 fn lowered_unary_eval(op: LoweredUnaryKernel, x: f64, mode: SimdMathMode) -> f64 {
     match op {
@@ -2546,8 +2661,21 @@ fn try_execute_lowered_vector_kernel(
                         let mut lane_acc = [0.0_f64; 4];
                         let mut i = 0;
                         while i + lanes <= len {
-                            for lane in 0..lanes {
+                            let mut lane = 0;
+                            while lane < lanes {
+                                if lane + 1 < lanes {
+                                    let x0 = unsafe { read_buffer_f64(input_view, i + lane) };
+                                    let x1 = unsafe { read_buffer_f64(input_view, i + lane + 1) };
+                                    if let Some((y0, y1)) = lowered_unary_eval_pair(op, x0, x1, mode) {
+                                        log_simd_math_exec_once(entry, op);
+                                        lane_acc[lane] += y0;
+                                        lane_acc[lane + 1] += y1;
+                                        lane += 2;
+                                        continue;
+                                    }
+                                }
                                 lane_acc[lane] += eval_unary(op, input_view, i + lane);
+                                lane += 1;
                             }
                             i += lanes;
                         }
@@ -2736,9 +2864,23 @@ fn try_execute_lowered_vector_kernel(
             let input_view = views.get(input)?;
             let mut i = 0;
             while i + unroll <= len {
-                for lane in 0..unroll {
+                let mut lane = 0;
+                while lane < unroll {
+                    if lane + 1 < unroll {
+                        let idx = i + lane;
+                        let x0 = unsafe { read_buffer_f64(input_view, idx) };
+                        let x1 = unsafe { read_buffer_f64(input_view, idx + 1) };
+                        if let Some((y0, y1)) = lowered_unary_eval_pair(op, x0, x1, mode) {
+                            log_simd_math_exec_once(entry, op);
+                            results.push(y0);
+                            results.push(y1);
+                            lane += 2;
+                            continue;
+                        }
+                    }
                     let idx = i + lane;
                     results.push(eval_unary(op, input_view, idx));
+                    lane += 1;
                 }
                 i += unroll;
             }
@@ -3655,6 +3797,31 @@ mod simd_unroll_tests {
                 rhs: 1,
             })
         );
+    }
+
+    #[test]
+    fn detect_lowered_kernel_for_complex_trig_exp_expr() {
+        let src = "((math.sin(x) * 0.5 + x * 1.2) / (1.0 + math.exp(-abs(x) * 0.001)))";
+        let mut p = parser::Parser::new(parser::tokenize(src));
+        let expr = p.parse_expr().expect("parse complex lowered expr");
+        let args = vec!["x".to_string()];
+        let kernel = detect_lowered_kernel(&expr, &args);
+        match kernel {
+            Some(LoweredKernel::Expr(_)) => {}
+            other => panic!("expected LoweredKernel::Expr(_), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compile_sumover_complex_expr_selects_lowered_kernel() {
+        let src = "sum(((math.sin(x) * 0.5 + x * 1.2) / (1.0 + math.exp(-abs(x) * 0.001)) for x in data))";
+        let args = vec!["data".to_string()];
+        let entry = compile_jit_impl(src, &args, true, JitReturnType::Float)
+            .expect("compile sumover expression");
+        match entry.lowered_kernel {
+            Some(LoweredKernel::Expr(_)) => {}
+            other => panic!("expected lowered expression kernel, got {:?}", other),
+        }
     }
 
     #[test]
