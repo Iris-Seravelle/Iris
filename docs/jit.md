@@ -2,6 +2,15 @@
 
 This document describes Iris JIT behavior, supported language surface, intrinsics, and runtime controls.
 
+## Current optimization model (2026-03)
+
+Iris JIT acceleration now has four layers that can stack:
+
+1. Cranelift-native expression JIT compilation.
+2. SIMD capability planning (`aarch64/arm`, `x86/x86_64`, `wasm32`, scalar fallback).
+3. SIMD-aware loop unrolling in hot runtime vector-buffer execution paths.
+4. Direct lowered-kernel execution for common elementwise math kernels (including trig), bypassing per-element JIT dispatch overhead.
+
 ## Decorator API
 
 ```python
@@ -33,6 +42,19 @@ Supported math calls include:
 - `sinh`, `cosh`, `tanh`
 - `exp`, `log`, `sqrt`
 - `abs`, `min`, `max`, `pow`
+
+### Lowered kernel coverage (fast vector loop execution)
+
+When expressions match simple elementwise forms, Iris may run a lowered vector loop directly:
+
+- Unary kernels:
+  - identity (`x`), negation (`-x`), `abs(x)`
+  - `sin(x)`, `cos(x)`, `tan(x)`
+  - `exp(x)`, `log(x)` / `ln(x)`, `sqrt(x)`
+- Binary kernels:
+  - `a + b`, `a - b`, `a * b`, `a / b`
+
+These lowered paths are used on vector-buffer call paths (profiled and generic), and support both map-style outputs and reductions (`sum`, `any`, `all`).
 
 > `math.<fn>` style usage is normalized by the frontend when extractable to JIT expressions.
 
@@ -79,6 +101,37 @@ Supported buffer element types include:
 - unsigned integers (`u64`, `u32`, `u16`, `u8`)
 - `bool`
 
+## SIMD planner and loop optimization
+
+### Architecture-aware backend selection
+
+Iris selects a SIMD backend from host capabilities at runtime:
+
+- ARM/aarch64: prefers `SVE/SVE2`, falls back to `NEON`, then scalar.
+- x86/x86_64: prefers `AVX2`, then `AVX`, then `SSE2`, then scalar.
+- wasm32: uses `simd128` when available, else scalar.
+
+### Loop unrolling in practical paths
+
+Unrolling is applied to hot loops in:
+
+- profiled vector-buffer execution,
+- generic all-buffer vector execution,
+- trailing-count vectorized mode,
+- indexable sequence fallback loops.
+
+Unroll factor is derived from SIMD lane width (with scalar-safe tail handling), improving throughput even before explicit vector intrinsics are emitted for every operation.
+
+### Horizontal-style reduction combine
+
+For lowered reductions, Iris uses lane-wise partial accumulation (horizontal-style combine) for:
+
+- `sum` (lane accumulators reduced at the end),
+- `any` (lane OR style early success),
+- `all` (lane AND style early failure).
+
+This is primarily beneficial for reduction workloads; pure map kernels do not need horizontal combine.
+
 ## Quantum speculation behavior
 
 When enabled, Iris may compile multiple variants and select adaptively using runtime telemetry.
@@ -90,10 +143,25 @@ When enabled, Iris may compile multiple variants and select adaptively using run
 
 ## Runtime Controls
 
+### SIMD controls
+
+- Enable/disable SIMD planning:
+  - Env: `IRIS_JIT_SIMD`
+  - Values: truthy (`1/true/yes/on/...`) to enable, falsy to force scalar planning.
+
+- SIMD math mode for lowered unary trig kernels:
+  - Env: `IRIS_JIT_SIMD_MATH`
+  - `accurate` (default): standard libm-backed behavior.
+  - `fast` / `approx` / `poly`: fast approximation mode for lower latency with possible precision tradeoffs.
+
 ### Logging
 
 - Enable: `IRIS_JIT_LOG=1` or `iris.jit.set_jit_logging(...)`
 - Read status: `iris.jit.get_jit_logging()`
+
+When logging is enabled, SIMD planner details are emitted, for example:
+
+- `[Iris][jit][simd] backend=ArmNeon lane_bytes=16 auto_vectorize=true`
 
 ### Quantum enable/disable
 
@@ -140,6 +208,7 @@ Quantum telemetry is persisted for restart-time warm-up.
 Metadata lifecycle notes:
 
 - Warm seeds are loaded during registration and may be staged before full quantum state is initialized.
+- Aggressive-source registration paths use effective extracted source for seed/register/persist flow.
 - Writes are adaptive/deferred during execution and force-flushed at process exit for short-lived runs.
 - Unchanged profile *shape* may skip rewrite within the refresh window to reduce churn/noise.
 
@@ -150,6 +219,7 @@ Iris prioritizes correctness over acceleration:
 - Unsupported syntax or compile misses: Python fallback.
 - Runtime panic/mismatch in JIT path: guarded fallback.
 - Quantum variant errors: fallback variant or Python path.
+- Lowered kernel mismatch or unsupported expression shape: falls back to normal JIT execution path.
 
 ## Fallback behavior highlights
 
@@ -180,3 +250,6 @@ def heavy(a: float, b: float, c: float) -> float:
 
 > [!NOTE]
 > On aarch64 targets, Iris adjusts JIT module flags to avoid unsupported relocation paths.
+
+> [!TIP]
+> For Android ARM devices, SIMD planning is supported when built for ARM targets (`aarch64`/`arm`). Backend selection still depends on runtime CPU feature availability.
