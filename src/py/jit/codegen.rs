@@ -99,7 +99,17 @@ enum LoweredExpr {
     Sub(Box<LoweredExpr>, Box<LoweredExpr>),
     Mul(Box<LoweredExpr>, Box<LoweredExpr>),
     Div(Box<LoweredExpr>, Box<LoweredExpr>),
+    Mod(Box<LoweredExpr>, Box<LoweredExpr>),
+    Eq(Box<LoweredExpr>, Box<LoweredExpr>),
+    Ne(Box<LoweredExpr>, Box<LoweredExpr>),
+    Lt(Box<LoweredExpr>, Box<LoweredExpr>),
+    Gt(Box<LoweredExpr>, Box<LoweredExpr>),
+    Le(Box<LoweredExpr>, Box<LoweredExpr>),
+    Ge(Box<LoweredExpr>, Box<LoweredExpr>),
+    And(Box<LoweredExpr>, Box<LoweredExpr>),
+    Or(Box<LoweredExpr>, Box<LoweredExpr>),
     Neg(Box<LoweredExpr>),
+    Not(Box<LoweredExpr>),
     Abs(Box<LoweredExpr>),
     Sin(Box<LoweredExpr>),
     Cos(Box<LoweredExpr>),
@@ -107,6 +117,11 @@ enum LoweredExpr {
     Exp(Box<LoweredExpr>),
     Log(Box<LoweredExpr>),
     Sqrt(Box<LoweredExpr>),
+    Ternary {
+        cond: Box<LoweredExpr>,
+        then_expr: Box<LoweredExpr>,
+        else_expr: Box<LoweredExpr>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -243,6 +258,10 @@ fn detect_lowered_expr(expr: &Expr, arg_names: &[String]) -> Option<LoweredExpr>
             let inner = detect_lowered_expr(sub, arg_names)?;
             Some(LoweredExpr::Neg(Box::new(inner)))
         }
+        Expr::UnaryOp('!', sub) => {
+            let inner = detect_lowered_expr(sub, arg_names)?;
+            Some(LoweredExpr::Not(Box::new(inner)))
+        }
         Expr::Call(name, args) => {
             if args.len() != 1 {
                 return None;
@@ -268,9 +287,23 @@ fn detect_lowered_expr(expr: &Expr, arg_names: &[String]) -> Option<LoweredExpr>
                 "-" => Some(LoweredExpr::Sub(Box::new(l), Box::new(r))),
                 "*" => Some(LoweredExpr::Mul(Box::new(l), Box::new(r))),
                 "/" => Some(LoweredExpr::Div(Box::new(l), Box::new(r))),
+                "%" => Some(LoweredExpr::Mod(Box::new(l), Box::new(r))),
+                "==" => Some(LoweredExpr::Eq(Box::new(l), Box::new(r))),
+                "!=" => Some(LoweredExpr::Ne(Box::new(l), Box::new(r))),
+                "<" => Some(LoweredExpr::Lt(Box::new(l), Box::new(r))),
+                ">" => Some(LoweredExpr::Gt(Box::new(l), Box::new(r))),
+                "<=" => Some(LoweredExpr::Le(Box::new(l), Box::new(r))),
+                ">=" => Some(LoweredExpr::Ge(Box::new(l), Box::new(r))),
+                "and" => Some(LoweredExpr::And(Box::new(l), Box::new(r))),
+                "or" => Some(LoweredExpr::Or(Box::new(l), Box::new(r))),
                 _ => None,
             }
         }
+        Expr::Ternary(cond, then_expr, else_expr) => Some(LoweredExpr::Ternary {
+            cond: Box::new(detect_lowered_expr(cond, arg_names)?),
+            then_expr: Box::new(detect_lowered_expr(then_expr, arg_names)?),
+            else_expr: Box::new(detect_lowered_expr(else_expr, arg_names)?),
+        }),
         _ => None,
     }
 }
@@ -2587,7 +2620,71 @@ fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode:
         LoweredExpr::Div(a, b) => Some(
             lowered_expr_eval(a, views, idx, mode)? / lowered_expr_eval(b, views, idx, mode)?,
         ),
+        LoweredExpr::Mod(a, b) => Some(
+            lowered_expr_eval(a, views, idx, mode)? % lowered_expr_eval(b, views, idx, mode)?,
+        ),
+        LoweredExpr::Eq(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? == lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Ne(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? != lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Lt(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? < lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Gt(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? > lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Le(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? <= lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Ge(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? >= lowered_expr_eval(b, views, idx, mode)? {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::And(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? != 0.0 && lowered_expr_eval(b, views, idx, mode)? != 0.0 {
+                1.0
+            } else {
+                0.0
+            },
+        ),
+        LoweredExpr::Or(a, b) => Some(
+            if lowered_expr_eval(a, views, idx, mode)? != 0.0 || lowered_expr_eval(b, views, idx, mode)? != 0.0 {
+                1.0
+            } else {
+                0.0
+            },
+        ),
         LoweredExpr::Neg(a) => Some(-lowered_expr_eval(a, views, idx, mode)?),
+        LoweredExpr::Not(a) => Some(if lowered_expr_eval(a, views, idx, mode)? == 0.0 {
+            1.0
+        } else {
+            0.0
+        }),
         LoweredExpr::Abs(a) => Some(lowered_expr_eval(a, views, idx, mode)?.abs()),
         LoweredExpr::Sin(a) => Some(lowered_unary_eval(
             LoweredUnaryKernel::Sin,
@@ -2619,6 +2716,17 @@ fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode:
             lowered_expr_eval(a, views, idx, mode)?,
             mode,
         )),
+        LoweredExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            if lowered_expr_eval(cond, views, idx, mode)? != 0.0 {
+                lowered_expr_eval(then_expr, views, idx, mode)
+            } else {
+                lowered_expr_eval(else_expr, views, idx, mode)
+            }
+        }
     }
 }
 
@@ -3818,6 +3926,31 @@ mod simd_unroll_tests {
         let args = vec!["data".to_string()];
         let entry = compile_jit_impl(src, &args, true, JitReturnType::Float)
             .expect("compile sumover expression");
+        match entry.lowered_kernel {
+            Some(LoweredKernel::Expr(_)) => {}
+            other => panic!("expected lowered expression kernel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_lowered_kernel_for_filtered_ternary_expr() {
+        let src = "((x % 2 == 0 or x > 75.0) and (not x < 10.0)) ? (x > 50.0 ? x * math.sin(x) : x * math.cos(x)) : 0.0";
+        let mut p = parser::Parser::new(parser::tokenize(src));
+        let expr = p.parse_expr().expect("parse filtered ternary expr");
+        let args = vec!["x".to_string()];
+        let kernel = detect_lowered_kernel(&expr, &args);
+        match kernel {
+            Some(LoweredKernel::Expr(_)) => {}
+            other => panic!("expected LoweredKernel::Expr(_), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compile_sumover_filtered_ternary_selects_lowered_kernel() {
+        let src = "sum((x * math.sin(x) if x > 50.0 else x * math.cos(x) for x in data if (x % 2 == 0 or x > 75.0) and (not x < 10.0)))";
+        let args = vec!["data".to_string()];
+        let entry = compile_jit_impl(src, &args, true, JitReturnType::Float)
+            .expect("compile filtered ternary sumover expression");
         match entry.lowered_kernel {
             Some(LoweredKernel::Expr(_)) => {}
             other => panic!("expected lowered expression kernel, got {:?}", other),
