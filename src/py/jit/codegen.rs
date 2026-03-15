@@ -771,6 +771,31 @@ fn choose_quantum_index(state: &mut QuantumState) -> usize {
     best_idx
 }
 
+fn has_unrun_active_variant(state: &QuantumState) -> bool {
+    state
+        .stats
+        .iter()
+        .enumerate()
+        .any(|(idx, stats)| state.active.get(idx).copied().unwrap_or(false) && stats.runs == 0)
+}
+
+fn should_use_quantum_dispatch(
+    active_count: usize,
+    best_ewma_ns: f64,
+    stability: f64,
+    min_stability: f64,
+    speculation_threshold_ns: u64,
+    has_unrun_variant: bool,
+) -> bool {
+    if active_count <= 1 {
+        return false;
+    }
+    if has_unrun_variant {
+        return true;
+    }
+    best_ewma_ns >= (speculation_threshold_ns as f64) && stability >= min_stability
+}
+
 fn update_quantum_stats(func_key: usize, idx: usize, elapsed_ns: u64, success: bool) {
     if let Some(map) = QUANTUM_REGISTRY.get() {
         if let Some(state) = map.lock().unwrap().get_mut(&func_key) {
@@ -824,15 +849,24 @@ pub fn execute_registered_jit(
                         let stability = quantum_stability_score(state);
                         let min_stability = crate::py::jit::quantum_stability_min_score();
                         let active_count = active_indices(state).len();
-                        let use_quantum = active_count > 1
-                            && best_ewma >= (speculation_threshold_ns as f64)
-                            && stability >= min_stability;
+                        let has_unrun = has_unrun_active_variant(state);
+                        let use_quantum = should_use_quantum_dispatch(
+                            active_count,
+                            best_ewma,
+                            stability,
+                            min_stability,
+                            speculation_threshold_ns,
+                            has_unrun,
+                        );
 
                         if use_quantum {
                             let idx = choose_quantum_index(state);
                             let entry = state.entries[idx].clone();
                             // Check if the selected entry is valid; if not, skip quantum and use baseline.
                             if !entry.is_valid() {
+                                if idx < state.active.len() {
+                                    state.active[idx] = false;
+                                }
                                 let baseline_idx = state.baseline_idx.min(state.entries.len() - 1);
                                 let baseline_entry = state.entries[baseline_idx].clone();
                                 if !baseline_entry.is_valid() {
@@ -3977,5 +4011,41 @@ mod simd_unroll_tests {
         let cos_err = (fast_cos_approx(x) - x.cos()).abs();
         assert!(sin_err < 1e-3, "sin approximation error too high: {}", sin_err);
         assert!(cos_err < 1e-3, "cos approximation error too high: {}", cos_err);
+    }
+
+    #[test]
+    fn quantum_dispatch_explores_unrun_variants_even_below_threshold() {
+        let use_quantum = should_use_quantum_dispatch(
+            3,
+            10.0,
+            0.0,
+            0.9,
+            1000,
+            true,
+        );
+        assert!(use_quantum);
+    }
+
+    #[test]
+    fn quantum_dispatch_respects_threshold_when_fully_profiled() {
+        let use_quantum = should_use_quantum_dispatch(
+            3,
+            10.0,
+            0.95,
+            0.9,
+            1000,
+            false,
+        );
+        assert!(!use_quantum);
+
+        let use_quantum_hot = should_use_quantum_dispatch(
+            3,
+            5000.0,
+            0.95,
+            0.9,
+            1000,
+            false,
+        );
+        assert!(use_quantum_hot);
     }
 }
