@@ -63,6 +63,131 @@ pub struct JitEntry {
     pub arg_count: usize,
     pub reduction: ReductionMode,
     pub return_type: JitReturnType,
+    lowered_kernel: Option<LoweredKernel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoweredUnaryKernel {
+    Identity,
+    Neg,
+    Abs,
+    Sin,
+    Cos,
+    Tan,
+    Exp,
+    Log,
+    Sqrt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoweredBinaryKernel {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoweredKernel {
+    Unary { op: LoweredUnaryKernel, input: usize },
+    Binary {
+        op: LoweredBinaryKernel,
+        lhs: usize,
+        rhs: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimdMathMode {
+    Accurate,
+    FastApprox,
+}
+
+fn simd_math_mode_from_env() -> SimdMathMode {
+    match std::env::var("IRIS_JIT_SIMD_MATH") {
+        Ok(v) => {
+            let key = v.trim().to_ascii_lowercase();
+            if matches!(key.as_str(), "fast" | "approx" | "poly") {
+                SimdMathMode::FastApprox
+            } else {
+                SimdMathMode::Accurate
+            }
+        }
+        Err(_) => SimdMathMode::Accurate,
+    }
+}
+
+fn arg_index_of_var(arg_names: &[String], var: &str) -> Option<usize> {
+    arg_names.iter().position(|n| n == var)
+}
+
+fn normalize_intrinsic_name(raw: &str) -> &str {
+    raw.rsplit('.').next().unwrap_or(raw)
+}
+
+fn detect_lowered_kernel(expr: &Expr, arg_names: &[String]) -> Option<LoweredKernel> {
+    match expr {
+        Expr::Var(name) => {
+            let input = arg_index_of_var(arg_names, name)?;
+            Some(LoweredKernel::Unary {
+                op: LoweredUnaryKernel::Identity,
+                input,
+            })
+        }
+        Expr::UnaryOp('-', sub) => {
+            let Expr::Var(name) = sub.as_ref() else {
+                return None;
+            };
+            let input = arg_index_of_var(arg_names, name)?;
+            Some(LoweredKernel::Unary {
+                op: LoweredUnaryKernel::Neg,
+                input,
+            })
+        }
+        Expr::Call(name, args) => {
+            if args.len() != 1 {
+                return None;
+            }
+            let Expr::Var(var_name) = &args[0] else {
+                return None;
+            };
+            let input = arg_index_of_var(arg_names, var_name)?;
+            let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
+                "abs" | "fabs" => LoweredUnaryKernel::Abs,
+                "sin" => LoweredUnaryKernel::Sin,
+                "cos" => LoweredUnaryKernel::Cos,
+                "tan" => LoweredUnaryKernel::Tan,
+                "exp" => LoweredUnaryKernel::Exp,
+                "log" | "ln" => LoweredUnaryKernel::Log,
+                "sqrt" => LoweredUnaryKernel::Sqrt,
+                _ => return None,
+            };
+            Some(LoweredKernel::Unary { op, input })
+        }
+        Expr::BinOp(lhs, op, rhs) => {
+            let Expr::Var(lhs_name) = lhs.as_ref() else {
+                return None;
+            };
+            let Expr::Var(rhs_name) = rhs.as_ref() else {
+                return None;
+            };
+            let lhs_idx = arg_index_of_var(arg_names, lhs_name)?;
+            let rhs_idx = arg_index_of_var(arg_names, rhs_name)?;
+            let op = match op.as_str() {
+                "+" => LoweredBinaryKernel::Add,
+                "-" => LoweredBinaryKernel::Sub,
+                "*" => LoweredBinaryKernel::Mul,
+                "/" => LoweredBinaryKernel::Div,
+                _ => return None,
+            };
+            Some(LoweredKernel::Binary {
+                op,
+                lhs: lhs_idx,
+                rhs: rhs_idx,
+            })
+        }
+        _ => None,
+    }
 }
 
 impl JitEntry {
@@ -803,6 +928,10 @@ fn compile_jit_impl(
         crate::py::jit::jit_log(|| format!("[Iris][jit] baseline AST (no-opt): {:?}", expr));
     }
     let arg_count = adjusted_args.len();
+    let lowered_kernel = detect_lowered_kernel(&expr, &adjusted_args);
+    if let Some(kernel) = lowered_kernel {
+        crate::py::jit::jit_log(|| format!("[Iris][jit][lower] selected kernel={:?}", kernel));
+    }
 
     // perform compilation using the thread-local module instance;
     // the closure returns the resulting pointer so we can pass it back.
@@ -847,6 +976,7 @@ fn compile_jit_impl(
             arg_count,
             reduction,
             return_type,
+            lowered_kernel,
         })
     })
 }
@@ -2067,6 +2197,281 @@ unsafe fn read_buffer_f64(view: &BufferView, index: usize) -> f64 {
     }
 }
 
+#[inline(always)]
+fn fast_sin_approx(x: f64) -> f64 {
+    const PI: f64 = std::f64::consts::PI;
+    const TAU: f64 = std::f64::consts::TAU;
+    const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
+
+    let mut y = x % TAU;
+    if y > PI {
+        y -= TAU;
+    } else if y < -PI {
+        y += TAU;
+    }
+
+    let mut sign = 1.0;
+    if y > HALF_PI {
+        y = PI - y;
+    } else if y < -HALF_PI {
+        y = -PI - y;
+        sign = -1.0;
+    }
+
+    let z = y * y;
+    let p = y * (1.0
+        + z * (-1.0 / 6.0
+        + z * (1.0 / 120.0
+        + z * (-1.0 / 5040.0
+        + z * (1.0 / 362880.0)))));
+    sign * p
+}
+
+#[inline(always)]
+fn fast_cos_approx(x: f64) -> f64 {
+    fast_sin_approx(x + std::f64::consts::FRAC_PI_2)
+}
+
+#[inline(always)]
+fn lowered_unary_eval(op: LoweredUnaryKernel, x: f64, mode: SimdMathMode) -> f64 {
+    match op {
+        LoweredUnaryKernel::Identity => x,
+        LoweredUnaryKernel::Neg => -x,
+        LoweredUnaryKernel::Abs => x.abs(),
+        LoweredUnaryKernel::Sin => {
+            if mode == SimdMathMode::FastApprox {
+                fast_sin_approx(x)
+            } else {
+                x.sin()
+            }
+        }
+        LoweredUnaryKernel::Cos => {
+            if mode == SimdMathMode::FastApprox {
+                fast_cos_approx(x)
+            } else {
+                x.cos()
+            }
+        }
+        LoweredUnaryKernel::Tan => {
+            if mode == SimdMathMode::FastApprox {
+                fast_sin_approx(x) / fast_cos_approx(x)
+            } else {
+                x.tan()
+            }
+        }
+        LoweredUnaryKernel::Exp => x.exp(),
+        LoweredUnaryKernel::Log => x.ln(),
+        LoweredUnaryKernel::Sqrt => x.sqrt(),
+    }
+}
+
+#[inline(always)]
+fn lowered_binary_eval(op: LoweredBinaryKernel, lhs: f64, rhs: f64) -> f64 {
+    match op {
+        LoweredBinaryKernel::Add => lhs + rhs,
+        LoweredBinaryKernel::Sub => lhs - rhs,
+        LoweredBinaryKernel::Mul => lhs * rhs,
+        LoweredBinaryKernel::Div => lhs / rhs,
+    }
+}
+
+enum LoweredVectorResult {
+    Vector(Vec<f64>),
+    Reduced(f64),
+}
+
+#[inline(always)]
+fn try_execute_lowered_vector_kernel(
+    entry: &JitEntry,
+    views: &[BufferView],
+    len: usize,
+    unroll: usize,
+) -> Option<LoweredVectorResult> {
+    let mode = simd_math_mode_from_env();
+
+    let kernel = entry.lowered_kernel?;
+
+    let eval_unary = |op: LoweredUnaryKernel, view: &BufferView, idx: usize| {
+        let x = unsafe { read_buffer_f64(view, idx) };
+        lowered_unary_eval(op, x, mode)
+    };
+    let eval_binary = |op: LoweredBinaryKernel, lhs_view: &BufferView, rhs_view: &BufferView, idx: usize| {
+        let l = unsafe { read_buffer_f64(lhs_view, idx) };
+        let r = unsafe { read_buffer_f64(rhs_view, idx) };
+        lowered_binary_eval(op, l, r)
+    };
+
+    if entry.reduction != ReductionMode::None {
+        let lanes = unroll.clamp(1, 4);
+        match kernel {
+            LoweredKernel::Unary { op, input } => {
+                let input_view = views.get(input)?;
+                match entry.reduction {
+                    ReductionMode::Sum => {
+                        let mut lane_acc = [0.0_f64; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_acc[lane] += eval_unary(op, input_view, i + lane);
+                            }
+                            i += lanes;
+                        }
+                        let mut acc = lane_acc[..lanes].iter().copied().sum::<f64>();
+                        while i < len {
+                            acc += eval_unary(op, input_view, i);
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(acc));
+                    }
+                    ReductionMode::Any => {
+                        let mut lane_any = [false; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_any[lane] |= eval_unary(op, input_view, i + lane) != 0.0;
+                            }
+                            if lane_any[..lanes].iter().any(|v| *v) {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if eval_unary(op, input_view, i) != 0.0 {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(0.0));
+                    }
+                    ReductionMode::All => {
+                        let mut lane_all = [true; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_all[lane] &= eval_unary(op, input_view, i + lane) != 0.0;
+                            }
+                            if lane_all[..lanes].iter().any(|v| !*v) {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if eval_unary(op, input_view, i) == 0.0 {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(1.0));
+                    }
+                    ReductionMode::None => {}
+                }
+            }
+            LoweredKernel::Binary { op, lhs, rhs } => {
+                let lhs_view = views.get(lhs)?;
+                let rhs_view = views.get(rhs)?;
+                match entry.reduction {
+                    ReductionMode::Sum => {
+                        let mut lane_acc = [0.0_f64; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_acc[lane] += eval_binary(op, lhs_view, rhs_view, i + lane);
+                            }
+                            i += lanes;
+                        }
+                        let mut acc = lane_acc[..lanes].iter().copied().sum::<f64>();
+                        while i < len {
+                            acc += eval_binary(op, lhs_view, rhs_view, i);
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(acc));
+                    }
+                    ReductionMode::Any => {
+                        let mut lane_any = [false; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_any[lane] |= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                            }
+                            if lane_any[..lanes].iter().any(|v| *v) {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if eval_binary(op, lhs_view, rhs_view, i) != 0.0 {
+                                return Some(LoweredVectorResult::Reduced(1.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(0.0));
+                    }
+                    ReductionMode::All => {
+                        let mut lane_all = [true; 4];
+                        let mut i = 0;
+                        while i + lanes <= len {
+                            for lane in 0..lanes {
+                                lane_all[lane] &= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                            }
+                            if lane_all[..lanes].iter().any(|v| !*v) {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += lanes;
+                        }
+                        while i < len {
+                            if eval_binary(op, lhs_view, rhs_view, i) == 0.0 {
+                                return Some(LoweredVectorResult::Reduced(0.0));
+                            }
+                            i += 1;
+                        }
+                        return Some(LoweredVectorResult::Reduced(1.0));
+                    }
+                    ReductionMode::None => {}
+                }
+            }
+        }
+        return None;
+    }
+
+    let mut results = Vec::with_capacity(len);
+
+    match kernel {
+        LoweredKernel::Unary { op, input } => {
+            let input_view = views.get(input)?;
+            let mut i = 0;
+            while i + unroll <= len {
+                for lane in 0..unroll {
+                    let idx = i + lane;
+                    results.push(eval_unary(op, input_view, idx));
+                }
+                i += unroll;
+            }
+            while i < len {
+                results.push(eval_unary(op, input_view, i));
+                i += 1;
+            }
+            Some(LoweredVectorResult::Vector(results))
+        }
+        LoweredKernel::Binary { op, lhs, rhs } => {
+            let lhs_view = views.get(lhs)?;
+            let rhs_view = views.get(rhs)?;
+            let mut i = 0;
+            while i + unroll <= len {
+                for lane in 0..unroll {
+                    let idx = i + lane;
+                    results.push(eval_binary(op, lhs_view, rhs_view, idx));
+                }
+                i += unroll;
+            }
+            while i < len {
+                results.push(eval_binary(op, lhs_view, rhs_view, i));
+                i += 1;
+            }
+            Some(LoweredVectorResult::Vector(results))
+        }
+    }
+}
+
 #[cfg(feature = "pyo3")]
 #[inline(always)]
 fn lookup_exec_profile(func_ptr: usize) -> Option<JitExecProfile> {
@@ -2326,6 +2731,16 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
                     if matched {
                         let len = common_len.unwrap_or(0);
+                        if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                            match lowered {
+                                LoweredVectorResult::Vector(results) => {
+                                    return Ok(vec_f64_to_py(py, &results, entry.return_type));
+                                }
+                                LoweredVectorResult::Reduced(value) => {
+                                    return Ok(jit_return_to_py(py, value, entry.return_type));
+                                }
+                            }
+                        }
                         if entry.reduction != ReductionMode::None {
                             let mut acc = reduction_identity(entry.reduction);
                             const MAX_FAST_ARGS: usize = 8;
@@ -2539,7 +2954,24 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 
         if all_buffers {
             if let Some(len) = common_len {
-                let unroll = simd_unroll_factor();
+                if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                    store_exec_profile(
+                        entry.func_ptr,
+                        JitExecProfile::VectorizedBuffers {
+                            arg_count,
+                            elem_types: views.iter().map(|v| v.elem_type).collect::<Vec<_>>(),
+                        },
+                    );
+                    match lowered {
+                        LoweredVectorResult::Vector(results) => {
+                            return Ok(vec_f64_to_py(py, &results, entry.return_type));
+                        }
+                        LoweredVectorResult::Reduced(value) => {
+                            return Ok(jit_return_to_py(py, value, entry.return_type));
+                        }
+                    }
+                }
+                let unroll = loop_unroll;
                 if entry.reduction != ReductionMode::None {
                     let mut acc = reduction_identity(entry.reduction);
                     const MAX_FAST_ARGS: usize = 8;
@@ -2830,6 +3262,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
 #[cfg(test)]
 mod simd_unroll_tests {
     use super::*;
+    use crate::py::jit::parser;
 
     #[test]
     fn scalar_plan_uses_unroll_1() {
@@ -2875,5 +3308,58 @@ mod simd_unroll_tests {
             auto_vectorize: true,
         };
         assert_eq!(simd_unroll_factor_for_plan(plan), 1);
+    }
+
+    #[test]
+    fn detect_lowered_kernel_for_trig_unary() {
+        let mut p = parser::Parser::new(parser::tokenize("math.sin(x)"));
+        let expr = p.parse_expr().expect("parse trig");
+        let args = vec!["x".to_string()];
+        let kernel = detect_lowered_kernel(&expr, &args);
+        assert_eq!(
+            kernel,
+            Some(LoweredKernel::Unary {
+                op: LoweredUnaryKernel::Sin,
+                input: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn detect_lowered_kernel_for_binary_arith() {
+        let mut p = parser::Parser::new(parser::tokenize("a * b"));
+        let expr = p.parse_expr().expect("parse binary");
+        let args = vec!["a".to_string(), "b".to_string()];
+        let kernel = detect_lowered_kernel(&expr, &args);
+        assert_eq!(
+            kernel,
+            Some(LoweredKernel::Binary {
+                op: LoweredBinaryKernel::Mul,
+                lhs: 0,
+                rhs: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn simd_math_mode_defaults_to_accurate() {
+        std::env::remove_var("IRIS_JIT_SIMD_MATH");
+        assert_eq!(simd_math_mode_from_env(), SimdMathMode::Accurate);
+    }
+
+    #[test]
+    fn simd_math_mode_fast_parse() {
+        std::env::set_var("IRIS_JIT_SIMD_MATH", "fast");
+        assert_eq!(simd_math_mode_from_env(), SimdMathMode::FastApprox);
+        std::env::remove_var("IRIS_JIT_SIMD_MATH");
+    }
+
+    #[test]
+    fn fast_trig_approx_is_reasonable_near_common_angles() {
+        let x = 0.7_f64;
+        let sin_err = (fast_sin_approx(x) - x.sin()).abs();
+        let cos_err = (fast_cos_approx(x) - x.cos()).abs();
+        assert!(sin_err < 1e-3, "sin approximation error too high: {}", sin_err);
+        assert!(cos_err < 1e-3, "cos approximation error too high: {}", cos_err);
     }
 }
