@@ -168,6 +168,30 @@ def _profile_variant_shape(rows: Any) -> tuple[int, ...]:
     return tuple(shape)
 
 
+def _normalize_profile_rows(rows: Any) -> list[list[Any]]:
+    if not isinstance(rows, list):
+        return []
+    out: list[list[Any]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            continue
+        try:
+            out.append([int(row[0]), float(row[1]), int(row[2]), int(row[3])])
+        except Exception:
+            continue
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _merge_profile_rows(existing_rows: Any, incoming_rows: list[list[Any]]) -> list[list[Any]]:
+    merged: dict[int, list[Any]] = {}
+    for row in _normalize_profile_rows(existing_rows):
+        merged[int(row[0])] = row
+    for row in incoming_rows:
+        merged[int(row[0])] = row
+    return [merged[idx] for idx in sorted(merged.keys())]
+
+
 def _metadata_cache_path(func: Callable[..., Any]) -> Optional[str]:
     try:
         source_file = inspect.getsourcefile(func) or inspect.getfile(func)
@@ -404,24 +428,6 @@ def _maybe_persist_quantum_metadata(
         _jit_meta_log(f"persist skipped: normalized profile empty key={key[:12]}")
         return
 
-    row_sig = hashlib.sha256(
-        _msgpack.packb(normalized_rows, use_bin_type=True)
-    ).hexdigest()
-    with _IRIS_META_STATE_LOCK:
-        min_flush, max_flush = _normalize_flush_window()
-        flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, min_flush)
-        if flush_interval < min_flush:
-            flush_interval = min_flush
-        if flush_interval > max_flush:
-            flush_interval = max_flush
-
-        prev_sig = _IRIS_META_LAST_SIGNATURES.get(key)
-        if prev_sig == row_sig:
-            _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
-        else:
-            _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
-        _IRIS_META_LAST_SIGNATURES[key] = row_sig
-
     try:
         doc = _read_metadata(path)
         now_ns = time.time_ns()
@@ -433,6 +439,7 @@ def _maybe_persist_quantum_metadata(
         existing = entries.get(key)
         if isinstance(existing, dict):
             existing_rows = existing.get("profile")
+            normalized_rows = _merge_profile_rows(existing_rows, normalized_rows)
             existing_return_type = existing.get("return_type")
             existing_arg_count = existing.get("arg_count")
             existing_updated_raw = existing.get("updated_ns", 0)
@@ -442,10 +449,18 @@ def _maybe_persist_quantum_metadata(
                 existing_updated_ns = 0
 
             refresh_ns = _IRIS_META_REFRESH_NS if _IRIS_META_REFRESH_NS > 0 else 0
-            existing_shape = _profile_variant_shape(existing_rows)
+            existing_rows_normalized = _normalize_profile_rows(existing_rows)
+            existing_shape = _profile_variant_shape(existing_rows_normalized)
             current_shape = _profile_variant_shape(normalized_rows)
+            existing_sig = hashlib.sha256(
+                _msgpack.packb(existing_rows_normalized, use_bin_type=True)
+            ).hexdigest()
+            current_sig = hashlib.sha256(
+                _msgpack.packb(normalized_rows, use_bin_type=True)
+            ).hexdigest()
             unchanged = (
                 existing_shape == current_shape
+                and existing_sig == current_sig
                 and existing_return_type == (return_type or "float")
                 and int(existing_arg_count) == len(arg_names)
             )
@@ -455,6 +470,24 @@ def _maybe_persist_quantum_metadata(
                     f"persist skipped: unchanged-shape key={key[:12]} age_ns={max(0, now_ns - existing_updated_ns)}"
                 )
                 return
+
+        row_sig = hashlib.sha256(
+            _msgpack.packb(normalized_rows, use_bin_type=True)
+        ).hexdigest()
+        with _IRIS_META_STATE_LOCK:
+            min_flush, max_flush = _normalize_flush_window()
+            flush_interval = _IRIS_META_FLUSH_INTERVALS.get(key, min_flush)
+            if flush_interval < min_flush:
+                flush_interval = min_flush
+            if flush_interval > max_flush:
+                flush_interval = max_flush
+
+            prev_sig = _IRIS_META_LAST_SIGNATURES.get(key)
+            if prev_sig == row_sig:
+                _IRIS_META_FLUSH_INTERVALS[key] = min(max_flush, flush_interval * 2)
+            else:
+                _IRIS_META_FLUSH_INTERVALS[key] = max(min_flush, flush_interval // 2 if flush_interval > 1 else 1)
+            _IRIS_META_LAST_SIGNATURES[key] = row_sig
 
         entries[key] = {
             "updated_ns": now_ns,

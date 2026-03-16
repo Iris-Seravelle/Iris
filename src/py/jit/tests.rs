@@ -7,10 +7,17 @@ use cranelift::prelude::Configurable;
 use crate::py::jit::codegen::execute_jit_func;
 use crate::py::jit::codegen::{
     compile_jit,
+    compile_jit_quantum_variant,
     lookup_named_jit,
+    quantum_profile_snapshot,
+    quantum_seed_preferred_index,
     register_named_jit,
+    register_quantum_jit,
     resolve_symbol_alias,
+    seed_quantum_profile,
     SymbolAlias,
+    JitReturnType,
+    QuantumProfileSeed,
 };
 
 // Don't ever regress next time :(
@@ -96,6 +103,149 @@ fn quantum_profile_snapshot_and_seed_roundtrip() {
     assert_eq!(after[0].runs, 42);
     assert_eq!(after[0].failures, 1);
     assert!((after[0].ewma_ns - 1_500_000.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn quantum_seed_prefers_lowest_latency_variant() {
+    use crate::py::jit::codegen::{seed_quantum_profile, QuantumProfileSeed};
+
+    let func_key = 9_100_001;
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed {
+                index: 0,
+                ewma_ns: 1500.0,
+                runs: 20,
+                failures: 0,
+            },
+            QuantumProfileSeed {
+                index: 1,
+                ewma_ns: 300.0,
+                runs: 20,
+                failures: 0,
+            },
+            QuantumProfileSeed {
+                index: 2,
+                ewma_ns: 900.0,
+                runs: 20,
+                failures: 0,
+            },
+        ],
+    ));
+
+    assert_eq!(quantum_seed_preferred_index(func_key), Some(1));
+}
+
+#[test]
+fn quantum_seed_penalizes_failure_heavily() {
+    use crate::py::jit::codegen::{seed_quantum_profile, QuantumProfileSeed};
+
+    let func_key = 9_100_002;
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed {
+                index: 0,
+                ewma_ns: 1200.0,
+                runs: 20,
+                failures: 0,
+            },
+            QuantumProfileSeed {
+                index: 1,
+                ewma_ns: 200.0,
+                runs: 20,
+                failures: 30,
+            },
+        ],
+    ));
+
+    assert_eq!(quantum_seed_preferred_index(func_key), Some(0));
+}
+
+#[test]
+fn quantum_seed_prefers_scalarfallback_when_samples_are_thin() {
+    let func_key = 9_100_004;
+    assert!(seed_quantum_profile(
+        func_key,
+        &[
+            QuantumProfileSeed {
+                index: 0,
+                ewma_ns: 200.0,
+                runs: 1,
+                failures: 0,
+            },
+            QuantumProfileSeed {
+                index: 1,
+                ewma_ns: 350.0,
+                runs: 1,
+                failures: 0,
+            },
+            QuantumProfileSeed {
+                index: 2,
+                ewma_ns: 180.0,
+                runs: 1,
+                failures: 0,
+            },
+        ],
+    ));
+
+    assert_eq!(
+        quantum_seed_preferred_index(func_key),
+        Some(1),
+        "expected sparse sample warm-start to prefer ScalarFallback"
+    );
+}
+
+#[test]
+fn quantum_snapshot_preserves_canonical_variant_id_for_single_warm_winner() {
+    let args = vec!["x".to_string()];
+    let entry = compile_jit_quantum_variant("x + 1", &args, JitReturnType::Float, 1)
+        .expect("compile scalar-fallback variant");
+
+    let func_key = 9_100_003;
+    register_quantum_jit(func_key, vec![entry]);
+
+    assert!(seed_quantum_profile(
+        func_key,
+        &[QuantumProfileSeed {
+            index: 0,
+            ewma_ns: 750.0,
+            runs: 5,
+            failures: 0,
+        }],
+    ));
+
+    let snapshot = quantum_profile_snapshot(func_key).expect("snapshot should exist");
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].index, 1, "expected persisted row to keep canonical ScalarFallback index");
+}
+
+#[test]
+fn quantum_seed_applies_to_single_variant_by_canonical_index() {
+    let args = vec!["x".to_string()];
+    let entry = compile_jit_quantum_variant("x + 1", &args, JitReturnType::Float, 1)
+        .expect("compile scalar-fallback variant");
+
+    let func_key = 9_100_005;
+    register_quantum_jit(func_key, vec![entry]);
+
+    assert!(seed_quantum_profile(
+        func_key,
+        &[QuantumProfileSeed {
+            index: 1,
+            ewma_ns: 512.0,
+            runs: 9,
+            failures: 2,
+        }],
+    ));
+
+    let snapshot = quantum_profile_snapshot(func_key).expect("snapshot should exist");
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].index, 1);
+    assert_eq!(snapshot[0].runs, 9);
+    assert_eq!(snapshot[0].failures, 2);
+    assert!((snapshot[0].ewma_ns - 512.0).abs() < f64::EPSILON);
 }
 
 #[test]

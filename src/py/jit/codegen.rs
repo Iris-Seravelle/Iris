@@ -455,14 +455,21 @@ fn log_simd_math_exec_once(entry: &JitEntry, op: LoweredUnaryKernel) {
 
 fn apply_quantum_seeds(state: &mut QuantumState, seeds: &[QuantumProfileSeed]) {
     for seed in seeds {
-        if let Some(stats) = state.stats.get_mut(seed.index) {
-            stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
-                seed.ewma_ns
-            } else {
-                0.0
-            };
-            stats.runs = seed.runs;
-            stats.failures = seed.failures;
+        if let Some((pos, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| quantum_variant_index_for_strategy(entry.variant_strategy) == seed.index)
+        {
+            if let Some(stats) = state.stats.get_mut(pos) {
+                stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
+                    seed.ewma_ns
+                } else {
+                    0.0
+                };
+                stats.runs = seed.runs;
+                stats.failures = seed.failures;
+            }
         }
     }
 }
@@ -575,12 +582,78 @@ fn active_indices(state: &QuantumState) -> Vec<usize> {
 }
 
 fn quantum_score(stats: &QuantumStats) -> f64 {
-    let penalty = 1.0 + (stats.failures as f64 * 0.25);
+    let penalty = 1.0 + (stats.failures as f64);
     if stats.ewma_ns > 0.0 {
         stats.ewma_ns * penalty
     } else {
         f64::MAX / 4.0
     }
+}
+
+fn quantum_seed_score(seed: &QuantumProfileSeed) -> Option<f64> {
+    if !seed.ewma_ns.is_finite() || seed.ewma_ns <= 0.0 {
+        return None;
+    }
+
+    let run_penalty = if seed.runs == 0 { 4.0 } else { 1.0 };
+    let failure_penalty = 1.0 + (seed.failures as f64 * 2.0);
+    Some(seed.ewma_ns * run_penalty * failure_penalty)
+}
+
+fn preferred_seed_variant_index(seeds: &[QuantumProfileSeed]) -> Option<usize> {
+    const MIN_CONFIDENT_RUNS: u64 = 3;
+
+    let scalar_seed = seeds.iter().find(|seed| seed.index == 1).cloned();
+    let all_thin_samples = seeds
+        .iter()
+        .filter(|seed| quantum_seed_score(seed).is_some())
+        .all(|seed| seed.runs < MIN_CONFIDENT_RUNS);
+
+    if all_thin_samples {
+        if let Some(seed) = scalar_seed {
+            if quantum_seed_score(&seed).is_some() && seed.failures == 0 {
+                return Some(1);
+            }
+        }
+    }
+
+    let mut best: Option<(usize, f64, u64)> = None;
+    for seed in seeds {
+        let Some(score) = quantum_seed_score(seed) else {
+            continue;
+        };
+
+        match best {
+            None => best = Some((seed.index, score, seed.runs)),
+            Some((best_idx, best_score, best_runs)) => {
+                if score < best_score
+                    || ((score - best_score).abs() < f64::EPSILON && seed.runs > best_runs)
+                    || ((score - best_score).abs() < f64::EPSILON
+                        && seed.runs == best_runs
+                        && seed.index < best_idx)
+                {
+                    best = Some((seed.index, score, seed.runs));
+                }
+            }
+        }
+    }
+
+    best.map(|(idx, _, _)| idx)
+}
+
+fn quantum_variant_index_for_strategy(strategy: QuantumVariantStrategy) -> usize {
+    match strategy {
+        QuantumVariantStrategy::Auto => 0,
+        QuantumVariantStrategy::ScalarFallback => 1,
+        QuantumVariantStrategy::FastTrigExperiment => 2,
+    }
+}
+
+pub fn quantum_seed_preferred_index(func_key: usize) -> Option<usize> {
+    QUANTUM_PENDING_SEEDS
+        .get()
+        .and_then(|map| map.lock().unwrap().get(&func_key).cloned())
+        .and_then(|seeds| preferred_seed_variant_index(&seeds))
 }
 
 fn quantum_stability_score(state: &QuantumState) -> f64 {
@@ -709,7 +782,11 @@ pub fn quantum_profile_snapshot(func_key: usize) -> Option<Vec<QuantumProfilePoi
                 .iter()
                 .enumerate()
                 .map(|(index, stats)| QuantumProfilePoint {
-                    index,
+                    index: state
+                        .entries
+                        .get(index)
+                        .map(|entry| quantum_variant_index_for_strategy(entry.variant_strategy))
+                        .unwrap_or(index),
                     ewma_ns: stats.ewma_ns,
                     runs: stats.runs,
                     failures: stats.failures,
@@ -1280,6 +1357,23 @@ pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String], return_type: Ji
     out
 }
 
+pub fn compile_jit_quantum_variant(
+    expr_str: &str,
+    arg_names: &[String],
+    return_type: JitReturnType,
+    variant_index: usize,
+) -> Option<JitEntry> {
+    match variant_index {
+        0 => compile_jit_impl(expr_str, arg_names, true, return_type)
+            .map(|entry| entry.with_strategy(QuantumVariantStrategy::Auto)),
+        1 => compile_jit_impl(expr_str, arg_names, false, return_type)
+            .map(|entry| entry.with_strategy(QuantumVariantStrategy::ScalarFallback)),
+        2 => compile_jit_impl(expr_str, arg_names, true, return_type)
+            .map(|entry| entry.with_strategy(QuantumVariantStrategy::FastTrigExperiment)),
+        _ => None,
+    }
+}
+
 fn gen_expr(
     expr: &Expr,
     fb: &mut FunctionBuilder,
@@ -1609,7 +1703,6 @@ fn gen_expr(
                     let next_acc = fb.block_params(continue_block)[1];
                     let next_budget = fb.block_params(continue_block)[2];
                     fb.ins().jump(loop_block, &[next_iter, next_acc, next_budget]);
-
                     fb.seal_block(body_block);
                     fb.seal_block(budget_exit_block);
                     fb.seal_block(budget_ok_block);
@@ -2469,22 +2562,25 @@ unsafe fn read_buffer_f64(view: &BufferView, index: usize) -> f64 {
 
 #[inline(always)]
 fn fast_sin_approx(x: f64) -> f64 {
+    const APPROX_DOMAIN_LIMIT: f64 = 4_096.0;
     const PI: f64 = std::f64::consts::PI;
     const TAU: f64 = std::f64::consts::TAU;
     const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
 
-    let mut y = x % TAU;
+    if !x.is_finite() || x.abs() > APPROX_DOMAIN_LIMIT {
+        return x.sin();
+    }
+
+    let mut y = x.rem_euclid(TAU);
     if y > PI {
         y -= TAU;
-    } else if y < -PI {
-        y += TAU;
     }
 
     let mut sign = 1.0;
     if y > HALF_PI {
         y = PI - y;
     } else if y < -HALF_PI {
-        y = -PI - y;
+        y = PI + y;
         sign = -1.0;
     }
 
@@ -2499,38 +2595,50 @@ fn fast_sin_approx(x: f64) -> f64 {
 
 #[inline(always)]
 fn fast_cos_approx(x: f64) -> f64 {
+    const APPROX_DOMAIN_LIMIT: f64 = 4_096.0;
+    if !x.is_finite() || x.abs() > APPROX_DOMAIN_LIMIT {
+        return x.cos();
+    }
     fast_sin_approx(x + std::f64::consts::FRAC_PI_2)
 }
 
 #[cfg(target_arch = "aarch64")]
-fn fast_sin_reduce_for_poly(x: f64) -> (f64, f64) {
+fn fast_sin_reduce_for_poly(x: f64) -> Option<(f64, f64)> {
     const PI: f64 = std::f64::consts::PI;
     const TAU: f64 = std::f64::consts::TAU;
     const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
 
-    let mut y = x % TAU;
+    if !x.is_finite() {
+        return None;
+    }
+
+    let mut y = x.rem_euclid(TAU);
     if y > PI {
         y -= TAU;
-    } else if y < -PI {
-        y += TAU;
     }
 
     let mut sign = 1.0;
     if y > HALF_PI {
         y = PI - y;
     } else if y < -HALF_PI {
-        y = -PI - y;
+        y = PI + y;
         sign = -1.0;
     }
 
-    (y, sign)
+    Some((y, sign))
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn fast_sin_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
-    let (y0, s0) = fast_sin_reduce_for_poly(x0);
-    let (y1, s1) = fast_sin_reduce_for_poly(x1);
+    let (y0, s0) = match fast_sin_reduce_for_poly(x0) {
+        Some(reduced) => reduced,
+        None => return (x0.sin(), x1.sin()),
+    };
+    let (y1, s1) = match fast_sin_reduce_for_poly(x1) {
+        Some(reduced) => reduced,
+        None => return (x0.sin(), x1.sin()),
+    };
 
     let y_arr = [y0, y1];
     let sign_arr = [s0, s1];
@@ -2557,6 +2665,10 @@ unsafe fn fast_sin_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn fast_cos_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
+    const APPROX_DOMAIN_LIMIT: f64 = 4_096.0;
+    if !x0.is_finite() || !x1.is_finite() || x0.abs() > APPROX_DOMAIN_LIMIT || x1.abs() > APPROX_DOMAIN_LIMIT {
+        return (x0.cos(), x1.cos());
+    }
     fast_sin_approx_pair_neon(x0 + std::f64::consts::FRAC_PI_2, x1 + std::f64::consts::FRAC_PI_2)
 }
 
@@ -4199,6 +4311,43 @@ mod simd_unroll_tests {
         let cos_err = (fast_cos_approx(x) - x.cos()).abs();
         assert!(sin_err < 1e-3, "sin approximation error too high: {}", sin_err);
         assert!(cos_err < 1e-3, "cos approximation error too high: {}", cos_err);
+    }
+
+    #[test]
+    fn fast_trig_approx_preserves_negative_quadrant_sign() {
+        let x = -2.0_f64;
+        let approx = fast_sin_approx(x);
+        assert!(approx < 0.0, "expected sin(-2.0) approximation to be negative, got {}", approx);
+    }
+
+    #[test]
+    fn fast_trig_approx_stays_bounded_for_large_inputs() {
+        let samples = [10_000.0_f64, -10_000.0_f64, 100_000.0_f64, -100_000.0_f64];
+        for &x in &samples {
+            let s = fast_sin_approx(x);
+            let c = fast_cos_approx(x);
+            assert!(
+                s.is_finite() && c.is_finite(),
+                "expected finite fast trig outputs for x={}, got sin={} cos={}",
+                x,
+                s,
+                c
+            );
+            assert!(
+                (s - x.sin()).abs() < 5e-3,
+                "sin approximation drift too large for x={}: approx={} exact={}",
+                x,
+                s,
+                x.sin()
+            );
+            assert!(
+                (c - x.cos()).abs() < 5e-3,
+                "cos approximation drift too large for x={}: approx={} exact={}",
+                x,
+                c,
+                x.cos()
+            );
+        }
     }
 
     #[test]

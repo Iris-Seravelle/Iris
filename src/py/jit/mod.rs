@@ -29,12 +29,14 @@ pub(crate) mod simd;
 
 // re-export helpers for convenience within this module
 use crate::py::jit::codegen::{
+    compile_jit_quantum_variant,
     compile_jit_quantum,
     compile_jit_with_return_type,
     execute_registered_jit,
     lookup_jit,
     quantum_has_seed_hint,
     quantum_profile_snapshot,
+    quantum_seed_preferred_index,
     register_jit,
     register_quantum_jit,
     register_named_jit,
@@ -951,9 +953,10 @@ fn register_offload(
                 };
 
                 let compile_single_quantum = || {
+                    let preferred_variant = quantum_seed_preferred_index(key).unwrap_or(0);
                     let started = Instant::now();
                     let maybe_entry = match catch_unwind(AssertUnwindSafe(|| {
-                        compile_jit_with_return_type(&expr, &args, return_type)
+                        compile_jit_quantum_variant(&expr, &args, return_type, preferred_variant)
                     })) {
                         Ok(entry) => entry,
                         Err(payload) => {
@@ -973,9 +976,51 @@ fn register_offload(
                         }
                         register_jit(key, entry.clone());
                         register_quantum_jit(key, vec![entry]);
-                        jit_log(|| format!("[Iris][jit] warm-seeded single-variant compile for ptr={}", key));
+                        jit_log(|| {
+                            format!(
+                                "[Iris][jit] warm-seeded single-variant compile for ptr={} variant={}",
+                                key, preferred_variant
+                            )
+                        });
                     } else {
                         jit_log(|| format!("[Iris][jit] failed warm-seeded single-variant compile: {}", expr));
+                        compile_single();
+                    }
+                };
+
+                let compile_budget_gated_quantum = || {
+                    let started = Instant::now();
+                    let entries = match catch_unwind(AssertUnwindSafe(|| {
+                        let mut partial = Vec::new();
+                        if let Some(auto) = compile_jit_quantum_variant(&expr, &args, return_type, 0) {
+                            partial.push(auto);
+                        }
+                        if let Some(scalar) = compile_jit_quantum_variant(&expr, &args, return_type, 1) {
+                            partial.push(scalar);
+                        }
+                        partial
+                    })) {
+                        Ok(entries) => entries,
+                        Err(payload) => {
+                            let msg = panic_payload_to_string(payload);
+                            jit_log(|| format!("[Iris][jit] panic while compiling reduced quantum variants '{}': {}", expr, msg));
+                            Vec::new()
+                        }
+                    };
+
+                    let now = now_ns();
+                    let elapsed = started.elapsed().as_nanos() as u64;
+                    let success = !entries.is_empty();
+                    record_quantum_compile_attempt(key, now, elapsed, success);
+
+                    if success {
+                        if let Some(name) = func_name.as_deref() {
+                            register_named_jit(name, entries[0].clone());
+                        }
+                        register_quantum_jit(key, entries);
+                        jit_log(|| format!("[Iris][jit] compiled reduced quantum variants for ptr={}", key));
+                    } else {
+                        jit_log(|| format!("[Iris][jit] failed reduced quantum compile: {}", expr));
                         compile_single();
                     }
                 };
@@ -1013,7 +1058,7 @@ fn register_offload(
                             }
                         } else {
                             jit_log(|| format!("[Iris][jit] quantum compile gated by cooldown/budget for ptr={}", key));
-                            compile_single();
+                            compile_budget_gated_quantum();
                         }
                     }
                 } else {
