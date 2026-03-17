@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::info;
+
 use crate::py::jit::codegen::JitReturnType;
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -188,7 +190,8 @@ where
         }
     }
 
-    eprintln!("{}", msg());
+    // Use `tracing` when available; falls back to stderr if no subscriber is set.
+    info!(target: "iris::jit", "{}", msg());
 }
 
 pub(crate) fn quantum_speculation_enabled() -> bool {

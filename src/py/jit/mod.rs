@@ -38,8 +38,6 @@ pub(crate) use crate::py::jit::config::{
     quantum_speculation_threshold_ns,
     quantum_stability_min_runs,
     quantum_stability_min_score,
-    quantum_variant_failure_limit,
-    quantum_variant_promotion_min_runs,
     set_jit_logging_env_var,
     set_jit_logging_override,
     set_quantum_speculation_env_var,
