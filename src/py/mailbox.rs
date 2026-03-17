@@ -97,10 +97,10 @@ impl PyMailbox {
                     let fut = async {
                         let mut guard = rx.lock().await;
                         guard
-                        .selective_recv(|msg| {
-                            Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
-                        })
-                        .await
+                            .selective_recv(|msg| {
+                                Python::with_gil(|py| run_python_matcher(py, &matcher, msg))
+                            })
+                            .await
                     };
                     tokio::time::timeout(actual_wait, fut).await
                 })

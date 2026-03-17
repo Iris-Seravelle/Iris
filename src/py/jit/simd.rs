@@ -160,7 +160,10 @@ pub(crate) fn auto_vectorization_plan() -> SimdPlan {
 }
 
 pub(crate) fn apply_cranelift_simd_flags(flag_builder: &mut settings::Builder, plan: SimdPlan) {
-    let _ = flag_builder.set("enable_simd", if plan.auto_vectorize { "true" } else { "false" });
+    let _ = flag_builder.set(
+        "enable_simd",
+        if plan.auto_vectorize { "true" } else { "false" },
+    );
 }
 
 pub(crate) fn simd_enabled_from_env() -> bool {

@@ -187,7 +187,7 @@ impl Supervisor {
                     .map(|kv| (*kv.key(), kv.value().clone()))
                     .collect();
 
-                // Mark the entire group as restarting to prevent cascaded exit signals 
+                // Mark the entire group as restarting to prevent cascaded exit signals
                 // from spawning redundant RestartAll waves.
                 for (p, _) in &all {
                     restarting.insert(*p);
@@ -212,7 +212,7 @@ impl Supervisor {
                                     // Atomic swap: insert the new PID, then clean up the old one.
                                     children_clone.insert(new_pid, s.clone());
                                     children_clone.remove(&orig_pid);
-                                    
+
                                     if let Some((_, v)) = links_clone.remove(&orig_pid) {
                                         for other in v {
                                             if let Some(mut entry) = links_clone.get_mut(&other) {
@@ -228,14 +228,15 @@ impl Supervisor {
                                     {
                                         let mut guard = errors_clone.lock().unwrap();
                                         guard.push(err.clone());
-                                    } 
-                                    
+                                    }
+
                                     if attempts >= max_attempts {
                                         tracing::error!("[supervisor] child permanently dropped after exhausting retries (RestartAll) err={}", err);
                                         children_clone.remove(&orig_pid);
                                         if let Some((_, v)) = links_clone.remove(&orig_pid) {
                                             for other in v {
-                                                if let Some(mut entry) = links_clone.get_mut(&other) {
+                                                if let Some(mut entry) = links_clone.get_mut(&other)
+                                                {
                                                     entry.retain(|&p| p != orig_pid);
                                                 }
                                             }
@@ -243,8 +244,11 @@ impl Supervisor {
                                         restarting_clone.remove(&orig_pid);
                                         break;
                                     }
-                                    
-                                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        backoff_ms,
+                                    ))
+                                    .await;
                                     backoff_ms = backoff_ms.saturating_mul(2);
                                 }
                             }
@@ -286,8 +290,8 @@ impl Supervisor {
                                 {
                                     let mut guard = errors_clone.lock().unwrap();
                                     guard.push(err.clone());
-                                } 
-                                
+                                }
+
                                 if attempts >= max_attempts {
                                     tracing::error!("[supervisor] child permanently dropped after exhausting retries (RestartOne) err={}", err);
                                     children_clone.remove(&pid);
@@ -301,8 +305,9 @@ impl Supervisor {
                                     restarting_clone.remove(&pid);
                                     break;
                                 }
-                                
-                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
                                 backoff_ms = backoff_ms.saturating_mul(2);
                             }
                         }

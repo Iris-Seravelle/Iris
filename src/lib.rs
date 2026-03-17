@@ -21,11 +21,11 @@ pub mod node;
 use crate::pid::Pid;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::time::Duration;
 
@@ -43,9 +43,9 @@ struct VirtualActorSpec {
 /// A global, multi-threaded Tokio runtime shared by all Iris instances.
 static RUNTIME: Lazy<TokioRuntime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .expect("Failed to create Iris Tokio Runtime")
+        .enable_all()
+        .build()
+        .expect("Failed to create Iris Tokio Runtime")
 });
 
 /// Lightweight runtime for spawning actors and managing distributed nodes.
@@ -219,7 +219,7 @@ impl Runtime {
     pub fn get_release_gil_limits(&self) -> (usize, usize) {
         (
             *self.release_gil_max_threads.lock().unwrap(),
-         *self.gil_pool_size.lock().unwrap(),
+            *self.gil_pool_size.lock().unwrap(),
         )
     }
 
@@ -315,8 +315,8 @@ impl Runtime {
     /// Create a path-scoped supervisor for `path`.
     pub fn create_path_supervisor(&self, path: &str) {
         self.path_supervisors
-        .entry(path.to_string())
-        .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
+            .entry(path.to_string())
+            .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
     }
 
     /// Remove a path-scoped supervisor if present.
@@ -410,10 +410,7 @@ impl Runtime {
 
         // next, check the reverse index so we can return an existing proxy
         // without spawning a new actor.
-        if let Some(entry) = self
-            .proxy_by_remote
-            .get(&(addr.to_string(), remote_pid))
-        {
+        if let Some(entry) = self.proxy_by_remote.get(&(addr.to_string(), remote_pid)) {
             return *entry.value();
         }
 
@@ -434,7 +431,9 @@ impl Runtime {
                         // creating a second proxy for the same target.  send
                         // directly through the network manager.
                         let manager = network::NetworkManager::new(Arc::new(rt_inner.clone()));
-                        let _ = manager.send_remote(&addr_inner, remote_copy, bytes.clone()).await;
+                        let _ = manager
+                            .send_remote(&addr_inner, remote_copy, bytes.clone())
+                            .await;
                     }
                 }
             }
@@ -545,9 +544,8 @@ impl Runtime {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
 
-        let erased: ErasedMessageHandler = Arc::new(move |msg: mailbox::Message| {
-            Box::pin(handler(msg))
-        });
+        let erased: ErasedMessageHandler =
+            Arc::new(move |msg: mailbox::Message| Box::pin(handler(msg)));
 
         self.virtual_specs.insert(
             pid,
@@ -688,7 +686,8 @@ impl Runtime {
                         reason: reason.clone(),
                         metadata: meta.clone(),
                     };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -719,10 +718,7 @@ impl Runtime {
                     self.behavior_versions.insert(pid, 2);
                 }
 
-                let mut history = self
-                    .behavior_history
-                    .entry(pid)
-                    .or_insert_with(Vec::new);
+                let mut history = self.behavior_history.entry(pid).or_insert_with(Vec::new);
                 history.push(handler_ptr);
                 if history.len() > MAX_BEHAVIOR_HISTORY {
                     let overflow = history.len() - MAX_BEHAVIOR_HISTORY;
@@ -773,15 +769,18 @@ impl Runtime {
             .send_system(mailbox::SystemMessage::HotSwap(target_ptr))
             .map_err(|_| "rollback failed: could not send hot swap".to_string())?;
 
-        let next = self.behavior_version(pid).saturating_sub(steps as u64).max(1);
+        let next = self
+            .behavior_version(pid)
+            .saturating_sub(steps as u64)
+            .max(1);
         self.behavior_versions.insert(pid, next);
         Ok(next)
     }
 
     pub fn spawn_actor<H, Fut>(&self, handler: H) -> Pid
     where
-    H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -801,13 +800,19 @@ impl Runtime {
             // Determine exit reason and metadata
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                      Err(e) => {
-                          if e.is_panic() {
-                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                          } else {
-                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                          }
-                      }
+                Err(e) => {
+                    if e.is_panic() {
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    } else {
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    }
+                }
             };
 
             mailboxes2.remove(&pid);
@@ -827,8 +832,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -848,7 +858,8 @@ impl Runtime {
         self.mailboxes.insert(pid, tx.clone());
         // track capacity and default policy
         self.bounded_capacity.insert(pid, capacity);
-        self.overflow_policy.insert(pid, mailbox::OverflowPolicy::DropNew);
+        self.overflow_policy
+            .insert(pid, mailbox::OverflowPolicy::DropNew);
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -865,9 +876,15 @@ impl Runtime {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
                 Err(e) => {
                     if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
                     } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
                     }
                 }
             };
@@ -889,8 +906,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -899,7 +921,12 @@ impl Runtime {
     }
 
     /// Bounded variant of spawn_actor_with_budget.
-    pub fn spawn_actor_with_budget_bounded<H, Fut>(&self, handler: H, _budget: usize, capacity: usize) -> Pid
+    pub fn spawn_actor_with_budget_bounded<H, Fut>(
+        &self,
+        handler: H,
+        _budget: usize,
+        capacity: usize,
+    ) -> Pid
     where
         H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -910,7 +937,8 @@ impl Runtime {
         self.mailboxes.insert(pid, tx.clone());
         // track capacity and default overflow policy
         self.bounded_capacity.insert(pid, capacity);
-        self.overflow_policy.insert(pid, mailbox::OverflowPolicy::DropNew);
+        self.overflow_policy
+            .insert(pid, mailbox::OverflowPolicy::DropNew);
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -927,9 +955,15 @@ impl Runtime {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
                 Err(e) => {
                     if e.is_panic() {
-                        (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
                     } else {
-                        (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
                     }
                 }
             };
@@ -949,8 +983,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -960,8 +999,8 @@ impl Runtime {
 
     pub fn spawn_actor_with_budget<H, Fut>(&self, handler: H, _budget: usize) -> Pid
     where
-    H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+        H: FnOnce(mailbox::MailboxReceiver) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -981,13 +1020,19 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                      Err(e) => {
-                          if e.is_panic() {
-                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                          } else {
-                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                          }
-                      }
+                Err(e) => {
+                    if e.is_panic() {
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    } else {
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    }
+                }
             };
 
             mailboxes2.remove(&pid);
@@ -1005,8 +1050,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -1016,8 +1066,8 @@ impl Runtime {
 
     pub fn spawn_handler_with_budget<H, Fut>(&self, handler: H, budget: usize) -> Pid
     where
-    H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+        H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
@@ -1062,13 +1112,19 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                      Err(e) => {
-                          if e.is_panic() {
-                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                          } else {
-                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                          }
-                      }
+                Err(e) => {
+                    if e.is_panic() {
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    } else {
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    }
+                }
             };
 
             mailboxes2.remove(&pid);
@@ -1087,8 +1143,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -1097,7 +1158,12 @@ impl Runtime {
     }
 
     /// Spawn a new message-handler actor tied to `parent`.
-    pub fn spawn_child_handler_with_budget<H, Fut>(&self, parent: Pid, handler: H, budget: usize) -> Pid
+    pub fn spawn_child_handler_with_budget<H, Fut>(
+        &self,
+        parent: Pid,
+        handler: H,
+        budget: usize,
+    ) -> Pid
     where
         H: Fn(mailbox::Message) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -1150,13 +1216,19 @@ impl Runtime {
 
             let (reason, meta) = match res {
                 Ok(_) => (crate::mailbox::ExitReason::Normal, None),
-                      Err(e) => {
-                          if e.is_panic() {
-                              (crate::mailbox::ExitReason::Panic, Some(format!("join_error: {:?}", e)))
-                          } else {
-                              (crate::mailbox::ExitReason::Other("join_error".to_string()), Some(format!("join_error: {:?}", e)))
-                          }
-                      }
+                Err(e) => {
+                    if e.is_panic() {
+                        (
+                            crate::mailbox::ExitReason::Panic,
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    } else {
+                        (
+                            crate::mailbox::ExitReason::Other("join_error".to_string()),
+                            Some(format!("join_error: {:?}", e)),
+                        )
+                    }
+                }
             };
 
             mailboxes2.remove(&pid);
@@ -1174,8 +1246,13 @@ impl Runtime {
             let linked = supervisor2.linked_pids(pid);
             for lp in linked {
                 if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo { from: pid, reason: reason.clone(), metadata: meta.clone() };
-                    let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+                    let info = crate::mailbox::ExitInfo {
+                        from: pid,
+                        reason: reason.clone(),
+                        metadata: meta.clone(),
+                    };
+                    let _ =
+                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
                 }
             }
         });
@@ -1185,8 +1262,8 @@ impl Runtime {
 
     pub fn get_observed_messages(&self, pid: Pid) -> Option<Vec<mailbox::Message>> {
         self.observers
-        .get(&pid)
-        .map(|entry| entry.value().lock().unwrap().clone())
+            .get(&pid)
+            .map(|entry| entry.value().lock().unwrap().clone())
     }
 
     /// Remove and return a single observed message matching the predicate.
@@ -1197,7 +1274,7 @@ impl Runtime {
         mut matcher: F,
     ) -> Option<mailbox::Message>
     where
-    F: FnMut(&mailbox::Message) -> bool,
+        F: FnMut(&mailbox::Message) -> bool,
     {
         if let Some(entry) = self.observers.get(&pid) {
             let mut guard = entry.value().lock().unwrap();
@@ -1344,7 +1421,7 @@ impl Runtime {
         &self,
         pid: Pid,
         factory: Arc<dyn Fn() -> Result<Pid, String> + Send + Sync>,
-                     strategy: supervisor::RestartStrategy,
+        strategy: supervisor::RestartStrategy,
     ) {
         let spec = supervisor::ChildSpec { factory, strategy };
         self.supervisor.add_child(pid, spec);
@@ -1397,13 +1474,13 @@ impl Runtime {
         path: &str,
         pid: Pid,
         factory: Arc<dyn Fn() -> Result<Pid, String> + Send + Sync>,
-                                       strategy: supervisor::RestartStrategy,
+        strategy: supervisor::RestartStrategy,
     ) {
         let spec = supervisor::ChildSpec { factory, strategy };
         let entry = self
-        .path_supervisors
-        .entry(path.to_string())
-        .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
+            .path_supervisors
+            .entry(path.to_string())
+            .or_insert_with(|| Arc::new(supervisor::Supervisor::new()));
         entry.add_child(pid, spec);
     }
 
@@ -1477,9 +1554,13 @@ mod tests {
 
         let pid = rt.spawn_actor_bounded(handler, 1);
         // first send success
-        assert!(rt.send(pid, mailbox::Message::User(b"x".to_vec().into())).is_ok());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"x".to_vec().into()))
+            .is_ok());
         // second send should be dropped (error returned)
-        assert!(rt.send(pid, mailbox::Message::User(b"y".to_vec().into())).is_err());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"y".to_vec().into()))
+            .is_err());
 
         // now tell the actor it may proceed and consume the queued message
         let _ = start_tx.send(());
@@ -1519,7 +1600,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let payload = bytes::Bytes::from_static(b"payload");
-        let err = rt.send_user(pid, payload.clone()).expect_err("send should fail for stopped pid");
+        let err = rt
+            .send_user(pid, payload.clone())
+            .expect_err("send should fail for stopped pid");
         assert_eq!(err, payload);
     }
 
@@ -1676,7 +1759,10 @@ mod tests {
             None,
         );
 
-        assert!(rt.mailbox_size(pid).is_none(), "virtual actor should be inactive initially");
+        assert!(
+            rt.mailbox_size(pid).is_none(),
+            "virtual actor should be inactive initially"
+        );
 
         assert!(rt
             .send(pid, mailbox::Message::User(b"lazy".to_vec().into()))
@@ -1752,7 +1838,9 @@ mod tests {
         sleep(Duration::from_millis(20)).await;
 
         assert_eq!(rt.behavior_version(pid), 3);
-        let rolled = rt.rollback_behavior(pid, 1).expect("rollback should succeed");
+        let rolled = rt
+            .rollback_behavior(pid, 1)
+            .expect("rollback should succeed");
         assert_eq!(rolled, 2);
         assert_eq!(rt.behavior_version(pid), 2);
 
@@ -1787,7 +1875,9 @@ mod tests {
         rt.hot_swap(pid, 0xBEEF);
         sleep(Duration::from_millis(20)).await;
 
-        let err = rt.rollback_behavior(pid, 1).expect_err("rollback should fail");
+        let err = rt
+            .rollback_behavior(pid, 1)
+            .expect_err("rollback should fail");
         assert!(err.contains("history"));
     }
 }

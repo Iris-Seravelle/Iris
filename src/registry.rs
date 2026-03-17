@@ -46,7 +46,11 @@ impl NameRegistry {
             prefix.to_string()
         };
 
-        let matcher = if norm.is_empty() { None } else { Some(format!("{}/", norm)) };
+        let matcher = if norm.is_empty() {
+            None
+        } else {
+            Some(format!("{}/", norm))
+        };
 
         for r in self.names.iter() {
             let key = r.key();
@@ -74,9 +78,9 @@ impl NameRegistry {
             prefix.to_string()
         };
 
-        let matcher = if norm.is_empty() { 
+        let matcher = if norm.is_empty() {
             String::new()
-        } else { 
+        } else {
             format!("{}/", norm)
         };
 
@@ -93,7 +97,11 @@ impl NameRegistry {
                 out.push((key.clone(), *r.value()));
             } else {
                 // root: direct children are top-level entries without additional '/'
-                let tail = if key.starts_with('/') { &key[1..] } else { &key[..] };
+                let tail = if key.starts_with('/') {
+                    &key[1..]
+                } else {
+                    &key[..]
+                };
                 if tail.contains('/') {
                     continue;
                 }

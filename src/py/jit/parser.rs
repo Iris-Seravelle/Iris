@@ -1,7 +1,6 @@
 // src/py/jit/parser.rs
 //! Expression AST and Pratt parser used by the JIT compiler.
 
-
 /// Tokenizes a short expression string into individual symbols.
 pub fn tokenize(expr: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -207,7 +206,11 @@ impl Parser {
         // Python-style comparison chaining:
         // a < b < c  ==>  (a < b) and (b < c)
         let (first_op, first_rhs) = chain[0].clone();
-        let mut result = Expr::BinOp(Box::new(node.clone()), first_op, Box::new(first_rhs.clone()));
+        let mut result = Expr::BinOp(
+            Box::new(node.clone()),
+            first_op,
+            Box::new(first_rhs.clone()),
+        );
         let mut prev_rhs = first_rhs;
         for (op, rhs) in chain.into_iter().skip(1) {
             let cmp = Expr::BinOp(Box::new(prev_rhs.clone()), op, Box::new(rhs.clone()));
@@ -301,7 +304,9 @@ impl Parser {
                 if peek == "(" {
                     // function call
                     self.next(); // consume '('
-                    if (tok == "sum" || tok == "any" || tok == "all") && !matches!(self.peek(), Some(")")) {
+                    if (tok == "sum" || tok == "any" || tok == "all")
+                        && !matches!(self.peek(), Some(")"))
+                    {
                         let body_expr = self.parse_expr()?;
                         if matches!(self.peek(), Some("for")) {
                             self.next(); // for
@@ -336,7 +341,7 @@ impl Parser {
                                     return None;
                                 }
                                 self.next(); // inner ')'
-                                // optional predicate after range
+                                             // optional predicate after range
                                 let mut pred: Option<Box<Expr>> = None;
                                 if matches!(self.peek(), Some("if")) {
                                     self.next();
@@ -473,7 +478,7 @@ mod tests {
         // expecting SumFor node
         match ast {
             Expr::Call(_, _) => panic!("generator parsed as regular call"),
-            Expr::SumFor {..} => {}
+            Expr::SumFor { .. } => {}
             other => panic!("unexpected AST: {:?}", other),
         }
     }

@@ -208,7 +208,10 @@ def cb(msg, msgs=msgs):
     let accepted = send_results.iter().filter(|ok| **ok).count();
     let dropped = send_results.len() - accepted;
     assert!(accepted > 0, "expected at least one accepted message");
-    assert!(dropped > 0, "expected drop-new to reject some messages under pressure");
+    assert!(
+        dropped > 0,
+        "expected drop-new to reject some messages under pressure"
+    );
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -236,7 +239,10 @@ def cb(msg, msgs=msgs):
             .unwrap()
             .len()
     });
-    assert_eq!(final_len, accepted, "processed count should match accepted sends");
+    assert_eq!(
+        final_len, accepted,
+        "processed count should match accepted sends"
+    );
 }
 
 // ---------- structured concurrency tests ----------
@@ -273,7 +279,8 @@ async fn py_structured_concurrency_normal_and_crash() {
     };
 
     // normal-exit scenario
-    let (_parent_list, parent_cb): (pyo3::PyObject, pyo3::PyObject) = Python::with_gil(|py| make_handler(py));
+    let (_parent_list, parent_cb): (pyo3::PyObject, pyo3::PyObject) =
+        Python::with_gil(|py| make_handler(py));
     let parent_pid: u64 = Python::with_gil(|py| {
         rt_py
             .as_ref(py)
@@ -296,7 +303,10 @@ async fn py_structured_concurrency_normal_and_crash() {
     let child_pid: u64 = Python::with_gil(|py| {
         rt_py
             .as_ref(py)
-            .call_method1("spawn_child", (parent_pid, parent_cb.clone(), 1usize, false))
+            .call_method1(
+                "spawn_child",
+                (parent_pid, parent_cb.clone(), 1usize, false),
+            )
             .unwrap()
             .extract()
             .unwrap()
@@ -397,45 +407,49 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
         rt_obj.into_py(py)
     });
 
-    let (parent_pid, _worker_pids, lst_obj): (u64, Vec<u64>, pyo3::PyObject) = Python::with_gil(|py| {
-        let rt = rt_py.as_ref(py);
+    let (parent_pid, _worker_pids, lst_obj): (u64, Vec<u64>, pyo3::PyObject) =
+        Python::with_gil(|py| {
+            let rt = rt_py.as_ref(py);
 
-        let parent_pid: u64 = rt
-            .call_method1("spawn_observed_handler", (1usize,))
-            .unwrap()
-            .extract()
-            .unwrap();
-
-        let lst = pyo3::types::PyList::empty(py);
-        let locals = pyo3::types::PyDict::new(py);
-        locals.set_item("lst", lst).unwrap();
-        py.run(
-            "def cb(b):\n    lst.append(bytes(b))",
-            Some(locals),
-            Some(locals),
-        )
-        .unwrap();
-        let cb: pyo3::PyObject = locals.get_item("cb").unwrap().into();
-
-        let worker_pids: Vec<u64> = rt
-            .call_method1("spawn_child_pool", (parent_pid, cb, 4usize, 64usize, false))
-            .unwrap()
-            .extract()
-            .unwrap();
-        assert_eq!(worker_pids.len(), 4);
-
-        for (i, pid) in worker_pids.iter().enumerate() {
-            let payload = format!("m{}", i);
-            let ok: bool = rt
-                .call_method1("send", (*pid, pyo3::types::PyBytes::new(py, payload.as_bytes())))
+            let parent_pid: u64 = rt
+                .call_method1("spawn_observed_handler", (1usize,))
                 .unwrap()
                 .extract()
                 .unwrap();
-            assert!(ok);
-        }
 
-        (parent_pid, worker_pids, lst.into_py(py))
-    });
+            let lst = pyo3::types::PyList::empty(py);
+            let locals = pyo3::types::PyDict::new(py);
+            locals.set_item("lst", lst).unwrap();
+            py.run(
+                "def cb(b):\n    lst.append(bytes(b))",
+                Some(locals),
+                Some(locals),
+            )
+            .unwrap();
+            let cb: pyo3::PyObject = locals.get_item("cb").unwrap().into();
+
+            let worker_pids: Vec<u64> = rt
+                .call_method1("spawn_child_pool", (parent_pid, cb, 4usize, 64usize, false))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(worker_pids.len(), 4);
+
+            for (i, pid) in worker_pids.iter().enumerate() {
+                let payload = format!("m{}", i);
+                let ok: bool = rt
+                    .call_method1(
+                        "send",
+                        (*pid, pyo3::types::PyBytes::new(py, payload.as_bytes())),
+                    )
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert!(ok);
+            }
+
+            (parent_pid, worker_pids, lst.into_py(py))
+        });
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -475,13 +489,20 @@ async fn py_virtual_actor_activates_on_first_send() {
         let locals = pyo3::types::PyDict::new(py);
         locals.set_item("lst", list_obj.as_ref(py)).unwrap();
         let handler = py
-            .eval("lambda m, lst=lst: lst.append(bytes(m))", None, Some(locals))
+            .eval(
+                "lambda m, lst=lst: lst.append(bytes(m))",
+                None,
+                Some(locals),
+            )
             .unwrap();
 
-        rt.call_method1("spawn_virtual_py_handler", (handler, 16usize, Option::<u64>::None))
-            .unwrap()
-            .extract()
-            .unwrap()
+        rt.call_method1(
+            "spawn_virtual_py_handler",
+            (handler, 16usize, Option::<u64>::None),
+        )
+        .unwrap()
+        .extract()
+        .unwrap()
     });
 
     let sent: bool = Python::with_gil(|py| {
@@ -548,4 +569,3 @@ async fn py_virtual_actor_idle_timeout() {
     });
     assert!(!alive, "virtual actor should stop after idle timeout");
 }
-

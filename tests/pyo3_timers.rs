@@ -9,7 +9,12 @@ async fn test_send_after_delivers_message() {
     // create runtime, spawn actor and schedule timer while holding the GIL
     let (rt_obj, pid): (PyObject, u64) = Python::with_gil(|py| {
         let module = iris::py::make_module(py).unwrap();
-        let rt = module.as_ref(py).getattr("PyRuntime").unwrap().call0().unwrap();
+        let rt = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .unwrap()
+            .call0()
+            .unwrap();
 
         // Spawn an observed handler to collect messages
         let pid: u64 = rt

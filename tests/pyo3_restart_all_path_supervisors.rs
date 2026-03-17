@@ -13,18 +13,25 @@ async fn test_path_supervisor_restart_all() {
 
         // spawn two observed actors under distinct child paths but same prefix
         let pid1: u64 = rt
-            .call_method1("spawn_with_path_observed", (10usize, "/svc/restart/all/one"))
+            .call_method1(
+                "spawn_with_path_observed",
+                (10usize, "/svc/restart/all/one"),
+            )
             .unwrap()
             .extract()
             .unwrap();
 
         let pid2: u64 = rt
-            .call_method1("spawn_with_path_observed", (10usize, "/svc/restart/all/two"))
+            .call_method1(
+                "spawn_with_path_observed",
+                (10usize, "/svc/restart/all/two"),
+            )
             .unwrap()
             .extract()
             .unwrap();
 
-        rt.call_method1("create_path_supervisor", ("/svc/restart/all",)).unwrap();
+        rt.call_method1("create_path_supervisor", ("/svc/restart/all",))
+            .unwrap();
 
         // factories that spawn new observed actors under the same child paths
         let locals = pyo3::types::PyDict::new(py);
@@ -82,7 +89,10 @@ def f2():
             });
         }
 
-        assert!(seen_ok, "supervisor did not restart children within timeout");
+        assert!(
+            seen_ok,
+            "supervisor did not restart children within timeout"
+        );
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -29,14 +29,19 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
         }
         Message::System(sys) => {
             let (type_name, target_pid) = match sys {
-                SystemMessage::Exit(info) => ("EXIT", Some(info.from as i64), match info.reason {
-                    crate::mailbox::ExitReason::Normal => Some("normal".to_string()),
-                    crate::mailbox::ExitReason::Panic => Some("panic".to_string()),
-                    crate::mailbox::ExitReason::Timeout => Some("timeout".to_string()),
-                    crate::mailbox::ExitReason::Killed => Some("killed".to_string()),
-                    crate::mailbox::ExitReason::Oom => Some("oom".to_string()),
-                    crate::mailbox::ExitReason::Other(ref s) => Some(s.clone()),
-                }, info.metadata.clone()),
+                SystemMessage::Exit(info) => (
+                    "EXIT",
+                    Some(info.from as i64),
+                    match info.reason {
+                        crate::mailbox::ExitReason::Normal => Some("normal".to_string()),
+                        crate::mailbox::ExitReason::Panic => Some("panic".to_string()),
+                        crate::mailbox::ExitReason::Timeout => Some("timeout".to_string()),
+                        crate::mailbox::ExitReason::Killed => Some("killed".to_string()),
+                        crate::mailbox::ExitReason::Oom => Some("oom".to_string()),
+                        crate::mailbox::ExitReason::Other(ref s) => Some(s.clone()),
+                    },
+                    info.metadata.clone(),
+                ),
                 SystemMessage::HotSwap(_) => ("HOT_SWAP", None),
                 SystemMessage::Ping => ("PING", None),
                 SystemMessage::Pong => ("PONG", None),
@@ -236,7 +241,12 @@ impl NodeRuntime {
     /// receives messages just like `spawn` and will be invoked each time a
     /// user payload arrives. If the queue is full, additional sends will fail.
     #[napi]
-    pub fn spawn_bounded(&self, handler: JsFunction, capacity: u32, budget: Option<u32>) -> Result<i64> {
+    pub fn spawn_bounded(
+        &self,
+        handler: JsFunction,
+        capacity: u32,
+        budget: Option<u32>,
+    ) -> Result<i64> {
         let budget = budget.unwrap_or(100) as usize;
         let cap = capacity as usize;
 
@@ -279,7 +289,12 @@ impl NodeRuntime {
     }
 
     #[napi]
-    pub fn spawn_child(&self, parent: i64, handler: JsFunction, budget: Option<u32>) -> Result<i64> {
+    pub fn spawn_child(
+        &self,
+        parent: i64,
+        handler: JsFunction,
+        budget: Option<u32>,
+    ) -> Result<i64> {
         let budget = budget.unwrap_or(100) as usize;
 
         let tsfn: ThreadsafeFunction<Message, ErrorStrategy::Fatal> = handler
@@ -294,15 +309,15 @@ impl NodeRuntime {
             let b = behavior.clone();
             async move {
                 match msg {
-                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
-                        unsafe {
-                            let new_tsfn_box = Box::from_raw(
-                                ptr as *mut ThreadsafeFunction<Message, ErrorStrategy::Fatal>,
-                            );
-                            let mut guard = b.write();
-                            *guard = *new_tsfn_box;
-                        }
-                    }
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(
+                        ptr,
+                    )) => unsafe {
+                        let new_tsfn_box = Box::from_raw(
+                            ptr as *mut ThreadsafeFunction<Message, ErrorStrategy::Fatal>,
+                        );
+                        let mut guard = b.write();
+                        *guard = *new_tsfn_box;
+                    },
                     crate::mailbox::Message::User(bytes) => {
                         let guard = b.read();
                         guard.call(msg, ThreadsafeFunctionCallMode::NonBlocking);
@@ -319,15 +334,20 @@ impl NodeRuntime {
     }
 
     #[napi]
-    pub fn spawn_child_with_mailbox(&self, parent: i64, handler: JsFunction, budget: Option<u32>) -> Result<i64> {
+    pub fn spawn_child_with_mailbox(
+        &self,
+        parent: i64,
+        handler: JsFunction,
+        budget: Option<u32>,
+    ) -> Result<i64> {
         let budget = budget.unwrap_or(100) as usize;
 
         let tsfn: ThreadsafeFunction<JsMailbox, ErrorStrategy::Fatal> =
             handler.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
 
-        let pid = self
-            .inner
-            .spawn_child_with_budget(parent as u64, move |rx| async move {
+        let pid = self.inner.spawn_child_with_budget(
+            parent as u64,
+            move |rx| async move {
                 let mailbox = JsMailbox {
                     inner: Arc::new(Mutex::new(rx)),
                 };
@@ -340,7 +360,8 @@ impl NodeRuntime {
                     }
                 }
             },
-            budget);
+            budget,
+        );
 
         Ok(pid as i64)
     }

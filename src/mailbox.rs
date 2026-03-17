@@ -3,7 +3,10 @@
 
 use bytes::Bytes;
 use std::collections::VecDeque;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::mpsc;
 
 /// Underlying sender type for user messages; either unbounded or bounded.
@@ -96,7 +99,11 @@ pub fn channel() -> (MailboxSender, MailboxReceiver) {
     let (tx_sys, rx_sys) = mpsc::unbounded_channel();
     let counter = Arc::new(AtomicUsize::new(0));
     (
-        MailboxSender { tx_user: UserSender::Unbounded(tx_user), tx_sys, counter: counter.clone() },
+        MailboxSender {
+            tx_user: UserSender::Unbounded(tx_user),
+            tx_sys,
+            counter: counter.clone(),
+        },
         MailboxReceiver {
             rx_user: UserReceiver::Unbounded(rx_user),
             rx_sys,
@@ -113,7 +120,11 @@ pub fn bounded_channel(capacity: usize) -> (MailboxSender, MailboxReceiver) {
     let (tx_sys, rx_sys) = mpsc::unbounded_channel();
     let counter = Arc::new(AtomicUsize::new(0));
     (
-        MailboxSender { tx_user: UserSender::Bounded(tx_user), tx_sys, counter: counter.clone() },
+        MailboxSender {
+            tx_user: UserSender::Bounded(tx_user),
+            tx_sys,
+            counter: counter.clone(),
+        },
         MailboxReceiver {
             rx_user: UserReceiver::Bounded(rx_user),
             rx_sys,
@@ -145,12 +156,10 @@ impl MailboxSender {
                 }
                 res
             }
-            Message::System(s) => {
-                match self.tx_sys.send(s) {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(Message::System(e.0)),
-                }
-            }
+            Message::System(s) => match self.tx_sys.send(s) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(Message::System(e.0)),
+            },
         }
     }
 
@@ -425,14 +434,10 @@ mod tests {
     async fn bounded_mailbox_drop_new() {
         // This test will fail until bounded mailbox is implemented.
         let (tx, mut rx) = bounded_channel(2);
-        tx.send(Message::User(Bytes::from_static(b"m1")))
-            .unwrap();
-        tx.send(Message::User(Bytes::from_static(b"m2")))
-            .unwrap();
+        tx.send(Message::User(Bytes::from_static(b"m1"))).unwrap();
+        tx.send(Message::User(Bytes::from_static(b"m2"))).unwrap();
         // third send should be rejected because capacity is 2
-        assert!(tx
-            .send(Message::User(Bytes::from_static(b"m3")))
-            .is_err());
+        assert!(tx.send(Message::User(Bytes::from_static(b"m3"))).is_err());
 
         let first = rx.recv().await.expect("first");
         let second = rx.recv().await.expect("second");

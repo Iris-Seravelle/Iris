@@ -12,8 +12,8 @@ use crate::Runtime;
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
-use pyo3::PyObject;
 use pyo3::types::PyBytes;
+use pyo3::PyObject;
 
 /// Task variants sent to dedicated or pooled GIL workers.
 #[cfg(feature = "pyo3")]
@@ -42,43 +42,39 @@ impl GilPool {
         let (tx, rx) = cb_channel::unbounded::<PoolTask>();
         for _ in 0..size {
             let rx = rx.clone();
-            std::thread::spawn(move || {
-                loop {
-                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                        break;
-                    }
-                    match rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(task) => match task {
-                            PoolTask::Execute { behavior, bytes } => {
-                                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                                    break;
-                                }
-                                Python::with_gil(|py| {
-                                    let guard = behavior.read();
-                                    let cb = guard.as_ref(py);
-                                    let pybytes = PyBytes::new(py, &bytes);
-                                    if let Err(e) = cb.call1((pybytes,)) {
-                                        eprintln!("[Iris] Python actor exception: {}", e);
-                                        e.print(py);
-                                    }
-                                });
+            std::thread::spawn(move || loop {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(task) => match task {
+                        PoolTask::Execute { behavior, bytes } => {
+                            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                break;
                             }
-                            PoolTask::HotSwap { behavior, ptr } => {
-                                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                                    break;
+                            Python::with_gil(|py| {
+                                let guard = behavior.read();
+                                let cb = guard.as_ref(py);
+                                let pybytes = PyBytes::new(py, &bytes);
+                                if let Err(e) = cb.call1((pybytes,)) {
+                                    eprintln!("[Iris] Python actor exception: {}", e);
+                                    e.print(py);
                                 }
-                                Python::with_gil(|py| unsafe {
-                                    let new_obj = PyObject::from_owned_ptr(
-                                        py,
-                                        ptr as *mut pyo3::ffi::PyObject,
-                                    );
-                                    *behavior.write() = new_obj;
-                                });
+                            });
+                        }
+                        PoolTask::HotSwap { behavior, ptr } => {
+                            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                                break;
                             }
-                        },
-                        Err(cb_channel::RecvTimeoutError::Timeout) => continue,
-                        Err(cb_channel::RecvTimeoutError::Disconnected) => break,
-                    }
+                            Python::with_gil(|py| unsafe {
+                                let new_obj =
+                                    PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                                *behavior.write() = new_obj;
+                            });
+                        }
+                    },
+                    Err(cb_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(cb_channel::RecvTimeoutError::Disconnected) => break,
                 }
             });
         }
@@ -130,46 +126,41 @@ pub(crate) fn make_release_gil_channel(
 
     let (tx, rx) = cb_channel::unbounded::<PoolTask>();
     let _b_thread = behavior.clone();
-    std::thread::spawn(move || {
-        loop {
-            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+    std::thread::spawn(move || loop {
+        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+            RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(task) => match task {
+                PoolTask::Execute { behavior, bytes } => {
+                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                        continue;
+                    }
+                    Python::with_gil(|py| {
+                        let guard = behavior.read();
+                        let cb = guard.as_ref(py);
+                        let pybytes = PyBytes::new(py, &bytes);
+                        if let Err(e) = cb.call1((pybytes,)) {
+                            eprintln!("[Iris] Python actor exception: {}", e);
+                            e.print(py);
+                        }
+                    });
+                }
+                PoolTask::HotSwap { behavior, ptr } => {
+                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                        continue;
+                    }
+                    Python::with_gil(|py| unsafe {
+                        let new_obj = PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                        *behavior.write() = new_obj;
+                    });
+                }
+            },
+            Err(cb_channel::RecvTimeoutError::Timeout) => continue,
+            Err(cb_channel::RecvTimeoutError::Disconnected) => {
                 RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
                 break;
-            }
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(task) => match task {
-                    PoolTask::Execute { behavior, bytes } => {
-                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                            continue;
-                        }
-                        Python::with_gil(|py| {
-                            let guard = behavior.read();
-                            let cb = guard.as_ref(py);
-                            let pybytes = PyBytes::new(py, &bytes);
-                            if let Err(e) = cb.call1((pybytes,)) {
-                                eprintln!("[Iris] Python actor exception: {}", e);
-                                e.print(py);
-                            }
-                        });
-                    }
-                    PoolTask::HotSwap { behavior, ptr } => {
-                        if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                            continue;
-                        }
-                        Python::with_gil(|py| unsafe {
-                            let new_obj = PyObject::from_owned_ptr(
-                                py,
-                                ptr as *mut pyo3::ffi::PyObject,
-                            );
-                            *behavior.write() = new_obj;
-                        });
-                    }
-                },
-                Err(cb_channel::RecvTimeoutError::Timeout) => continue,
-                Err(cb_channel::RecvTimeoutError::Disconnected) => {
-                    RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
-                    break;
-                }
             }
         }
     });

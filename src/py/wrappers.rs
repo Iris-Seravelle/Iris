@@ -34,8 +34,8 @@ fn version() -> &'static str {
 fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
     let id = global_registry().allocate(size);
     let (ptr, len) = global_registry()
-    .ptr_len(id)
-    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("failed to allocate"))?;
+        .ptr_len(id)
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("failed to allocate"))?;
 
     unsafe {
         let mv = pyo3::ffi::PyMemoryView_FromMemory(
@@ -53,8 +53,8 @@ fn allocate_buffer(py: Python, size: usize) -> PyResult<PyObject> {
         let boxed = Box::new(id);
         let capsule = pyo3::ffi::PyCapsule_New(
             Box::into_raw(boxed) as *mut c_void,
-                                               std::ptr::null(),
-                                               Some(capsule_destructor),
+            std::ptr::null(),
+            Some(capsule_destructor),
         );
         if capsule.is_null() {
             pyo3::ffi::Py_DecRef(mv as *mut pyo3::ffi::PyObject);

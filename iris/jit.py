@@ -291,6 +291,17 @@ def _write_metadata(path: str, doc: dict[str, Any]) -> None:
     if not payload:
         _jit_meta_log("write skipped: empty payload")
         return
+
+    # Avoid rewriting the file when the content is identical to preserve mtime.
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                if f.read() == payload:
+                    _jit_meta_log(f"write skipped: unchanged path={path}")
+                    return
+        except Exception:
+            pass
+
     try:
         with open(temp_path, "wb") as f:
             f.write(payload)
@@ -452,15 +463,8 @@ def _maybe_persist_quantum_metadata(
             existing_rows_normalized = _normalize_profile_rows(existing_rows)
             existing_shape = _profile_variant_shape(existing_rows_normalized)
             current_shape = _profile_variant_shape(normalized_rows)
-            existing_sig = hashlib.sha256(
-                _msgpack.packb(existing_rows_normalized, use_bin_type=True)
-            ).hexdigest()
-            current_sig = hashlib.sha256(
-                _msgpack.packb(normalized_rows, use_bin_type=True)
-            ).hexdigest()
             unchanged = (
                 existing_shape == current_shape
-                and existing_sig == current_sig
                 and existing_return_type == (return_type or "float")
                 and int(existing_arg_count) == len(arg_names)
             )

@@ -190,7 +190,11 @@ def handler_c(msg, results=results):
 
     Python::with_gil(|py| {
         let res: Vec<String> = results.extract(py).unwrap();
-        assert!(res.iter().any(|s| s == "B:x"), "rollback should reactivate B behavior: {:?}", res);
+        assert!(
+            res.iter().any(|s| s == "B:x"),
+            "rollback should reactivate B behavior: {:?}",
+            res
+        );
         rt.call_method1(py, "stop", (pid,)).unwrap();
     });
 }

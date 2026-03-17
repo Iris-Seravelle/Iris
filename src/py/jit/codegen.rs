@@ -9,8 +9,8 @@ use std::time::Instant;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
-use crate::py::jit::parser::Expr;
 use crate::py::jit::heuristics;
+use crate::py::jit::parser::Expr;
 use crate::py::jit::simd;
 
 // cranelift imports
@@ -126,7 +126,10 @@ enum LoweredExpr {
 
 #[derive(Clone, Debug, PartialEq)]
 enum LoweredKernel {
-    Unary { op: LoweredUnaryKernel, input: usize },
+    Unary {
+        op: LoweredUnaryKernel,
+        input: usize,
+    },
     Binary {
         op: LoweredBinaryKernel,
         lhs: usize,
@@ -164,7 +167,10 @@ fn simd_math_mode_from_env() -> SimdMathMode {
 
 fn jit_dump_clif_enabled() -> bool {
     match std::env::var("IRIS_JIT_DUMP_CLIF") {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => false,
     }
 }
@@ -201,7 +207,8 @@ fn detect_lowered_kernel(expr: &Expr, arg_names: &[String]) -> Option<LoweredKer
             if args.len() == 1 {
                 if let Expr::Var(var_name) = &args[0] {
                     if let Some(input) = arg_index_of_var(arg_names, var_name) {
-                        let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
+                        let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str()
+                        {
                             "abs" | "fabs" => Some(LoweredUnaryKernel::Abs),
                             "sin" => Some(LoweredUnaryKernel::Sin),
                             "cos" => Some(LoweredUnaryKernel::Cos),
@@ -392,8 +399,9 @@ struct QuantumState {
 
 static QUANTUM_REGISTRY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, QuantumState>>> =
     once_cell::sync::OnceCell::new();
-static QUANTUM_PENDING_SEEDS: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, Vec<QuantumProfileSeed>>>> =
-    once_cell::sync::OnceCell::new();
+static QUANTUM_PENDING_SEEDS: once_cell::sync::OnceCell<
+    std::sync::Mutex<HashMap<usize, Vec<QuantumProfileSeed>>>,
+> = once_cell::sync::OnceCell::new();
 static LOWERED_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
     once_cell::sync::OnceCell::new();
 static UNROLL_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
@@ -455,12 +463,9 @@ fn log_simd_math_exec_once(entry: &JitEntry, op: LoweredUnaryKernel) {
 
 fn apply_quantum_seeds(state: &mut QuantumState, seeds: &[QuantumProfileSeed]) {
     for seed in seeds {
-        if let Some((pos, _)) = state
-            .entries
-            .iter()
-            .enumerate()
-            .find(|(_, entry)| quantum_variant_index_for_strategy(entry.variant_strategy) == seed.index)
-        {
+        if let Some((pos, _)) = state.entries.iter().enumerate().find(|(_, entry)| {
+            quantum_variant_index_for_strategy(entry.variant_strategy) == seed.index
+        }) {
             if let Some(stats) = state.stats.get_mut(pos) {
                 stats.ewma_ns = if seed.ewma_ns.is_finite() && seed.ewma_ns >= 0.0 {
                     seed.ewma_ns
@@ -531,12 +536,105 @@ make_invoke!(iris_jit_invoke_7, a0, a1, a2, a3, a4, a5, a6);
 make_invoke!(iris_jit_invoke_8, a0, a1, a2, a3, a4, a5, a6, a7);
 make_invoke!(iris_jit_invoke_9, a0, a1, a2, a3, a4, a5, a6, a7, a8);
 make_invoke!(iris_jit_invoke_10, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
-make_invoke!(iris_jit_invoke_11, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-make_invoke!(iris_jit_invoke_12, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
-make_invoke!(iris_jit_invoke_13, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
-make_invoke!(iris_jit_invoke_14, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
-make_invoke!(iris_jit_invoke_15, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
-make_invoke!(iris_jit_invoke_16, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
+make_invoke!(
+    iris_jit_invoke_11,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10
+);
+make_invoke!(
+    iris_jit_invoke_12,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11
+);
+make_invoke!(
+    iris_jit_invoke_13,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12
+);
+make_invoke!(
+    iris_jit_invoke_14,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13
+);
+make_invoke!(
+    iris_jit_invoke_15,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13,
+    a14
+);
+make_invoke!(
+    iris_jit_invoke_16,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13,
+    a14,
+    a15
+);
 
 pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
     if entries.is_empty() {
@@ -568,7 +666,12 @@ pub fn register_quantum_jit(func_key: usize, mut entries: Vec<JitEntry>) {
 pub fn quantum_has_seed_hint(func_key: usize) -> bool {
     QUANTUM_PENDING_SEEDS
         .get()
-        .and_then(|map| map.lock().unwrap().get(&func_key).map(|rows| !rows.is_empty()))
+        .and_then(|map| {
+            map.lock()
+                .unwrap()
+                .get(&func_key)
+                .map(|rows| !rows.is_empty())
+        })
         .unwrap_or(false)
 }
 
@@ -761,16 +864,20 @@ pub(crate) fn reconcile_quantum_lifecycle(func_key: usize) -> bool {
 #[cfg(test)]
 pub(crate) fn quantum_active_variant_count(func_key: usize) -> Option<usize> {
     QUANTUM_REGISTRY.get().and_then(|map| {
-        map.lock().unwrap().get(&func_key).map(|state| {
-            state.active.iter().filter(|a| **a).count()
-        })
+        map.lock()
+            .unwrap()
+            .get(&func_key)
+            .map(|state| state.active.iter().filter(|a| **a).count())
     })
 }
 
 #[cfg(test)]
 pub(crate) fn quantum_stability_for(func_key: usize) -> Option<f64> {
     QUANTUM_REGISTRY.get().and_then(|map| {
-        map.lock().unwrap().get(&func_key).map(quantum_stability_score)
+        map.lock()
+            .unwrap()
+            .get(&func_key)
+            .map(quantum_stability_score)
     })
 }
 
@@ -826,7 +933,9 @@ fn choose_quantum_index(state: &mut QuantumState) -> usize {
 
     let active = active_indices(state);
     if active.is_empty() {
-        return state.baseline_idx.min(state.entries.len().saturating_sub(1));
+        return state
+            .baseline_idx
+            .min(state.entries.len().saturating_sub(1));
     }
 
     state.total_runs = state.total_runs.saturating_add(1);
@@ -835,7 +944,9 @@ fn choose_quantum_index(state: &mut QuantumState) -> usize {
         state.round_robin = (rr + 1) % active.len();
         return active[rr];
     }
-    let mut best_idx = state.baseline_idx.min(state.entries.len().saturating_sub(1));
+    let mut best_idx = state
+        .baseline_idx
+        .min(state.entries.len().saturating_sub(1));
     let mut best_score = f64::MAX;
     for idx in active {
         let s = &state.stats[idx];
@@ -889,7 +1000,7 @@ fn update_quantum_stats(func_key: usize, idx: usize, elapsed_ns: u64, success: b
                     stats.failures = stats.failures.saturating_add(1);
                 }
             }
-                reconcile_quantum_lifecycle_state(state);
+            reconcile_quantum_lifecycle_state(state);
         }
     }
 }
@@ -922,7 +1033,11 @@ pub fn execute_registered_jit(
                             .filter(|s| s.runs > 0)
                             .map(|s| s.ewma_ns)
                             .fold(f64::MAX, |a, b| a.min(b));
-                        let best_ewma = if best_ewma == f64::MAX { 0.0 } else { best_ewma };
+                        let best_ewma = if best_ewma == f64::MAX {
+                            0.0
+                        } else {
+                            best_ewma
+                        };
                         let stability = quantum_stability_score(state);
                         let min_stability = crate::py::jit::quantum_stability_min_score();
                         let active_count = active_indices(state).len();
@@ -950,12 +1065,21 @@ pub fn execute_registered_jit(
                                     // No valid entries at all; skip JIT
                                     (None, 0usize, Vec::new(), false, 0usize)
                                 } else {
-                                    (Some(baseline_entry), baseline_idx, Vec::new(), false, active_count)
+                                    (
+                                        Some(baseline_entry),
+                                        baseline_idx,
+                                        Vec::new(),
+                                        false,
+                                        active_count,
+                                    )
                                 }
                             } else {
                                 let mut fallbacks = Vec::new();
                                 for (i, e) in state.entries.iter().enumerate() {
-                                    if i != idx && state.active.get(i).copied().unwrap_or(false) && e.is_valid() {
+                                    if i != idx
+                                        && state.active.get(i).copied().unwrap_or(false)
+                                        && e.is_valid()
+                                    {
                                         fallbacks.push((i, e.clone()));
                                     }
                                 }
@@ -989,10 +1113,7 @@ pub fn execute_registered_jit(
                 let chosen_strategy = entry.variant_strategy;
                 let log_threshold_ns = crate::py::jit::quantum_log_threshold_ns();
 
-                let log_if_slow = |chosen: usize,
-                                   used: usize,
-                                   elapsed_ns: u64,
-                                   note: &str| {
+                let log_if_slow = |chosen: usize, used: usize, elapsed_ns: u64, note: &str| {
                     if crate::py::jit::jit_logging_enabled() && elapsed_ns >= log_threshold_ns {
                         crate::py::jit::jit_log(|| {
                             format!(
@@ -1009,16 +1130,33 @@ pub fn execute_registered_jit(
                         let elapsed = start.elapsed().as_nanos() as u64;
                         update_quantum_stats(func_key, idx, elapsed, true);
                         if !should_use_quantum {
-                            let _ = crate::py::jit::maybe_rearm_quantum_compile(func_key, elapsed, active_count);
+                            let _ = crate::py::jit::maybe_rearm_quantum_compile(
+                                func_key,
+                                elapsed,
+                                active_count,
+                            );
                         }
-                        log_if_slow(idx, idx, elapsed, if should_use_quantum { "success" } else { "baseline" });
+                        log_if_slow(
+                            idx,
+                            idx,
+                            elapsed,
+                            if should_use_quantum {
+                                "success"
+                            } else {
+                                "baseline"
+                            },
+                        );
                         return Some(Ok(obj));
                     }
                     Err(primary_err) => {
                         let elapsed = start.elapsed().as_nanos() as u64;
                         update_quantum_stats(func_key, idx, elapsed, false);
                         if !should_use_quantum {
-                            let _ = crate::py::jit::maybe_rearm_quantum_compile(func_key, elapsed, active_count);
+                            let _ = crate::py::jit::maybe_rearm_quantum_compile(
+                                func_key,
+                                elapsed,
+                                active_count,
+                            );
                         }
                         log_if_slow(idx, idx, elapsed, "primary_failed");
                         if should_use_quantum {
@@ -1027,34 +1165,14 @@ pub fn execute_registered_jit(
                                 match execute_jit_func(py, &fb_entry, args) {
                                     Ok(obj) => {
                                         let elapsed_fb = start_fb.elapsed().as_nanos() as u64;
-                                        update_quantum_stats(
-                                            func_key,
-                                            fb_idx,
-                                            elapsed_fb,
-                                            true,
-                                        );
-                                        log_if_slow(
-                                            idx,
-                                            fb_idx,
-                                            elapsed_fb,
-                                            "fallback_success",
-                                        );
+                                        update_quantum_stats(func_key, fb_idx, elapsed_fb, true);
+                                        log_if_slow(idx, fb_idx, elapsed_fb, "fallback_success");
                                         return Some(Ok(obj));
                                     }
                                     Err(_) => {
                                         let elapsed_fb = start_fb.elapsed().as_nanos() as u64;
-                                        update_quantum_stats(
-                                            func_key,
-                                            fb_idx,
-                                            elapsed_fb,
-                                            false,
-                                        );
-                                        log_if_slow(
-                                            idx,
-                                            fb_idx,
-                                            elapsed_fb,
-                                            "fallback_failed",
-                                        );
+                                        update_quantum_stats(func_key, fb_idx, elapsed_fb, false);
+                                        log_if_slow(idx, fb_idx, elapsed_fb, "fallback_failed");
                                     }
                                 }
                             }
@@ -1207,11 +1325,20 @@ fn compile_jit_impl(
     let mut adjusted_args = arg_names.to_vec();
     let mut reduction = ReductionMode::None;
     // use a cloned copy when destructuring to release borrow immediately
-    if let Expr::SumOver { iter_var, container, body, pred } = expr.clone() {
+    if let Expr::SumOver {
+        iter_var,
+        container,
+        body,
+        pred,
+    } = expr.clone()
+    {
         if let Expr::Var(ref cont_name) = *container {
             if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
                 crate::py::jit::jit_log(|| {
-                    format!("[Iris][jit] converting SumOver '{}' in {}", iter_var, cont_name)
+                    format!(
+                        "[Iris][jit] converting SumOver '{}' in {}",
+                        iter_var, cont_name
+                    )
                 });
                 expr = if let Some(p) = pred {
                     Expr::Ternary(p, body, Box::new(Expr::Const(0.0)))
@@ -1223,11 +1350,20 @@ fn compile_jit_impl(
             }
         }
     }
-    if let Expr::AnyOver { iter_var, container, body, pred } = expr.clone() {
+    if let Expr::AnyOver {
+        iter_var,
+        container,
+        body,
+        pred,
+    } = expr.clone()
+    {
         if let Expr::Var(ref cont_name) = *container {
             if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
                 crate::py::jit::jit_log(|| {
-                    format!("[Iris][jit] converting AnyOver '{}' in {}", iter_var, cont_name)
+                    format!(
+                        "[Iris][jit] converting AnyOver '{}' in {}",
+                        iter_var, cont_name
+                    )
                 });
                 expr = if let Some(p) = pred {
                     Expr::Ternary(p, body, Box::new(Expr::Const(0.0)))
@@ -1239,11 +1375,20 @@ fn compile_jit_impl(
             }
         }
     }
-    if let Expr::AllOver { iter_var, container, body, pred } = expr.clone() {
+    if let Expr::AllOver {
+        iter_var,
+        container,
+        body,
+        pred,
+    } = expr.clone()
+    {
         if let Expr::Var(ref cont_name) = *container {
             if adjusted_args.len() == 1 && adjusted_args[0] == *cont_name {
                 crate::py::jit::jit_log(|| {
-                    format!("[Iris][jit] converting AllOver '{}' in {}", iter_var, cont_name)
+                    format!(
+                        "[Iris][jit] converting AllOver '{}' in {}",
+                        iter_var, cont_name
+                    )
                 });
                 expr = if let Some(p) = pred {
                     Expr::Ternary(p, body, Box::new(Expr::Const(1.0)))
@@ -1335,7 +1480,11 @@ pub fn compile_jit_with_return_type(
 }
 
 /// Compile multiple speculative versions of the same expression in parallel.
-pub fn compile_jit_quantum(expr_str: &str, arg_names: &[String], return_type: JitReturnType) -> Vec<JitEntry> {
+pub fn compile_jit_quantum(
+    expr_str: &str,
+    arg_names: &[String],
+    return_type: JitReturnType,
+) -> Vec<JitEntry> {
     let optimized = compile_jit_impl(expr_str, arg_names, true, return_type);
     let baseline = compile_jit_impl(expr_str, arg_names, false, return_type);
 
@@ -1382,12 +1531,19 @@ fn gen_expr(
     module: &mut JITModule,
     locals: &HashMap<String, Value>,
 ) -> Value {
-
     #[derive(Clone, Copy)]
     enum LoopControl<'a> {
         None,
-        Break { cond: &'a Expr, value: &'a Expr, invert_cond: bool },
-        Continue { cond: &'a Expr, value: &'a Expr, invert_cond: bool },
+        Break {
+            cond: &'a Expr,
+            value: &'a Expr,
+            invert_cond: bool,
+        },
+        Continue {
+            cond: &'a Expr,
+            value: &'a Expr,
+            invert_cond: bool,
+        },
     }
 
     fn detect_loop_control(expr: &Expr) -> LoopControl<'_> {
@@ -1395,21 +1551,25 @@ fn gen_expr(
             Expr::Call(name, args) if args.len() == 2 => {
                 let symbol = name.rsplit('.').next().unwrap_or(name.as_str());
                 match symbol {
-                    "break_if" | "loop_break_if" | "break_when" | "loop_break_when" => LoopControl::Break {
-                        cond: &args[0],
-                        value: &args[1],
-                        invert_cond: false,
-                    },
+                    "break_if" | "loop_break_if" | "break_when" | "loop_break_when" => {
+                        LoopControl::Break {
+                            cond: &args[0],
+                            value: &args[1],
+                            invert_cond: false,
+                        }
+                    }
                     "break_unless" | "loop_break_unless" => LoopControl::Break {
                         cond: &args[0],
                         value: &args[1],
                         invert_cond: true,
                     },
-                    "continue_if" | "loop_continue_if" | "continue_when" | "loop_continue_when" => LoopControl::Continue {
-                        cond: &args[0],
-                        value: &args[1],
-                        invert_cond: false,
-                    },
+                    "continue_if" | "loop_continue_if" | "continue_when" | "loop_continue_when" => {
+                        LoopControl::Continue {
+                            cond: &args[0],
+                            value: &args[1],
+                            invert_cond: false,
+                        }
+                    }
                     "continue_unless" | "loop_continue_unless" => LoopControl::Continue {
                         cond: &args[0],
                         value: &args[1],
@@ -1620,12 +1780,15 @@ fn gen_expr(
                     fb.switch_to_block(body_block);
                     let ctrl = detect_loop_control(body_expr_raw);
                     let body_expr = match ctrl {
-                        LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                        LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => {
+                            value
+                        }
                         LoopControl::None => body_expr_raw,
                     };
 
                     let break_true = if let LoopControl::Break { cond, .. } = ctrl {
-                        let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
+                        let break_cond_val =
+                            gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
                         fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
                     } else {
                         false_mask
@@ -1662,9 +1825,11 @@ fn gen_expr(
                     let budget_next = fb.ins().iadd_imm(budget_val, -1);
                     let body_bits = fb.ins().bitcast(types::I64, body_val);
                     let is_break_sentinel =
-                        fb.ins().icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
+                        fb.ins()
+                            .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
                     let is_continue_sentinel =
-                        fb.ins().icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
+                        fb.ins()
+                            .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
                     let stop_now = fb.ins().bor(break_true, is_break_sentinel);
                     let skip_body = fb.ins().bor(continue_true, is_continue_sentinel);
 
@@ -1676,7 +1841,8 @@ fn gen_expr(
                         let stop_any = fb.ins().bor(stop_now, next_true);
                         let any_exit_block = fb.create_block();
                         fb.ins().brnz(stop_any, any_exit_block, &[]);
-                        fb.ins().jump(continue_block, &[step_val, zero, budget_next]);
+                        fb.ins()
+                            .jump(continue_block, &[step_val, zero, budget_next]);
 
                         fb.switch_to_block(any_exit_block);
                         let exit_val = fb.ins().select(stop_now, acc_val, one);
@@ -1702,7 +1868,8 @@ fn gen_expr(
                     let next_iter = fb.block_params(continue_block)[0];
                     let next_acc = fb.block_params(continue_block)[1];
                     let next_budget = fb.block_params(continue_block)[2];
-                    fb.ins().jump(loop_block, &[next_iter, next_acc, next_budget]);
+                    fb.ins()
+                        .jump(loop_block, &[next_iter, next_acc, next_budget]);
                     fb.seal_block(body_block);
                     fb.seal_block(budget_exit_block);
                     fb.seal_block(budget_ok_block);
@@ -1765,12 +1932,15 @@ fn gen_expr(
                     fb.switch_to_block(body_block);
                     let ctrl = detect_loop_control(body_expr_raw);
                     let body_expr = match ctrl {
-                        LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => value,
+                        LoopControl::Break { value, .. } | LoopControl::Continue { value, .. } => {
+                            value
+                        }
                         LoopControl::None => body_expr_raw,
                     };
 
                     let break_true = if let LoopControl::Break { cond, .. } = ctrl {
-                        let break_cond_val = gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
+                        let break_cond_val =
+                            gen_expr(cond, fb, ptr, arg_names, module, &while_locals);
                         fb.ins().fcmp(FloatCC::NotEqual, break_cond_val, zero)
                     } else {
                         false_mask
@@ -1807,9 +1977,11 @@ fn gen_expr(
                     let budget_next = fb.ins().iadd_imm(budget_val, -1);
                     let body_bits = fb.ins().bitcast(types::I64, body_val);
                     let is_break_sentinel =
-                        fb.ins().icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
+                        fb.ins()
+                            .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
                     let is_continue_sentinel =
-                        fb.ins().icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
+                        fb.ins()
+                            .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
                     let stop_now = fb.ins().bor(break_true, is_break_sentinel);
                     let skip_body = fb.ins().bor(continue_true, is_continue_sentinel);
 
@@ -1817,7 +1989,8 @@ fn gen_expr(
                     let next_acc = fb.ins().fadd(acc_val, effective_body);
                     let sum_break_block = fb.create_block();
                     fb.ins().brnz(stop_now, sum_break_block, &[]);
-                    fb.ins().jump(continue_block, &[step_val, next_acc, budget_next]);
+                    fb.ins()
+                        .jump(continue_block, &[step_val, next_acc, budget_next]);
                     fb.switch_to_block(sum_break_block);
                     fb.ins().jump(exit_block, &[acc_val]);
                     fb.seal_block(sum_break_block);
@@ -1826,7 +1999,8 @@ fn gen_expr(
                     let next_iter = fb.block_params(continue_block)[0];
                     let next_acc = fb.block_params(continue_block)[1];
                     let next_budget = fb.block_params(continue_block)[2];
-                    fb.ins().jump(loop_block, &[next_iter, next_acc, next_budget]);
+                    fb.ins()
+                        .jump(loop_block, &[next_iter, next_acc, next_budget]);
 
                     fb.seal_block(body_block);
                     fb.seal_block(budget_exit_block);
@@ -1839,8 +2013,10 @@ fn gen_expr(
                 }
             }
 
-            if (symbol == "break_on_nan" || symbol == "loop_break_on_nan"
-                || symbol == "continue_on_nan" || symbol == "loop_continue_on_nan")
+            if (symbol == "break_on_nan"
+                || symbol == "loop_break_on_nan"
+                || symbol == "continue_on_nan"
+                || symbol == "loop_continue_on_nan")
                 && args.len() == 1
             {
                 let value_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
@@ -1956,27 +2132,38 @@ fn gen_expr(
                 }
             }
 
-            if (symbol == "break_if" || symbol == "loop_break_if"
-                || symbol == "break_when" || symbol == "loop_break_when"
-                || symbol == "break_unless" || symbol == "loop_break_unless"
-                || symbol == "continue_if" || symbol == "loop_continue_if"
-                || symbol == "continue_when" || symbol == "loop_continue_when"
-                || symbol == "continue_unless" || symbol == "loop_continue_unless")
+            if (symbol == "break_if"
+                || symbol == "loop_break_if"
+                || symbol == "break_when"
+                || symbol == "loop_break_when"
+                || symbol == "break_unless"
+                || symbol == "loop_break_unless"
+                || symbol == "continue_if"
+                || symbol == "loop_continue_if"
+                || symbol == "continue_when"
+                || symbol == "loop_continue_when"
+                || symbol == "continue_unless"
+                || symbol == "loop_continue_unless")
                 && args.len() == 2
             {
                 let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
                 let value_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
                 let zero = fb.ins().f64const(0.0);
-                let cond_true = if symbol == "break_unless" || symbol == "loop_break_unless"
-                    || symbol == "continue_unless" || symbol == "loop_continue_unless"
+                let cond_true = if symbol == "break_unless"
+                    || symbol == "loop_break_unless"
+                    || symbol == "continue_unless"
+                    || symbol == "loop_continue_unless"
                 {
                     fb.ins().fcmp(FloatCC::Equal, cond_val, zero)
                 } else {
                     fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
                 };
-                let sentinel = if symbol == "break_if" || symbol == "loop_break_if"
-                    || symbol == "break_when" || symbol == "loop_break_when"
-                    || symbol == "break_unless" || symbol == "loop_break_unless"
+                let sentinel = if symbol == "break_if"
+                    || symbol == "loop_break_if"
+                    || symbol == "break_when"
+                    || symbol == "loop_break_when"
+                    || symbol == "break_unless"
+                    || symbol == "loop_break_unless"
                 {
                     fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
                 } else {
@@ -2585,11 +2772,8 @@ fn fast_sin_approx(x: f64) -> f64 {
     }
 
     let z = y * y;
-    let p = y * (1.0
-        + z * (-1.0 / 6.0
-        + z * (1.0 / 120.0
-        + z * (-1.0 / 5040.0
-        + z * (1.0 / 362880.0)))));
+    let p = y
+        * (1.0 + z * (-1.0 / 6.0 + z * (1.0 / 120.0 + z * (-1.0 / 5040.0 + z * (1.0 / 362880.0)))));
     sign * p
 }
 
@@ -2666,10 +2850,17 @@ unsafe fn fast_sin_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
 #[inline(always)]
 unsafe fn fast_cos_approx_pair_neon(x0: f64, x1: f64) -> (f64, f64) {
     const APPROX_DOMAIN_LIMIT: f64 = 4_096.0;
-    if !x0.is_finite() || !x1.is_finite() || x0.abs() > APPROX_DOMAIN_LIMIT || x1.abs() > APPROX_DOMAIN_LIMIT {
+    if !x0.is_finite()
+        || !x1.is_finite()
+        || x0.abs() > APPROX_DOMAIN_LIMIT
+        || x1.abs() > APPROX_DOMAIN_LIMIT
+    {
         return (x0.cos(), x1.cos());
     }
-    fast_sin_approx_pair_neon(x0 + std::f64::consts::FRAC_PI_2, x1 + std::f64::consts::FRAC_PI_2)
+    fast_sin_approx_pair_neon(
+        x0 + std::f64::consts::FRAC_PI_2,
+        x1 + std::f64::consts::FRAC_PI_2,
+    )
 }
 
 #[inline(always)]
@@ -2747,28 +2938,33 @@ fn lowered_binary_eval(op: LoweredBinaryKernel, lhs: f64, rhs: f64) -> f64 {
     }
 }
 
-fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode: SimdMathMode) -> Option<f64> {
+fn lowered_expr_eval(
+    expr: &LoweredExpr,
+    views: &[BufferView],
+    idx: usize,
+    mode: SimdMathMode,
+) -> Option<f64> {
     match expr {
         LoweredExpr::Const(v) => Some(*v),
         LoweredExpr::Input(input_idx) => {
             let view = views.get(*input_idx)?;
             Some(unsafe { read_buffer_f64(view, idx) })
         }
-        LoweredExpr::Add(a, b) => Some(
-            lowered_expr_eval(a, views, idx, mode)? + lowered_expr_eval(b, views, idx, mode)?,
-        ),
-        LoweredExpr::Sub(a, b) => Some(
-            lowered_expr_eval(a, views, idx, mode)? - lowered_expr_eval(b, views, idx, mode)?,
-        ),
-        LoweredExpr::Mul(a, b) => Some(
-            lowered_expr_eval(a, views, idx, mode)? * lowered_expr_eval(b, views, idx, mode)?,
-        ),
-        LoweredExpr::Div(a, b) => Some(
-            lowered_expr_eval(a, views, idx, mode)? / lowered_expr_eval(b, views, idx, mode)?,
-        ),
-        LoweredExpr::Mod(a, b) => Some(
-            lowered_expr_eval(a, views, idx, mode)? % lowered_expr_eval(b, views, idx, mode)?,
-        ),
+        LoweredExpr::Add(a, b) => {
+            Some(lowered_expr_eval(a, views, idx, mode)? + lowered_expr_eval(b, views, idx, mode)?)
+        }
+        LoweredExpr::Sub(a, b) => {
+            Some(lowered_expr_eval(a, views, idx, mode)? - lowered_expr_eval(b, views, idx, mode)?)
+        }
+        LoweredExpr::Mul(a, b) => {
+            Some(lowered_expr_eval(a, views, idx, mode)? * lowered_expr_eval(b, views, idx, mode)?)
+        }
+        LoweredExpr::Div(a, b) => {
+            Some(lowered_expr_eval(a, views, idx, mode)? / lowered_expr_eval(b, views, idx, mode)?)
+        }
+        LoweredExpr::Mod(a, b) => {
+            Some(lowered_expr_eval(a, views, idx, mode)? % lowered_expr_eval(b, views, idx, mode)?)
+        }
         LoweredExpr::Eq(a, b) => Some(
             if lowered_expr_eval(a, views, idx, mode)? == lowered_expr_eval(b, views, idx, mode)? {
                 1.0
@@ -2812,14 +3008,18 @@ fn lowered_expr_eval(expr: &LoweredExpr, views: &[BufferView], idx: usize, mode:
             },
         ),
         LoweredExpr::And(a, b) => Some(
-            if lowered_expr_eval(a, views, idx, mode)? != 0.0 && lowered_expr_eval(b, views, idx, mode)? != 0.0 {
+            if lowered_expr_eval(a, views, idx, mode)? != 0.0
+                && lowered_expr_eval(b, views, idx, mode)? != 0.0
+            {
                 1.0
             } else {
                 0.0
             },
         ),
         LoweredExpr::Or(a, b) => Some(
-            if lowered_expr_eval(a, views, idx, mode)? != 0.0 || lowered_expr_eval(b, views, idx, mode)? != 0.0 {
+            if lowered_expr_eval(a, views, idx, mode)? != 0.0
+                || lowered_expr_eval(b, views, idx, mode)? != 0.0
+            {
                 1.0
             } else {
                 0.0
@@ -2886,7 +3086,10 @@ fn lowered_unary_eval_pair_any(
     if let Some((y0, y1)) = lowered_unary_eval_pair(op, x0, x1, mode) {
         (y0, y1)
     } else {
-        (lowered_unary_eval(op, x0, mode), lowered_unary_eval(op, x1, mode))
+        (
+            lowered_unary_eval(op, x0, mode),
+            lowered_unary_eval(op, x1, mode),
+        )
     }
 }
 
@@ -2901,10 +3104,9 @@ fn lowered_expr_eval_pair(
         LoweredExpr::Const(v) => Some((*v, *v)),
         LoweredExpr::Input(input_idx) => {
             let view = views.get(*input_idx)?;
-            Some((
-                unsafe { read_buffer_f64(view, idx0) },
-                unsafe { read_buffer_f64(view, idx1) },
-            ))
+            Some((unsafe { read_buffer_f64(view, idx0) }, unsafe {
+                read_buffer_f64(view, idx1)
+            }))
         }
         LoweredExpr::Add(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
@@ -2934,32 +3136,50 @@ fn lowered_expr_eval_pair(
         LoweredExpr::Eq(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 == b0 { 1.0 } else { 0.0 }, if a1 == b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 == b0 { 1.0 } else { 0.0 },
+                if a1 == b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Ne(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 != b0 { 1.0 } else { 0.0 }, if a1 != b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 != b0 { 1.0 } else { 0.0 },
+                if a1 != b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Lt(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 < b0 { 1.0 } else { 0.0 }, if a1 < b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 < b0 { 1.0 } else { 0.0 },
+                if a1 < b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Gt(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 > b0 { 1.0 } else { 0.0 }, if a1 > b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 > b0 { 1.0 } else { 0.0 },
+                if a1 > b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Le(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 <= b0 { 1.0 } else { 0.0 }, if a1 <= b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 <= b0 { 1.0 } else { 0.0 },
+                if a1 <= b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Ge(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
             let (b0, b1) = lowered_expr_eval_pair(b, views, idx0, idx1, mode)?;
-            Some((if a0 >= b0 { 1.0 } else { 0.0 }, if a1 >= b1 { 1.0 } else { 0.0 }))
+            Some((
+                if a0 >= b0 { 1.0 } else { 0.0 },
+                if a1 >= b1 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::And(a, b) => {
             let (a0, a1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
@@ -2983,7 +3203,10 @@ fn lowered_expr_eval_pair(
         }
         LoweredExpr::Not(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some((if x0 == 0.0 { 1.0 } else { 0.0 }, if x1 == 0.0 { 1.0 } else { 0.0 }))
+            Some((
+                if x0 == 0.0 { 1.0 } else { 0.0 },
+                if x1 == 0.0 { 1.0 } else { 0.0 },
+            ))
         }
         LoweredExpr::Abs(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
@@ -2991,27 +3214,57 @@ fn lowered_expr_eval_pair(
         }
         LoweredExpr::Sin(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Sin, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Sin,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Cos(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Cos, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Cos,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Tan(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Tan, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Tan,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Exp(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Exp, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Exp,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Log(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Log, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Log,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Sqrt(a) => {
             let (x0, x1) = lowered_expr_eval_pair(a, views, idx0, idx1, mode)?;
-            Some(lowered_unary_eval_pair_any(LoweredUnaryKernel::Sqrt, x0, x1, mode))
+            Some(lowered_unary_eval_pair_any(
+                LoweredUnaryKernel::Sqrt,
+                x0,
+                x1,
+                mode,
+            ))
         }
         LoweredExpr::Ternary {
             cond,
@@ -3065,11 +3318,12 @@ fn try_execute_lowered_vector_kernel(
         let x = unsafe { read_buffer_f64(view, idx) };
         lowered_unary_eval(op, x, mode)
     };
-    let eval_binary = |op: LoweredBinaryKernel, lhs_view: &BufferView, rhs_view: &BufferView, idx: usize| {
-        let l = unsafe { read_buffer_f64(lhs_view, idx) };
-        let r = unsafe { read_buffer_f64(rhs_view, idx) };
-        lowered_binary_eval(op, l, r)
-    };
+    let eval_binary =
+        |op: LoweredBinaryKernel, lhs_view: &BufferView, rhs_view: &BufferView, idx: usize| {
+            let l = unsafe { read_buffer_f64(lhs_view, idx) };
+            let r = unsafe { read_buffer_f64(rhs_view, idx) };
+            lowered_binary_eval(op, l, r)
+        };
 
     if entry.reduction != ReductionMode::None {
         let lanes = unroll.clamp(1, 4);
@@ -3086,7 +3340,9 @@ fn try_execute_lowered_vector_kernel(
                                 if lane + 1 < lanes {
                                     let x0 = unsafe { read_buffer_f64(input_view, i + lane) };
                                     let x1 = unsafe { read_buffer_f64(input_view, i + lane + 1) };
-                                    if let Some((y0, y1)) = lowered_unary_eval_pair(op, x0, x1, mode) {
+                                    if let Some((y0, y1)) =
+                                        lowered_unary_eval_pair(op, x0, x1, mode)
+                                    {
                                         log_simd_math_exec_once(entry, op);
                                         lane_acc[lane] += y0;
                                         lane_acc[lane + 1] += y1;
@@ -3174,7 +3430,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut i = 0;
                         while i + lanes <= len {
                             for lane in 0..lanes {
-                                lane_any[lane] |= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                                lane_any[lane] |=
+                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_any[..lanes].iter().any(|v| *v) {
                                 return Some(LoweredVectorResult::Reduced(1.0));
@@ -3194,7 +3451,8 @@ fn try_execute_lowered_vector_kernel(
                         let mut i = 0;
                         while i + lanes <= len {
                             for lane in 0..lanes {
-                                lane_all[lane] &= eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                                lane_all[lane] &=
+                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_all[..lanes].iter().any(|v| !*v) {
                                 return Some(LoweredVectorResult::Reduced(0.0));
@@ -3212,78 +3470,79 @@ fn try_execute_lowered_vector_kernel(
                     ReductionMode::None => {}
                 }
             }
-            LoweredKernel::Expr(expr) => {
-                match entry.reduction {
-                    ReductionMode::Sum => {
-                        let mut lane_acc = [0.0_f64; 4];
-                        let mut i = 0;
-                        while i + lanes <= len {
-                            let mut lane = 0;
-                            while lane < lanes {
-                                if lane + 1 < lanes {
-                                    let idx0 = i + lane;
-                                    let idx1 = i + lane + 1;
-                                    let (v0, v1) = lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
-                                    lane_acc[lane] += v0;
-                                    lane_acc[lane + 1] += v1;
-                                    lane += 2;
-                                    continue;
-                                }
-                                lane_acc[lane] += lowered_expr_eval(&expr, views, i + lane, mode)?;
-                                lane += 1;
+            LoweredKernel::Expr(expr) => match entry.reduction {
+                ReductionMode::Sum => {
+                    let mut lane_acc = [0.0_f64; 4];
+                    let mut i = 0;
+                    while i + lanes <= len {
+                        let mut lane = 0;
+                        while lane < lanes {
+                            if lane + 1 < lanes {
+                                let idx0 = i + lane;
+                                let idx1 = i + lane + 1;
+                                let (v0, v1) =
+                                    lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
+                                lane_acc[lane] += v0;
+                                lane_acc[lane + 1] += v1;
+                                lane += 2;
+                                continue;
                             }
-                            i += lanes;
+                            lane_acc[lane] += lowered_expr_eval(&expr, views, i + lane, mode)?;
+                            lane += 1;
                         }
-                        let mut acc = lane_acc[..lanes].iter().copied().sum::<f64>();
-                        while i < len {
-                            acc += lowered_expr_eval(&expr, views, i, mode)?;
-                            i += 1;
-                        }
-                        return Some(LoweredVectorResult::Reduced(acc));
+                        i += lanes;
                     }
-                    ReductionMode::Any => {
-                        let mut lane_any = [false; 4];
-                        let mut i = 0;
-                        while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_any[lane] |= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
-                            }
-                            if lane_any[..lanes].iter().any(|v| *v) {
-                                return Some(LoweredVectorResult::Reduced(1.0));
-                            }
-                            i += lanes;
-                        }
-                        while i < len {
-                            if lowered_expr_eval(&expr, views, i, mode)? != 0.0 {
-                                return Some(LoweredVectorResult::Reduced(1.0));
-                            }
-                            i += 1;
-                        }
-                        return Some(LoweredVectorResult::Reduced(0.0));
+                    let mut acc = lane_acc[..lanes].iter().copied().sum::<f64>();
+                    while i < len {
+                        acc += lowered_expr_eval(&expr, views, i, mode)?;
+                        i += 1;
                     }
-                    ReductionMode::All => {
-                        let mut lane_all = [true; 4];
-                        let mut i = 0;
-                        while i + lanes <= len {
-                            for lane in 0..lanes {
-                                lane_all[lane] &= lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
-                            }
-                            if lane_all[..lanes].iter().any(|v| !*v) {
-                                return Some(LoweredVectorResult::Reduced(0.0));
-                            }
-                            i += lanes;
-                        }
-                        while i < len {
-                            if lowered_expr_eval(&expr, views, i, mode)? == 0.0 {
-                                return Some(LoweredVectorResult::Reduced(0.0));
-                            }
-                            i += 1;
-                        }
-                        return Some(LoweredVectorResult::Reduced(1.0));
-                    }
-                    ReductionMode::None => {}
+                    return Some(LoweredVectorResult::Reduced(acc));
                 }
-            }
+                ReductionMode::Any => {
+                    let mut lane_any = [false; 4];
+                    let mut i = 0;
+                    while i + lanes <= len {
+                        for lane in 0..lanes {
+                            lane_any[lane] |=
+                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                        }
+                        if lane_any[..lanes].iter().any(|v| *v) {
+                            return Some(LoweredVectorResult::Reduced(1.0));
+                        }
+                        i += lanes;
+                    }
+                    while i < len {
+                        if lowered_expr_eval(&expr, views, i, mode)? != 0.0 {
+                            return Some(LoweredVectorResult::Reduced(1.0));
+                        }
+                        i += 1;
+                    }
+                    return Some(LoweredVectorResult::Reduced(0.0));
+                }
+                ReductionMode::All => {
+                    let mut lane_all = [true; 4];
+                    let mut i = 0;
+                    while i + lanes <= len {
+                        for lane in 0..lanes {
+                            lane_all[lane] &=
+                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                        }
+                        if lane_all[..lanes].iter().any(|v| !*v) {
+                            return Some(LoweredVectorResult::Reduced(0.0));
+                        }
+                        i += lanes;
+                    }
+                    while i < len {
+                        if lowered_expr_eval(&expr, views, i, mode)? == 0.0 {
+                            return Some(LoweredVectorResult::Reduced(0.0));
+                        }
+                        i += 1;
+                    }
+                    return Some(LoweredVectorResult::Reduced(1.0));
+                }
+                ReductionMode::None => {}
+            },
         }
         return None;
     }
@@ -3467,7 +3726,11 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
             };
             let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
             let array_mod = py.import("array").unwrap();
-            let array_obj = array_mod.getattr("array").unwrap().call1(("d", py_bytes)).unwrap();
+            let array_obj = array_mod
+                .getattr("array")
+                .unwrap()
+                .call1(("d", py_bytes))
+                .unwrap();
             array_obj.into_py(py)
         }
         JitReturnType::Int => {
@@ -3483,12 +3746,16 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
 
 #[cfg(feature = "pyo3")]
 #[inline(always)]
-pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::PyTuple) -> pyo3::PyResult<pyo3::PyObject> {
+pub fn execute_jit_func(
+    py: pyo3::Python,
+    entry: &JitEntry,
+    args: &pyo3::types::PyTuple,
+) -> pyo3::PyResult<pyo3::PyObject> {
     // Safety check: if func_ptr is zero (or invalid), cannot execute JIT.
     // This can happen if quantum speculation is enabled but variants haven't been compiled yet.
     if entry.func_ptr == 0 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "JIT function pointer is invalid or not yet compiled"
+            "JIT function pointer is invalid or not yet compiled",
         ));
     }
 
@@ -3515,7 +3782,8 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                 if entry.arg_count <= MAX_FAST_ARGS {
                     let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
                     for i in 0..entry.arg_count {
-                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let item =
+                            unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                         if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                             return Err(pyo3::PyErr::fetch(py));
@@ -3536,7 +3804,8 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                 } else {
                     let mut heap_args = Vec::with_capacity(entry.arg_count);
                     for i in 0..entry.arg_count {
-                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let item =
+                            unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                         if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                             return Err(pyo3::PyErr::fetch(py));
@@ -3573,7 +3842,10 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
     // Speculative fast path using cached type profile.
     if let Some(profile) = lookup_exec_profile(entry.func_ptr) {
         match profile {
-            JitExecProfile::PackedBuffer { arg_count: expected, elem } => {
+            JitExecProfile::PackedBuffer {
+                arg_count: expected,
+                elem,
+            } => {
                 if arg_count == 1 && entry.arg_count == expected {
                     if let Ok(item) = args.get_item(0) {
                         if let Some(view) = unsafe { open_typed_buffer(item) } {
@@ -3595,7 +3867,10 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                     }
                 }
             }
-            JitExecProfile::VectorizedBuffers { arg_count: expected, elem_types } => {
+            JitExecProfile::VectorizedBuffers {
+                arg_count: expected,
+                elem_types,
+            } => {
                 if arg_count == expected && expected == elem_types.len() {
                     let mut views = Vec::with_capacity(expected);
                     let mut common_len: Option<usize> = None;
@@ -3627,7 +3902,9 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                     if matched {
                         let len = common_len.unwrap_or(0);
                         log_unroll_exec_once(entry, len, loop_unroll, "profiled-vector-buffers");
-                        if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                        if let Some(lowered) =
+                            try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll)
+                        {
                             log_lowered_exec_once(entry, len);
                             match lowered {
                                 LoweredVectorResult::Vector(results) => {
@@ -3649,7 +3926,8 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                         let idx = i + lane;
                                         let mut iter_args = [0.0_f64; MAX_FAST_ARGS];
                                         for j in 0..expected {
-                                            iter_args[j] = unsafe { read_buffer_f64(&views[j], idx) };
+                                            iter_args[j] =
+                                                unsafe { read_buffer_f64(&views[j], idx) };
                                         }
                                         let val = f(iter_args.as_ptr());
                                         if reduction_step(entry.reduction, &mut acc, val) {
@@ -3681,7 +3959,8 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                                         let idx = i + lane;
                                         let mut iter_args = Vec::with_capacity(expected);
                                         for j in 0..expected {
-                                            iter_args.push(unsafe { read_buffer_f64(&views[j], idx) });
+                                            iter_args
+                                                .push(unsafe { read_buffer_f64(&views[j], idx) });
                                         }
                                         let val = f(iter_args.as_ptr());
                                         if reduction_step(entry.reduction, &mut acc, val) {
@@ -3765,7 +4044,8 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
                         let mut stack_args = [0.0_f64; MAX_FAST_ARGS];
                         let mut scalar_mismatch = false;
                         for i in 0..arg_count {
-                            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                            let item =
+                                unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
                             let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                             if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                                 unsafe { pyo3::ffi::PyErr_Clear() };
@@ -3852,7 +4132,9 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
         if all_buffers {
             if let Some(len) = common_len {
                 log_unroll_exec_once(entry, len, loop_unroll, "generic-vector-buffers");
-                if let Some(lowered) = try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll) {
+                if let Some(lowered) =
+                    try_execute_lowered_vector_kernel(entry, &views, len, loop_unroll)
+                {
                     log_lowered_exec_once(entry, len);
                     store_exec_profile(
                         entry.func_ptr,
@@ -4039,8 +4321,7 @@ pub fn execute_jit_func(py: pyo3::Python, entry: &JitEntry, args: &pyo3::types::
     // that don't satisfy the typed-buffer fast path.
     if arg_count == 1 && entry.arg_count == 1 {
         if let Ok(item) = args.get_item(0) {
-            let is_text_like = item
-                .is_instance_of::<pyo3::types::PyString>()
+            let is_text_like = item.is_instance_of::<pyo3::types::PyString>()
                 || item.is_instance_of::<pyo3::types::PyBytes>()
                 || item.is_instance_of::<pyo3::types::PyByteArray>();
 
@@ -4309,15 +4590,27 @@ mod simd_unroll_tests {
         let x = 0.7_f64;
         let sin_err = (fast_sin_approx(x) - x.sin()).abs();
         let cos_err = (fast_cos_approx(x) - x.cos()).abs();
-        assert!(sin_err < 1e-3, "sin approximation error too high: {}", sin_err);
-        assert!(cos_err < 1e-3, "cos approximation error too high: {}", cos_err);
+        assert!(
+            sin_err < 1e-3,
+            "sin approximation error too high: {}",
+            sin_err
+        );
+        assert!(
+            cos_err < 1e-3,
+            "cos approximation error too high: {}",
+            cos_err
+        );
     }
 
     #[test]
     fn fast_trig_approx_preserves_negative_quadrant_sign() {
         let x = -2.0_f64;
         let approx = fast_sin_approx(x);
-        assert!(approx < 0.0, "expected sin(-2.0) approximation to be negative, got {}", approx);
+        assert!(
+            approx < 0.0,
+            "expected sin(-2.0) approximation to be negative, got {}",
+            approx
+        );
     }
 
     #[test]
@@ -4352,37 +4645,16 @@ mod simd_unroll_tests {
 
     #[test]
     fn quantum_dispatch_explores_unrun_variants_even_below_threshold() {
-        let use_quantum = should_use_quantum_dispatch(
-            3,
-            10.0,
-            0.0,
-            0.9,
-            1000,
-            true,
-        );
+        let use_quantum = should_use_quantum_dispatch(3, 10.0, 0.0, 0.9, 1000, true);
         assert!(use_quantum);
     }
 
     #[test]
     fn quantum_dispatch_respects_threshold_when_fully_profiled() {
-        let use_quantum = should_use_quantum_dispatch(
-            3,
-            10.0,
-            0.95,
-            0.9,
-            1000,
-            false,
-        );
+        let use_quantum = should_use_quantum_dispatch(3, 10.0, 0.95, 0.9, 1000, false);
         assert!(!use_quantum);
 
-        let use_quantum_hot = should_use_quantum_dispatch(
-            3,
-            5000.0,
-            0.95,
-            0.9,
-            1000,
-            false,
-        );
+        let use_quantum_hot = should_use_quantum_dispatch(3, 5000.0, 0.95, 0.9, 1000, false);
         assert!(use_quantum_hot);
     }
 
@@ -4391,18 +4663,10 @@ mod simd_unroll_tests {
         let x0 = 0.123_f64;
         let x1 = -1.234_f64;
 
-        let (sin0, sin1) = lowered_unary_eval_pair_any(
-            LoweredUnaryKernel::Sin,
-            x0,
-            x1,
-            SimdMathMode::Accurate,
-        );
-        let (exp0, exp1) = lowered_unary_eval_pair_any(
-            LoweredUnaryKernel::Exp,
-            x0,
-            x1,
-            SimdMathMode::Accurate,
-        );
+        let (sin0, sin1) =
+            lowered_unary_eval_pair_any(LoweredUnaryKernel::Sin, x0, x1, SimdMathMode::Accurate);
+        let (exp0, exp1) =
+            lowered_unary_eval_pair_any(LoweredUnaryKernel::Exp, x0, x1, SimdMathMode::Accurate);
 
         let eps = 1e-12;
         assert!((sin0 - x0.sin()).abs() < eps);

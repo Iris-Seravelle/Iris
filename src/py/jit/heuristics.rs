@@ -16,14 +16,18 @@ fn extract_linear(expr: &Expr, var: &str) -> Option<(f64, f64)> {
         Expr::Const(c) => Some((0.0, *c)),
         Expr::BinOp(l, op, r) => match op.as_str() {
             "+" => {
-                if let (Some((a1,b1)), Some((a2,b2))) = (extract_linear(l, var), extract_linear(r, var)) {
+                if let (Some((a1, b1)), Some((a2, b2))) =
+                    (extract_linear(l, var), extract_linear(r, var))
+                {
                     Some((a1 + a2, b1 + b2))
                 } else {
                     None
                 }
             }
             "-" => {
-                if let (Some((a1,b1)), Some((a2,b2))) = (extract_linear(l, var), extract_linear(r, var)) {
+                if let (Some((a1, b1)), Some((a2, b2))) =
+                    (extract_linear(l, var), extract_linear(r, var))
+                {
                     Some((a1 - a2, b1 - b2))
                 } else {
                     None
@@ -32,12 +36,12 @@ fn extract_linear(expr: &Expr, var: &str) -> Option<(f64, f64)> {
             "*" => {
                 // one side must be constant
                 if let Expr::Const(c) = **l {
-                    if let Some((a,b)) = extract_linear(r, var) {
+                    if let Some((a, b)) = extract_linear(r, var) {
                         return Some((a * c, b * c));
                     }
                 }
                 if let Expr::Const(c) = **r {
-                    if let Some((a,b)) = extract_linear(l, var) {
+                    if let Some((a, b)) = extract_linear(l, var) {
                         return Some((a * c, b * c));
                     }
                 }
@@ -45,9 +49,7 @@ fn extract_linear(expr: &Expr, var: &str) -> Option<(f64, f64)> {
             }
             _ => None,
         },
-        Expr::UnaryOp('-', e) => {
-            extract_linear(e, var).map(|(a,b)| (-a, -b))
-        }
+        Expr::UnaryOp('-', e) => extract_linear(e, var).map(|(a, b)| (-a, -b)),
         _ => None,
     }
 }
@@ -60,14 +62,18 @@ fn extract_quadratic(expr: &Expr, var: &str) -> Option<(f64, f64, f64)> {
         Expr::Const(c) => Some((0.0, 0.0, *c)),
         Expr::BinOp(l, op, r) => match op.as_str() {
             "+" => {
-                if let (Some((a1,b1,c1)), Some((a2,b2,c2))) = (extract_quadratic(l, var), extract_quadratic(r, var)) {
+                if let (Some((a1, b1, c1)), Some((a2, b2, c2))) =
+                    (extract_quadratic(l, var), extract_quadratic(r, var))
+                {
                     Some((a1 + a2, b1 + b2, c1 + c2))
                 } else {
                     None
                 }
             }
             "-" => {
-                if let (Some((a1,b1,c1)), Some((a2,b2,c2))) = (extract_quadratic(l, var), extract_quadratic(r, var)) {
+                if let (Some((a1, b1, c1)), Some((a2, b2, c2))) =
+                    (extract_quadratic(l, var), extract_quadratic(r, var))
+                {
                     Some((a1 - a2, b1 - b2, c1 - c2))
                 } else {
                     None
@@ -80,12 +86,12 @@ fn extract_quadratic(expr: &Expr, var: &str) -> Option<(f64, f64, f64)> {
                 }
                 // one side constant, the other quadratic
                 if let Expr::Const(c) = **l {
-                    if let Some((a,b,c0)) = extract_quadratic(r, var) {
+                    if let Some((a, b, c0)) = extract_quadratic(r, var) {
                         return Some((a * c, b * c, c0 * c));
                     }
                 }
                 if let Expr::Const(c) = **r {
-                    if let Some((a,b,c0)) = extract_quadratic(l, var) {
+                    if let Some((a, b, c0)) = extract_quadratic(l, var) {
                         return Some((a * c, b * c, c0 * c));
                     }
                 }
@@ -93,9 +99,7 @@ fn extract_quadratic(expr: &Expr, var: &str) -> Option<(f64, f64, f64)> {
             }
             _ => None,
         },
-        Expr::UnaryOp('-', e) => {
-            extract_quadratic(e, var).map(|(a,b,c)| (-a, -b, -c))
-        }
+        Expr::UnaryOp('-', e) => extract_quadratic(e, var).map(|(a, b, c)| (-a, -b, -c)),
         _ => None,
     }
 }
@@ -142,14 +146,62 @@ pub fn optimize(expr: Expr) -> Expr {
                     "/" => a / b,
                     "%" => a % b,
                     "**" => a.powf(*b),
-                    "and" => if *a != 0.0 && *b != 0.0 { 1.0 } else { 0.0 },
-                    "or" => if *a != 0.0 || *b != 0.0 { 1.0 } else { 0.0 },
-                    "==" => if (a - b).abs() < f64::EPSILON { 1.0 } else { 0.0 },
-                    "!=" => if (a - b).abs() >= f64::EPSILON { 1.0 } else { 0.0 },
-                    "<" => if a < b { 1.0 } else { 0.0 },
-                    "<=" => if a <= b { 1.0 } else { 0.0 },
-                    ">" => if a > b { 1.0 } else { 0.0 },
-                    ">=" => if a >= b { 1.0 } else { 0.0 },
+                    "and" => {
+                        if *a != 0.0 && *b != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "or" => {
+                        if *a != 0.0 || *b != 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "==" => {
+                        if (a - b).abs() < f64::EPSILON {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "!=" => {
+                        if (a - b).abs() >= f64::EPSILON {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "<" => {
+                        if a < b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    "<=" => {
+                        if a <= b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ">" => {
+                        if a > b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ">=" => {
+                        if a >= b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     _ => return Expr::BinOp(Box::new(lhs), op, Box::new(rhs)),
                 };
                 return Expr::Const(v);
@@ -284,7 +336,14 @@ pub fn optimize(expr: Expr) -> Expr {
             }
             Expr::Call(name, args)
         }
-        Expr::SumFor { iter_var, start, end, step, body, pred } => {
+        Expr::SumFor {
+            iter_var,
+            start,
+            end,
+            step,
+            body,
+            pred,
+        } => {
             let start = optimize(*start);
             let end = optimize(*end);
             let step = step.map(|s| Box::new(optimize(*s)));
@@ -295,11 +354,13 @@ pub fn optimize(expr: Expr) -> Expr {
             if matches!(start, Expr::Const(0.0)) {
                 // only apply when step is 1 and there is no predicate
                 let allow = pred.is_none()
-                    && (step.is_none() || step.as_ref().and_then(|e| eval_const(e)).unwrap_or(1.0) == 1.0);
+                    && (step.is_none()
+                        || step.as_ref().and_then(|e| eval_const(e)).unwrap_or(1.0) == 1.0);
                 if allow {
                     if let Some((a_coeff, b_coeff, c_coeff)) = extract_quadratic(&body, &iter_var) {
                         // rewrite using formula with n = end
-                        let formula = build_quadratic_sum_formula(a_coeff, b_coeff, c_coeff, end.clone());
+                        let formula =
+                            build_quadratic_sum_formula(a_coeff, b_coeff, c_coeff, end.clone());
                         return optimize(formula);
                     }
                 }
@@ -308,33 +369,41 @@ pub fn optimize(expr: Expr) -> Expr {
             // handle simple coefficient-of-variable pattern: i * k or k * i
             if pred.is_none() && step.is_none() {
                 if let Expr::BinOp(lc, op, rc) = &body {
-                if op == "*" {
-                    if **lc == Expr::Var(iter_var.clone()) {
-                        let coeff = *rc.clone();
-                        let sum_i = Expr::SumFor {
-                            iter_var: iter_var.clone(),
-                            start: Box::new(start.clone()),
-                            end: Box::new(end.clone()),
-                            step: None,
-                            body: Box::new(Expr::Var(iter_var.clone())),
-                            pred: None,
-                        };
-                        return optimize(Expr::BinOp(Box::new(coeff), "*".to_string(), Box::new(sum_i)));
-                    }
-                    if **rc == Expr::Var(iter_var.clone()) {
-                        let coeff = *lc.clone();
-                        let sum_i = Expr::SumFor {
-                            iter_var: iter_var.clone(),
-                            start: Box::new(start.clone()),
-                            end: Box::new(end.clone()),
-                            step: None,
-                            body: Box::new(Expr::Var(iter_var.clone())),
-                            pred: None,
-                        };
-                        return optimize(Expr::BinOp(Box::new(coeff), "*".to_string(), Box::new(sum_i)));
+                    if op == "*" {
+                        if **lc == Expr::Var(iter_var.clone()) {
+                            let coeff = *rc.clone();
+                            let sum_i = Expr::SumFor {
+                                iter_var: iter_var.clone(),
+                                start: Box::new(start.clone()),
+                                end: Box::new(end.clone()),
+                                step: None,
+                                body: Box::new(Expr::Var(iter_var.clone())),
+                                pred: None,
+                            };
+                            return optimize(Expr::BinOp(
+                                Box::new(coeff),
+                                "*".to_string(),
+                                Box::new(sum_i),
+                            ));
+                        }
+                        if **rc == Expr::Var(iter_var.clone()) {
+                            let coeff = *lc.clone();
+                            let sum_i = Expr::SumFor {
+                                iter_var: iter_var.clone(),
+                                start: Box::new(start.clone()),
+                                end: Box::new(end.clone()),
+                                step: None,
+                                body: Box::new(Expr::Var(iter_var.clone())),
+                                pred: None,
+                            };
+                            return optimize(Expr::BinOp(
+                                Box::new(coeff),
+                                "*".to_string(),
+                                Box::new(sum_i),
+                            ));
+                        }
                     }
                 }
-            }
             }
 
             // try to decompose nontrivial linear body a*i + b (only when
@@ -462,11 +531,10 @@ pub fn optimize(expr: Expr) -> Expr {
                 body: Box::new(body),
                 pred,
             }
-        },
+        }
         other => other,
     }
 }
-
 
 fn evaluate_call(name: &str, args: &[Expr]) -> Option<f64> {
     // very simple interpreter for a handful of math functions
@@ -515,8 +583,16 @@ fn eval_expr(expr: &Expr, env: &std::collections::HashMap<String, f64>) -> Optio
                 "**" => Some(a.powf(b)),
                 "and" => Some(if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 }),
                 "or" => Some(if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 }),
-                "==" => Some(if (a - b).abs() < f64::EPSILON { 1.0 } else { 0.0 }),
-                "!=" => Some(if (a - b).abs() >= f64::EPSILON { 1.0 } else { 0.0 }),
+                "==" => Some(if (a - b).abs() < f64::EPSILON {
+                    1.0
+                } else {
+                    0.0
+                }),
+                "!=" => Some(if (a - b).abs() >= f64::EPSILON {
+                    1.0
+                } else {
+                    0.0
+                }),
                 "<" => Some(if a < b { 1.0 } else { 0.0 }),
                 "<=" => Some(if a <= b { 1.0 } else { 0.0 }),
                 ">" => Some(if a > b { 1.0 } else { 0.0 }),
@@ -533,9 +609,10 @@ fn eval_expr(expr: &Expr, env: &std::collections::HashMap<String, f64>) -> Optio
             }
         }
         Expr::Call(name, args) => {
-            let vals: Vec<Expr> = args.iter().filter_map(|e| {
-                eval_expr(e, env).map(Expr::Const)
-            }).collect();
+            let vals: Vec<Expr> = args
+                .iter()
+                .filter_map(|e| eval_expr(e, env).map(Expr::Const))
+                .collect();
             evaluate_call(name, &vals)
         }
         Expr::Ternary(cond, thenb, elseb) => {
@@ -604,9 +681,18 @@ mod tests {
 
     #[test]
     fn sum_for_reduction() {
-        assert_eq!(optimize(parse("sum(i for i in range(5))")), Expr::Const(10.0));
-        assert_eq!(optimize(parse("sum(2 for i in range(3))")), Expr::Const(6.0));
-        assert_eq!(optimize(parse("sum(i for i in range(2,5))")), Expr::Const(9.0));
+        assert_eq!(
+            optimize(parse("sum(i for i in range(5))")),
+            Expr::Const(10.0)
+        );
+        assert_eq!(
+            optimize(parse("sum(2 for i in range(3))")),
+            Expr::Const(6.0)
+        );
+        assert_eq!(
+            optimize(parse("sum(i for i in range(2,5))")),
+            Expr::Const(9.0)
+        );
     }
 
     #[test]
@@ -683,8 +769,14 @@ mod tests {
 
     #[test]
     fn step_and_predicate() {
-        assert_eq!(optimize(parse("sum(i for i in range(0,5,2))")), Expr::Const(6.0));
-        assert_eq!(optimize(parse("sum(i for i in range(5) if i % 2 == 0)")), Expr::Const(6.0));
+        assert_eq!(
+            optimize(parse("sum(i for i in range(0,5,2))")),
+            Expr::Const(6.0)
+        );
+        assert_eq!(
+            optimize(parse("sum(i for i in range(5) if i % 2 == 0)")),
+            Expr::Const(6.0)
+        );
     }
 
     #[test]
@@ -734,7 +826,10 @@ mod tests {
 
     #[test]
     fn descending_default_range_is_empty() {
-        assert_eq!(optimize(parse("sum(i for i in range(5,0))")), Expr::Const(0.0));
+        assert_eq!(
+            optimize(parse("sum(i for i in range(5,0))")),
+            Expr::Const(0.0)
+        );
     }
 
     #[test]

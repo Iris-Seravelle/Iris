@@ -2,20 +2,20 @@
 //! Python-facing runtime wrapper and associated methods.
 #![allow(non_local_definitions)]
 
+use bytes;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3_asyncio::tokio::future_into_py;
 use std::sync::Arc;
 use std::time::Duration;
-use bytes;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::Runtime;
 use crate::mailbox::OverflowPolicy;
+use crate::Runtime;
 
+use super::mailbox::PyMailbox;
 use super::pool::{make_release_gil_channel, PoolTask, GIL_WORKER_POOL};
 use super::utils::{message_to_py, run_python_matcher};
-use super::mailbox::PyMailbox;
 
 #[pyclass]
 pub struct PyRuntime {
@@ -163,11 +163,15 @@ impl PyRuntime {
             "dropold" => OverflowPolicy::DropOld,
             "block" => OverflowPolicy::Block,
             "redirect" => {
-                let t = target.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("redirect requires target"))?;
+                let t = target.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("redirect requires target")
+                })?;
                 OverflowPolicy::Redirect(t)
             }
             "spill" => {
-                let t = target.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("spill requires target"))?;
+                let t = target.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("spill requires target")
+                })?;
                 OverflowPolicy::Spill(t)
             }
             _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid policy")),
@@ -264,9 +268,9 @@ impl PyRuntime {
         if let Some(vec) = crate::buffer::global_registry().take(buffer_id) {
             let b = bytes::Bytes::from(vec);
             Ok(self
-            .inner
-            .send(pid, crate::mailbox::Message::User(b))
-            .is_ok())
+                .inner
+                .send(pid, crate::mailbox::Message::User(b))
+                .is_ok())
         } else {
             Err(pyo3::exceptions::PyValueError::new_err(
                 "invalid buffer id or already taken",
@@ -308,7 +312,9 @@ impl PyRuntime {
                             };
                             let _ = tx.send(task);
                         }
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => {
                             let task = PoolTask::HotSwap {
                                 behavior: b.clone(),
                                 ptr,
@@ -339,7 +345,9 @@ impl PyRuntime {
                                 });
                             }
                         }
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::HotSwap {
                                     behavior: b.clone(),
@@ -348,8 +356,10 @@ impl PyRuntime {
                                 let _ = pool.sender.send(task);
                             } else {
                                 Python::with_gil(|py| unsafe {
-                                    let new_obj =
-                                        PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
+                                    let new_obj = PyObject::from_owned_ptr(
+                                        py,
+                                        ptr as *mut pyo3::ffi::PyObject,
+                                    );
                                     *b.write() = new_obj;
                                 });
                             }
@@ -359,7 +369,9 @@ impl PyRuntime {
                 } else {
                     // pure inline path
                     match msg {
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => {
                             Python::with_gil(|py| unsafe {
                                 let new_obj =
                                     PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
@@ -377,7 +389,9 @@ impl PyRuntime {
                                 }
                             });
                         }
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {
+                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(
+                            _info,
+                        )) => {
                             // nothing special
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {
@@ -413,7 +427,9 @@ impl PyRuntime {
                 }
 
                 match msg {
-                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(
+                        ptr,
+                    )) => {
                         Python::with_gil(|py| unsafe {
                             let new_obj =
                                 PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
@@ -431,7 +447,8 @@ impl PyRuntime {
                             }
                         });
                     }
-                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {}
+                    crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {
+                    }
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {}
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
                     | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {}
@@ -469,11 +486,19 @@ impl PyRuntime {
                     if let Some(tx) = &maybe_tx {
                         match msg {
                             crate::mailbox::Message::User(bytes) => {
-                                let task = PoolTask::Execute { behavior: behavior.clone(), bytes: bytes.clone() };
+                                let task = PoolTask::Execute {
+                                    behavior: behavior.clone(),
+                                    bytes: bytes.clone(),
+                                };
                                 let _ = tx.send(task);
                             }
-                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
-                                let task = PoolTask::HotSwap { behavior: behavior.clone(), ptr };
+                            crate::mailbox::Message::System(
+                                crate::mailbox::SystemMessage::HotSwap(ptr),
+                            ) => {
+                                let task = PoolTask::HotSwap {
+                                    behavior: behavior.clone(),
+                                    ptr,
+                                };
                                 let _ = tx.send(task);
                             }
                             _ => {}
@@ -499,7 +524,9 @@ impl PyRuntime {
                                     });
                                 }
                             }
-                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                            crate::mailbox::Message::System(
+                                crate::mailbox::SystemMessage::HotSwap(ptr),
+                            ) => {
                                 if let Some(pool) = GIL_WORKER_POOL.get() {
                                     let task = PoolTask::HotSwap {
                                         behavior: behavior.clone(),
@@ -521,7 +548,9 @@ impl PyRuntime {
                         }
                     } else {
                         match msg {
-                            crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                            crate::mailbox::Message::System(
+                                crate::mailbox::SystemMessage::HotSwap(ptr),
+                            ) => {
                                 Python::with_gil(|py| unsafe {
                                     let new_obj = PyObject::from_owned_ptr(
                                         py,
@@ -549,7 +578,9 @@ impl PyRuntime {
             }
         };
 
-        Ok(self.inner.spawn_actor_with_budget_bounded(handler, budget, capacity))
+        Ok(self
+            .inner
+            .spawn_actor_with_budget_bounded(handler, budget, capacity))
     }
 
     /// Spawn a child actor; lifetime is tied to `parent`.
@@ -579,12 +610,8 @@ impl PyRuntime {
     ) -> PyResult<Vec<u64>> {
         let mut out = Vec::with_capacity(workers);
         for _ in 0..workers {
-            let pid = self.spawn_child_py_handler(
-                parent,
-                py_callable.clone(),
-                budget,
-                release_gil,
-            )?;
+            let pid =
+                self.spawn_child_py_handler(parent, py_callable.clone(), budget, release_gil)?;
             out.push(pid);
         }
         Ok(out)
@@ -612,11 +639,19 @@ impl PyRuntime {
                     // blocking GIL thread path
                     match msg {
                         crate::mailbox::Message::User(bytes) => {
-                            let task = PoolTask::Execute { behavior: behavior.clone(), bytes: bytes.clone() };
+                            let task = PoolTask::Execute {
+                                behavior: behavior.clone(),
+                                bytes: bytes.clone(),
+                            };
                             let _ = tx.send(task);
                         }
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
-                            let task = PoolTask::HotSwap { behavior: behavior.clone(), ptr };
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => {
+                            let task = PoolTask::HotSwap {
+                                behavior: behavior.clone(),
+                                ptr,
+                            };
                             let _ = tx.send(task);
                         }
                         _ => {}
@@ -642,7 +677,9 @@ impl PyRuntime {
                                 });
                             }
                         }
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::HotSwap {
                                     behavior: behavior.clone(),
@@ -652,7 +689,10 @@ impl PyRuntime {
                             } else {
                                 unsafe {
                                     let new_obj = Python::with_gil(|py| {
-                                        PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
+                                        PyObject::from_owned_ptr(
+                                            py,
+                                            ptr as *mut pyo3::ffi::PyObject,
+                                        )
                                     });
                                     let mut guard = behavior.write();
                                     *guard = new_obj;
@@ -663,15 +703,15 @@ impl PyRuntime {
                     }
                 } else {
                     match msg {
-                        crate::mailbox::Message::System(crate::mailbox::SystemMessage::HotSwap(ptr)) => {
-                            unsafe {
-                                let new_obj = Python::with_gil(|py| {
+                        crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::HotSwap(ptr),
+                        ) => unsafe {
+                            let new_obj = Python::with_gil(|py| {
                                 PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject)
                             });
-                                let mut guard = behavior.write();
-                                *guard = new_obj;
-                            }
-                        }
+                            let mut guard = behavior.write();
+                            *guard = new_obj;
+                        },
                         crate::mailbox::Message::User(bytes) => {
                             Python::with_gil(|py| {
                                 let guard = behavior.read();
@@ -689,7 +729,9 @@ impl PyRuntime {
             }
         };
 
-        Ok(self.inner.spawn_child_handler_with_budget(parent, handler, budget))
+        Ok(self
+            .inner
+            .spawn_child_handler_with_budget(parent, handler, budget))
     }
 
     /// Spawns a pull-based actor.
@@ -730,27 +772,36 @@ impl PyRuntime {
     }
 
     /// Spawn a child actor that uses a blocking Python mailbox loop.
-    fn spawn_child_with_mailbox(&self, parent: u64, py_callable: PyObject, budget: usize) -> PyResult<u64> {
-        let pid = self.inner.spawn_child_with_budget(parent, move |rx| async move {
-            let mailbox = PyMailbox {
-                inner: Arc::new(TokioMutex::new(rx)),
-            };
+    fn spawn_child_with_mailbox(
+        &self,
+        parent: u64,
+        py_callable: PyObject,
+        budget: usize,
+    ) -> PyResult<u64> {
+        let pid = self.inner.spawn_child_with_budget(
+            parent,
+            move |rx| async move {
+                let mailbox = PyMailbox {
+                    inner: Arc::new(TokioMutex::new(rx)),
+                };
 
-            let handle = tokio::task::spawn_blocking(move || {
-                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                    return;
-                }
-
-                Python::with_gil(|py| {
-                    if let Err(e) = py_callable.call1(py, (mailbox,)) {
-                        eprintln!("[Iris] Python mailbox actor exception: {}", e);
-                        e.print(py);
+                let handle = tokio::task::spawn_blocking(move || {
+                    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                        return;
                     }
-                });
-            });
 
-            let _ = handle.await;
-        }, budget);
+                    Python::with_gil(|py| {
+                        if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                            eprintln!("[Iris] Python mailbox actor exception: {}", e);
+                            e.print(py);
+                        }
+                    });
+                });
+
+                let _ = handle.await;
+            },
+            budget,
+        );
 
         Ok(pid)
     }
@@ -764,8 +815,8 @@ impl PyRuntime {
     fn send_after(&self, pid: u64, delay_ms: u64, data: &PyBytes) -> PyResult<u64> {
         let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
         let id = self
-        .inner
-        .send_after(pid, delay_ms, crate::mailbox::Message::User(msg));
+            .inner
+            .send_after(pid, delay_ms, crate::mailbox::Message::User(msg));
         Ok(id)
     }
 
@@ -773,8 +824,8 @@ impl PyRuntime {
     fn send_interval(&self, pid: u64, interval_ms: u64, data: &PyBytes) -> PyResult<u64> {
         let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
         let id = self
-        .inner
-        .send_interval(pid, interval_ms, crate::mailbox::Message::User(msg));
+            .inner
+            .send_interval(pid, interval_ms, crate::mailbox::Message::User(msg));
         Ok(id)
     }
 
@@ -812,7 +863,7 @@ impl PyRuntime {
             if let Some(sec) = timeout {
                 match tokio::time::timeout(Duration::from_secs_f64(sec), op).await {
                     Ok(val) => Ok(val),
-                       Err(_) => Ok(Python::with_gil(|py| py.None())),
+                    Err(_) => Ok(Python::with_gil(|py| py.None())),
                 }
             } else {
                 Ok(op.await)
@@ -898,21 +949,21 @@ impl PyRuntime {
 
         let factory_py = py_factory.clone();
         let factory_closure: Arc<dyn Fn() -> Result<crate::pid::Pid, String> + Send + Sync> =
-        Arc::new(move || {
-            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                return Err("Interpreter shutting down".to_string());
-            }
-            Python::with_gil(|py| {
-                let obj = factory_py.as_ref(py);
-                match obj.call0() {
-                    Ok(v) => match v.extract::<u64>() {
-                        Ok(pid) => Ok(pid),
-                             Err(e) => Err(e.to_string()),
-                    },
-                    Err(e) => Err(e.to_string()),
+            Arc::new(move || {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                    return Err("Interpreter shutting down".to_string());
                 }
-            })
-        });
+                Python::with_gil(|py| {
+                    let obj = factory_py.as_ref(py);
+                    match obj.call0() {
+                        Ok(v) => match v.extract::<u64>() {
+                            Ok(pid) => Ok(pid),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    }
+                })
+            });
 
         self.inner.supervise(pid, factory_closure, strat);
         Ok(())
@@ -929,12 +980,8 @@ impl PyRuntime {
         use std::sync::Arc;
 
         let strat = match strategy.to_lowercase().as_str() {
-            "restartone" | "restart_one" | "one" => {
-                crate::supervisor::RestartStrategy::RestartOne
-            }
-            "restartall" | "restart_all" | "all" => {
-                crate::supervisor::RestartStrategy::RestartAll
-            }
+            "restartone" | "restart_one" | "one" => crate::supervisor::RestartStrategy::RestartOne,
+            "restartall" | "restart_all" | "all" => crate::supervisor::RestartStrategy::RestartAll,
             _ => return Err(pyo3::exceptions::PyValueError::new_err("invalid strategy")),
         };
 
@@ -948,24 +995,24 @@ impl PyRuntime {
 
         let factory_py = py_factory.clone();
         let factory_closure: Arc<dyn Fn() -> Result<crate::pid::Pid, String> + Send + Sync> =
-        Arc::new(move || {
-            if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
-                return Err("Interpreter shutting down".to_string());
-            }
-            Python::with_gil(|py| {
-                let obj = factory_py.as_ref(py);
-                match obj.call0() {
-                    Ok(v) => match v.extract::<u64>() {
-                        Ok(pid) => Ok(pid),
-                             Err(e) => Err(e.to_string()),
-                    },
-                    Err(e) => Err(e.to_string()),
+            Arc::new(move || {
+                if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+                    return Err("Interpreter shutting down".to_string());
                 }
-            })
-        });
+                Python::with_gil(|py| {
+                    let obj = factory_py.as_ref(py);
+                    match obj.call0() {
+                        Ok(v) => match v.extract::<u64>() {
+                            Ok(pid) => Ok(pid),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    }
+                })
+            });
 
         self.inner
-        .path_supervise_with_factory(&path, pid, factory_closure, strat);
+            .path_supervise_with_factory(&path, pid, factory_closure, strat);
         Ok(())
     }
 }

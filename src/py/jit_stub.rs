@@ -24,13 +24,23 @@ fn register_offload(
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn offload_call(py: Python, func: PyObject, args: &PyTuple, kwargs: Option<&PyDict>) -> PyResult<PyObject> {
+fn offload_call(
+    py: Python,
+    func: PyObject,
+    args: &PyTuple,
+    kwargs: Option<&PyDict>,
+) -> PyResult<PyObject> {
     func.as_ref(py).call(args, kwargs).map(|v| v.into_py(py))
 }
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn call_jit(_py: Python, _func: PyObject, _args: &PyTuple, _kwargs: Option<&PyDict>) -> PyResult<PyObject> {
+fn call_jit(
+    _py: Python,
+    _func: PyObject,
+    _args: &PyTuple,
+    _kwargs: Option<&PyDict>,
+) -> PyResult<PyObject> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
         "JIT feature is disabled in this build",
     ))
@@ -58,7 +68,10 @@ fn is_jit_logging_enabled() -> PyResult<bool> {
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn configure_quantum_speculation(_enabled: Option<bool>, _env_var: Option<String>) -> PyResult<bool> {
+fn configure_quantum_speculation(
+    _enabled: Option<bool>,
+    _env_var: Option<String>,
+) -> PyResult<bool> {
     Ok(false)
 }
 
@@ -82,7 +95,10 @@ fn seed_quantum_profile(_func: PyObject, _rows: Vec<(usize, f64, u64, u64)>) -> 
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn configure_quantum_speculation_threshold(_threshold_ns: Option<u64>, _env_var: Option<String>) -> PyResult<u64> {
+fn configure_quantum_speculation_threshold(
+    _threshold_ns: Option<u64>,
+    _env_var: Option<String>,
+) -> PyResult<u64> {
     Ok(1_000_000)
 }
 
@@ -94,7 +110,10 @@ fn get_quantum_speculation_threshold() -> PyResult<u64> {
 
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-fn configure_quantum_log_threshold(_threshold_ns: Option<u64>, _env_var: Option<String>) -> PyResult<u64> {
+fn configure_quantum_log_threshold(
+    _threshold_ns: Option<u64>,
+    _env_var: Option<String>,
+) -> PyResult<u64> {
     Ok(1_000_000)
 }
 
@@ -150,7 +169,10 @@ pub(crate) fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_quantum_speculation_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(get_quantum_profile, m)?)?;
     m.add_function(wrap_pyfunction!(seed_quantum_profile, m)?)?;
-    m.add_function(wrap_pyfunction!(configure_quantum_speculation_threshold, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        configure_quantum_speculation_threshold,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(get_quantum_speculation_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(configure_quantum_log_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(get_quantum_log_threshold, m)?)?;

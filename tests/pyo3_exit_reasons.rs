@@ -6,7 +6,12 @@ use pyo3::prelude::*;
 async fn test_exit_reason_on_panic() {
     Python::with_gil(|py| {
         let module = iris::py::make_module(py).unwrap();
-        let rt = module.as_ref(py).getattr("PyRuntime").unwrap().call0().unwrap();
+        let rt = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .unwrap()
+            .call0()
+            .unwrap();
 
         // Spawn an observed actor that will be stopped normally.
         let target: u64 = rt
@@ -42,7 +47,12 @@ async fn test_exit_reason_on_panic() {
         for m in msgs {
             if let Ok(type_name) = m.as_ref(py).getattr("type_name") {
                 if type_name.extract::<String>().unwrap_or_default() == "EXIT" {
-                    let reason: String = m.as_ref(py).getattr("reason").unwrap().extract().unwrap_or_default();
+                    let reason: String = m
+                        .as_ref(py)
+                        .getattr("reason")
+                        .unwrap()
+                        .extract()
+                        .unwrap_or_default();
                     if reason == "normal" {
                         found = true;
                         break;
@@ -51,6 +61,9 @@ async fn test_exit_reason_on_panic() {
             }
         }
 
-        assert!(found, "expected to find an EXIT message with reason 'normal'");
+        assert!(
+            found,
+            "expected to find an EXIT message with reason 'normal'"
+        );
     });
 }

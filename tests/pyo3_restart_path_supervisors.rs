@@ -9,7 +9,7 @@ async fn test_path_supervisor_restart_one() {
     Python::with_gil(|py| {
         // Create the module in memory
         let module = iris::py::make_module(py).expect("make_module");
-        
+
         // Inject the module into Python's global sys.modules cache.
         let sys = py.import("sys").expect("Failed to import sys");
         sys.getattr("modules")
@@ -28,7 +28,8 @@ async fn test_path_supervisor_restart_one() {
             .unwrap();
 
         // create a path supervisor for the prefix
-        rt.call_method1("create_path_supervisor", ("/svc/restart",)).unwrap();
+        rt.call_method1("create_path_supervisor", ("/svc/restart",))
+            .unwrap();
 
         // Python factory that spawns a new observed actor under same path
         let locals = pyo3::types::PyDict::new(py);

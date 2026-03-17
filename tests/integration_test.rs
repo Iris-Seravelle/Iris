@@ -173,11 +173,7 @@ async fn supervisor_restart_one_for_one() {
     });
 
     // supervise the pid with RestartOne
-    rt.supervise(
-        pid,
-        factory,
-        iris::supervisor::RestartStrategy::RestartOne,
-    );
+    rt.supervise(pid, factory, iris::supervisor::RestartStrategy::RestartOne);
 
     // Link the factory-spawned child to a second observer to verify exit signals
     let pid2 = rt.spawn_observed_handler(1);
@@ -237,7 +233,8 @@ async fn children_die_with_parent_normal_exit() {
     assert!(rt.is_alive(grandchild));
 
     // send the signal that allows parent to finish
-    rt.send(parent, Message::User(Bytes::from_static(b"stop"))).unwrap();
+    rt.send(parent, Message::User(Bytes::from_static(b"stop")))
+        .unwrap();
     // allow the parent and its descendants to unwind
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -265,7 +262,8 @@ async fn children_die_if_parent_crashes() {
         }
     });
 
-    rt.send(parent, Message::User(Bytes::from_static(b"boom"))).unwrap();
+    rt.send(parent, Message::User(Bytes::from_static(b"boom")))
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     assert!(!rt.is_alive(parent));

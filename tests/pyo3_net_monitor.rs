@@ -57,7 +57,8 @@ async fn test_remote_monitoring_is_node_level_not_pid_level() {
 
         // Tell Node B to monitor the proxy; this will in turn watch the
         // real remote actor and shut down the proxy if the node disappears.
-        rt.call_method1("monitor_remote", (addr, proxy_pid)).unwrap();
+        rt.call_method1("monitor_remote", (addr, proxy_pid))
+            .unwrap();
         rt.into_py(py)
     });
 
@@ -77,6 +78,9 @@ async fn test_remote_monitoring_is_node_level_not_pid_level() {
             .unwrap()
             .extract(py)
             .unwrap();
-        assert!(alive, "proxy should remain alive while remote node is reachable");
+        assert!(
+            alive,
+            "proxy should remain alive while remote node is reachable"
+        );
     });
 }

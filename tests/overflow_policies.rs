@@ -1,5 +1,5 @@
-use iris::mailbox::{bounded_channel, Message, SystemMessage};
 use bytes::Bytes;
+use iris::mailbox::{bounded_channel, Message, SystemMessage};
 
 #[tokio::test]
 async fn bounded_drop_new_accepts_capacity_then_rejects() {

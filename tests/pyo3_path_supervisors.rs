@@ -19,8 +19,10 @@ async fn test_path_supervisor_watch_children() {
             .unwrap();
 
         // create a path supervisor and watch the pid
-        rt.call_method1("create_path_supervisor", ("/svc/test",)).unwrap();
-        rt.call_method1("path_supervisor_watch", ("/svc/test", pid)).unwrap();
+        rt.call_method1("create_path_supervisor", ("/svc/test",))
+            .unwrap();
+        rt.call_method1("path_supervisor_watch", ("/svc/test", pid))
+            .unwrap();
 
         let children: Vec<u64> = rt
             .call_method1("path_supervisor_children", ("/svc/test",))
@@ -31,7 +33,8 @@ async fn test_path_supervisor_watch_children() {
         assert!(children.contains(&pid));
 
         // remove and ensure empty
-        rt.call_method1("remove_path_supervisor", ("/svc/test",)).unwrap();
+        rt.call_method1("remove_path_supervisor", ("/svc/test",))
+            .unwrap();
         let children2: Vec<u64> = rt
             .call_method1("path_supervisor_children", ("/svc/test",))
             .unwrap()
