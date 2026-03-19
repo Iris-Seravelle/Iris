@@ -16,6 +16,12 @@ pub struct Instruction {
     pub arg: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyError {
+    InvalidJumpTarget,
+    InvalidRelativeJump,
+}
+
 pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
     let meta = py.eval(
         r#"
@@ -115,9 +121,9 @@ pub fn instrument_with_probe(
     original: &[Instruction],
     probe: &[Instruction],
     meta: &OpcodeMeta,
-) -> Vec<Instruction> {
+) -> Result<Vec<Instruction>, VerifyError> {
     if original.is_empty() {
-        return original.to_vec();
+        return Ok(original.to_vec());
     }
 
     let mut check_sites: HashSet<usize> = HashSet::new();
@@ -147,10 +153,72 @@ pub fn instrument_with_probe(
         source_old_idx.push(Some(idx));
     }
 
-    let _ = source_old_idx;
-    let _ = old_to_new;
+    for (new_idx, src) in source_old_idx.iter().enumerate() {
+        let Some(old_idx) = src else {
+            continue;
+        };
 
-    out
+        let current = out[new_idx].clone();
+        let Some(old_target) = jump_target(*old_idx, &current, meta, original.len()) else {
+            continue;
+        };
+        let new_target = old_to_new[old_target];
+
+        if meta.hasjabs.contains(&(current.op as u16)) {
+            out[new_idx].arg = new_target as u32;
+            continue;
+        }
+
+        if meta.hasjrel.contains(&(current.op as u16)) {
+            if meta.backward_relative.contains(&(current.op as u16)) {
+                if new_target > new_idx + 1 {
+                    return Err(VerifyError::InvalidRelativeJump);
+                }
+                out[new_idx].arg = (new_idx + 1 - new_target) as u32;
+            } else {
+                if new_target < new_idx + 1 {
+                    return Err(VerifyError::InvalidRelativeJump);
+                }
+                out[new_idx].arg = (new_target - (new_idx + 1)) as u32;
+            }
+        }
+    }
+
+    verify_instructions(&out, meta)?;
+    Ok(out)
+}
+
+pub fn verify_instructions(code: &[Instruction], meta: &OpcodeMeta) -> Result<(), VerifyError> {
+    for (idx, ins) in code.iter().enumerate() {
+        if meta.hasjabs.contains(&(ins.op as u16)) {
+            if (ins.arg as usize) >= code.len() {
+                return Err(VerifyError::InvalidJumpTarget);
+            }
+            continue;
+        }
+
+        if !meta.hasjrel.contains(&(ins.op as u16)) {
+            continue;
+        }
+
+        if meta.backward_relative.contains(&(ins.op as u16)) {
+            let base = idx + 1;
+            if (ins.arg as usize) > base {
+                return Err(VerifyError::InvalidRelativeJump);
+            }
+            let t = base - ins.arg as usize;
+            if t >= code.len() {
+                return Err(VerifyError::InvalidJumpTarget);
+            }
+        } else {
+            let t = idx + 1 + ins.arg as usize;
+            if t >= code.len() {
+                return Err(VerifyError::InvalidJumpTarget);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn probe_instructions(py: Python, extended_arg: u8) -> PyResult<Vec<Instruction>> {
@@ -220,7 +288,7 @@ mod tests {
         ];
         let probe = vec![Instruction { op: 9, arg: 0 }];
 
-        let patched = instrument_with_probe(&original, &probe, &meta);
+        let patched = instrument_with_probe(&original, &probe, &meta).expect("instrumentation should be valid");
         assert!(patched.len() > original.len());
     }
 }

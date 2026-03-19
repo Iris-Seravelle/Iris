@@ -4,7 +4,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "experimental bytecode transmutation hardening in progress"]
 async fn test_vortex_preemption_on_while_true() {
     Python::with_gil(|py| {
         let m = iris::py::make_module(py).unwrap();
