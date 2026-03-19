@@ -35,6 +35,22 @@ def endless():
             .unwrap()
             .call1(py, (endless_func,))
             .unwrap();
+        assert!(!shadow.as_ref(py).is(endless_func));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(mode == "rewrite" || mode == "fallback");
+        assert!(rewrite_attempted || mode == "fallback");
 
         let current_original_code = endless_func
             .getattr("__code__")

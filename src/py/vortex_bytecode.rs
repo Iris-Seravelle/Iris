@@ -18,8 +18,30 @@ pub struct Instruction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
+    InvalidWordcodeShape,
+    EmptyProbe,
+    OversizedCode,
     InvalidJumpTarget,
     InvalidRelativeJump,
+    InvalidCacheLayout,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuickeningSupport {
+    pub cache_opcode: Option<u8>,
+    pub inline_cache_entries: Vec<u16>,
+}
+
+const MAX_WORDCODE_BYTES: usize = 4 * 1024 * 1024;
+
+pub fn verify_wordcode_bytes(raw: &[u8]) -> Result<(), VerifyError> {
+    if raw.is_empty() || raw.len() % 2 != 0 {
+        return Err(VerifyError::InvalidWordcodeShape);
+    }
+    if raw.len() > MAX_WORDCODE_BYTES {
+        return Err(VerifyError::OversizedCode);
+    }
+    Ok(())
 }
 
 pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
@@ -46,6 +68,32 @@ pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
         hasjabs: hasjabs.into_iter().collect(),
         hasjrel: hasjrel.into_iter().collect(),
         backward_relative: backward_relative.into_iter().collect(),
+    })
+}
+
+pub fn quickening_support(py: Python) -> PyResult<QuickeningSupport> {
+    let data = py.eval(
+        r#"
+(lambda dis: (
+    dis.opmap.get("CACHE", -1),
+    list(getattr(dis, "_inline_cache_entries", [])),
+))(__import__("dis"))
+"#,
+        None,
+        None,
+    )?;
+
+    let cache_raw: i16 = data.get_item(0)?.extract()?;
+    let entries: Vec<u16> = data.get_item(1)?.extract()?;
+    let cache_opcode = if cache_raw >= 0 {
+        Some(cache_raw as u8)
+    } else {
+        None
+    };
+
+    Ok(QuickeningSupport {
+        cache_opcode,
+        inline_cache_entries: entries,
     })
 }
 
@@ -122,6 +170,10 @@ pub fn instrument_with_probe(
     probe: &[Instruction],
     meta: &OpcodeMeta,
 ) -> Result<Vec<Instruction>, VerifyError> {
+    if probe.is_empty() {
+        return Err(VerifyError::EmptyProbe);
+    }
+
     if original.is_empty() {
         return Ok(original.to_vec());
     }
@@ -189,6 +241,10 @@ pub fn instrument_with_probe(
 }
 
 pub fn verify_instructions(code: &[Instruction], meta: &OpcodeMeta) -> Result<(), VerifyError> {
+    if code.is_empty() {
+        return Ok(());
+    }
+
     for (idx, ins) in code.iter().enumerate() {
         if meta.hasjabs.contains(&(ins.op as u16)) {
             if (ins.arg as usize) >= code.len() {
@@ -216,6 +272,41 @@ pub fn verify_instructions(code: &[Instruction], meta: &OpcodeMeta) -> Result<()
                 return Err(VerifyError::InvalidJumpTarget);
             }
         }
+    }
+
+    Ok(())
+}
+
+pub fn verify_cache_layout(
+    code: &[Instruction],
+    quickening: &QuickeningSupport,
+) -> Result<(), VerifyError> {
+    let Some(cache_opcode) = quickening.cache_opcode else {
+        return Ok(());
+    };
+
+    if quickening.inline_cache_entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut i = 0usize;
+    while i < code.len() {
+        let op = code[i].op as usize;
+
+        if code[i].op == cache_opcode {
+            i += 1;
+            continue;
+        }
+
+        let expected_caches = quickening.inline_cache_entries.get(op).copied().unwrap_or(0) as usize;
+        for j in 0..expected_caches {
+            let next = i + 1 + j;
+            if next >= code.len() || code[next].op != cache_opcode {
+                return Err(VerifyError::InvalidCacheLayout);
+            }
+        }
+
+        i += 1 + expected_caches;
     }
 
     Ok(())
@@ -290,5 +381,72 @@ mod tests {
 
         let patched = instrument_with_probe(&original, &probe, &meta).expect("instrumentation should be valid");
         assert!(patched.len() > original.len());
+    }
+
+    #[test]
+    fn verify_wordcode_bytes_rejects_invalid_shape() {
+        assert_eq!(verify_wordcode_bytes(&[]), Err(VerifyError::InvalidWordcodeShape));
+        assert_eq!(verify_wordcode_bytes(&[1]), Err(VerifyError::InvalidWordcodeShape));
+    }
+
+    #[test]
+    fn verify_instructions_rejects_bad_abs_jump() {
+        let meta = OpcodeMeta {
+            extended_arg: 144,
+            hasjabs: [113u16].into_iter().collect(),
+            hasjrel: HashSet::new(),
+            backward_relative: HashSet::new(),
+        };
+
+        let code = vec![Instruction { op: 113, arg: 99 }];
+        assert_eq!(verify_instructions(&code, &meta), Err(VerifyError::InvalidJumpTarget));
+    }
+
+    #[test]
+    fn verify_instructions_rejects_bad_backward_rel_jump() {
+        let meta = OpcodeMeta {
+            extended_arg: 144,
+            hasjabs: HashSet::new(),
+            hasjrel: [200u16].into_iter().collect(),
+            backward_relative: [200u16].into_iter().collect(),
+        };
+
+        let code = vec![Instruction { op: 200, arg: 2 }];
+        assert_eq!(verify_instructions(&code, &meta), Err(VerifyError::InvalidRelativeJump));
+    }
+
+    #[test]
+    fn verify_cache_layout_rejects_missing_cache_slots() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: {
+                let mut v = vec![0u16; 256];
+                v[10] = 2;
+                v
+            },
+        };
+
+        let code = vec![Instruction { op: 10, arg: 0 }, Instruction { op: 0, arg: 0 }];
+        assert_eq!(verify_cache_layout(&code, &quick), Err(VerifyError::InvalidCacheLayout));
+    }
+
+    #[test]
+    fn verify_cache_layout_accepts_expected_cache_slots() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: {
+                let mut v = vec![0u16; 256];
+                v[10] = 2;
+                v
+            },
+        };
+
+        let code = vec![
+            Instruction { op: 10, arg: 0 },
+            Instruction { op: 0, arg: 0 },
+            Instruction { op: 0, arg: 0 },
+            Instruction { op: 5, arg: 0 },
+        ];
+        assert_eq!(verify_cache_layout(&code, &quick), Ok(()));
     }
 }
