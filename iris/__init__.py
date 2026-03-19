@@ -374,13 +374,13 @@ class Runtime:
         """Return inferred backpressure status (NORMAL, HIGH, CRITICAL) for the actor."""
         return self._inner.mailbox_backpressure(pid)
 
-    def send_with_backpressure(self, pid: int, data: bytes) -> Tuple[bool, Optional[str]]:
+    def send_with_backpressure(self, pid: int, data: bytes) -> tuple[bool, Optional[str]]:
         """Send data and get instant backpressure feedback (Python wrapper)."""
         success = self.send(pid, data)
         level = self.mailbox_backpressure(pid)
         return success, level
 
-    def send_user_with_backpressure(self, pid: int, data: bytes) -> Tuple[bool, Optional[str]]:
+    def send_user_with_backpressure(self, pid: int, data: bytes) -> tuple[bool, Optional[str]]:
         """Send data and get instant backpressure feedback using send_user path."""
         success = self.send(pid, data)
         level = self.mailbox_backpressure(pid)
