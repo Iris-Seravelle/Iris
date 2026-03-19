@@ -16,6 +16,7 @@ use crate::py::jit::config::{
     quantum_variant_failure_limit,
     quantum_variant_promotion_min_runs,
 };
+
 #[derive(Clone, Default)]
 pub(crate) struct QuantumStats {
     pub(crate) ewma_ns: f64,
@@ -35,7 +36,7 @@ pub(crate) struct QuantumState {
 
 pub(crate) static QUANTUM_REGISTRY: OnceCell<Mutex<HashMap<usize, QuantumState>>> = OnceCell::new();
 pub(crate) static QUANTUM_PENDING_SEEDS: OnceCell<Mutex<HashMap<usize, Vec<QuantumProfileSeed>>>> =
-    OnceCell::new();
+OnceCell::new();
 
 fn apply_quantum_seeds(state: &mut QuantumState, seeds: &[QuantumProfileSeed]) {
     for seed in seeds {
@@ -134,9 +135,9 @@ pub(crate) fn preferred_seed_variant_index(seeds: &[QuantumProfileSeed]) -> Opti
 
     let scalar_seed = seeds.iter().find(|seed| seed.index == 1).cloned();
     let all_thin_samples = seeds
-        .iter()
-        .filter(|seed| quantum_seed_score(seed).is_some())
-        .all(|seed| seed.runs < MIN_CONFIDENT_RUNS);
+    .iter()
+    .filter(|seed| quantum_seed_score(seed).is_some())
+    .all(|seed| seed.runs < MIN_CONFIDENT_RUNS);
 
     if all_thin_samples {
         if let Some(seed) = scalar_seed {
@@ -158,11 +159,11 @@ pub(crate) fn preferred_seed_variant_index(seeds: &[QuantumProfileSeed]) -> Opti
                 if score < best_score
                     || ((score - best_score).abs() < f64::EPSILON && seed.runs > best_runs)
                     || ((score - best_score).abs() < f64::EPSILON
-                        && seed.runs == best_runs
-                        && seed.index < best_idx)
-                {
-                    best = Some((seed.index, score, seed.runs));
-                }
+                    && seed.runs == best_runs
+                    && seed.index < best_idx)
+                    {
+                        best = Some((seed.index, score, seed.runs));
+                    }
             }
         }
     }
@@ -172,11 +173,11 @@ pub(crate) fn preferred_seed_variant_index(seeds: &[QuantumProfileSeed]) -> Opti
 
 pub(crate) fn active_indices(state: &QuantumState) -> Vec<usize> {
     state
-        .active
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, is_active)| if *is_active { Some(idx) } else { None })
-        .collect()
+    .active
+    .iter()
+    .enumerate()
+    .filter_map(|(idx, is_active)| if *is_active { Some(idx) } else { None })
+    .collect()
 }
 
 pub(crate) fn quantum_stability_score(state: &QuantumState) -> f64 {
@@ -268,6 +269,7 @@ pub(crate) fn reconcile_quantum_lifecycle_state(state: &mut QuantumState) {
     state.active[state.baseline_idx] = true;
 }
 
+#[allow(dead_code)]
 pub(crate) fn reconcile_quantum_lifecycle(func_key: usize) -> bool {
     if let Some(map) = QUANTUM_REGISTRY.get() {
         let mut guard = map.lock().unwrap();
@@ -279,21 +281,23 @@ pub(crate) fn reconcile_quantum_lifecycle(func_key: usize) -> bool {
     false
 }
 
+#[allow(dead_code)]
 pub(crate) fn quantum_active_variant_count(func_key: usize) -> Option<usize> {
     QUANTUM_REGISTRY.get().and_then(|map| {
         map.lock()
-            .unwrap()
-            .get(&func_key)
-            .map(|state| state.active.iter().filter(|a| **a).count())
+        .unwrap()
+        .get(&func_key)
+        .map(|state| state.active.iter().filter(|a| **a).count())
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn quantum_stability_for(func_key: usize) -> Option<f64> {
     QUANTUM_REGISTRY.get().and_then(|map| {
         map.lock()
-            .unwrap()
-            .get(&func_key)
-            .map(quantum_stability_score)
+        .unwrap()
+        .get(&func_key)
+        .map(quantum_stability_score)
     })
 }
 
@@ -310,8 +314,8 @@ pub(crate) fn choose_quantum_index(state: &mut QuantumState) -> usize {
     let active = active_indices(state);
     if active.is_empty() {
         return state
-            .baseline_idx
-            .min(state.entries.len().saturating_sub(1));
+        .baseline_idx
+        .min(state.entries.len().saturating_sub(1));
     }
 
     state.total_runs = state.total_runs.saturating_add(1);
@@ -321,8 +325,8 @@ pub(crate) fn choose_quantum_index(state: &mut QuantumState) -> usize {
         return active[rr];
     }
     let mut best_idx = state
-        .baseline_idx
-        .min(state.entries.len().saturating_sub(1));
+    .baseline_idx
+    .min(state.entries.len().saturating_sub(1));
     let mut best_score = f64::MAX;
     for idx in active {
         let s = &state.stats[idx];
@@ -337,10 +341,10 @@ pub(crate) fn choose_quantum_index(state: &mut QuantumState) -> usize {
 
 pub(crate) fn has_unrun_active_variant(state: &QuantumState) -> bool {
     state
-        .stats
-        .iter()
-        .enumerate()
-        .any(|(idx, stats)| state.active.get(idx).copied().unwrap_or(false) && stats.runs == 0)
+    .stats
+    .iter()
+    .enumerate()
+    .any(|(idx, stats)| state.active.get(idx).copied().unwrap_or(false) && stats.runs == 0)
 }
 
 pub(crate) fn should_use_quantum_dispatch(
@@ -385,20 +389,20 @@ pub fn quantum_profile_snapshot(func_key: usize) -> Option<Vec<QuantumProfilePoi
     QUANTUM_REGISTRY.get().and_then(|map| {
         map.lock().unwrap().get(&func_key).map(|state| {
             state
-                .stats
-                .iter()
-                .enumerate()
-                .map(|(index, stats)| QuantumProfilePoint {
-                    index: state
-                        .entries
-                        .get(index)
-                        .map(|entry| quantum_variant_index_for_strategy(entry.variant_strategy))
-                        .unwrap_or(index),
-                    ewma_ns: stats.ewma_ns,
-                    runs: stats.runs,
-                    failures: stats.failures,
-                })
-                .collect()
+            .stats
+            .iter()
+            .enumerate()
+            .map(|(index, stats)| QuantumProfilePoint {
+                index: state
+                .entries
+                .get(index)
+                .map(|entry| quantum_variant_index_for_strategy(entry.variant_strategy))
+                .unwrap_or(index),
+                 ewma_ns: stats.ewma_ns,
+                 runs: stats.runs,
+                 failures: stats.failures,
+            })
+            .collect()
         })
     })
 }

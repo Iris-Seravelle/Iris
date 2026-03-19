@@ -1,6 +1,11 @@
 // src/py/jit/codegen/compiler.rs
 //! Top-level JIT compilation functions for Iris.
 
+use std::collections::HashMap;
+
+use cranelift::prelude::*;
+use cranelift_module::{Linkage, Module};
+
 use crate::py::jit::heuristics;
 use crate::py::jit::parser::Expr;
 
@@ -39,11 +44,11 @@ pub fn compile_jit_quantum(
 
     if let Some(exp) = compile_jit_impl(expr_str, arg_names, true, return_type)
         .map(|e| e.with_strategy(QuantumVariantStrategy::FastTrigExperiment))
-    {
-        out.push(exp);
-    }
+        {
+            out.push(exp);
+        }
 
-    crate::py::jit::jit_log(|| format!("[Iris][jit][quantum] built {} variants", out.len()));
+        crate::py::jit::jit_log(|| format!("[Iris][jit][quantum] built {} variants", out.len()));
     out
 }
 
@@ -55,11 +60,11 @@ pub fn compile_jit_quantum_variant(
 ) -> Option<JitEntry> {
     match variant_index {
         0 => compile_jit_impl(expr_str, arg_names, true, return_type)
-            .map(|entry| entry.with_strategy(QuantumVariantStrategy::Auto)),
+        .map(|entry| entry.with_strategy(QuantumVariantStrategy::Auto)),
         1 => compile_jit_impl(expr_str, arg_names, false, return_type)
-            .map(|entry| entry.with_strategy(QuantumVariantStrategy::ScalarFallback)),
+        .map(|entry| entry.with_strategy(QuantumVariantStrategy::ScalarFallback)),
         2 => compile_jit_impl(expr_str, arg_names, true, return_type)
-            .map(|entry| entry.with_strategy(QuantumVariantStrategy::FastTrigExperiment)),
+        .map(|entry| entry.with_strategy(QuantumVariantStrategy::FastTrigExperiment)),
         _ => None,
     }
 }
@@ -197,8 +202,8 @@ pub(crate) fn compile_jit_impl(
         let idx = next_jit_func_id();
         let func_name = format!("jit_func_{}", idx);
         let id = module
-            .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
-            .ok();
+        .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
+        .ok();
         if id.is_none() {
             return None;
         }
