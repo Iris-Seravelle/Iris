@@ -8,7 +8,7 @@
 
 **Hybrid distributed runtime fabric for actors, native compute offload, and cross-language services.**
 
-[Architecture](docs/architecture.md) • [Usage Guide](docs/usage.md) • [JIT & Offload](docs/jit.md) • [Distributed Mesh](docs/distributed.md)
+[Architecture](docs/architecture.md) • [Usage Guide](docs/usage.md) • [JIT & Offload](docs/jit.md) • [Distributed Mesh](docs/distributed.md) • [Vortex-Transmuter](docs/vortex.md)
 
 </div>
 
@@ -36,6 +36,7 @@ Iris uses a **cooperative reduction-based scheduler** for fairness, providing bu
 - **Self-Healing:** Path-scoped supervisors and structured `EXIT` reasons for fault tolerance.
 - **JIT Acceleration:** Transparently compile Python math functions to native machine code.
     - **Quantum Speculation:** Optional multi-variant JIT selection with runtime telemetry, bounded by compile budget and cooldown controls (see [JIT Internals & Configuration](docs/jit.md)).
+- **Vortex-Transmuter (Experimental):** Instruction-bound preemption, transactional ghosting primitives, and guarded bytecode transmutation with explicit fallback telemetry (see [Vortex-Transmuter Guide](docs/vortex.md)).
 
 ---
 
@@ -85,6 +86,7 @@ print(fast_math(10.0))
 - [Usage Examples & API Guide](docs/usage.md)
 - [JIT Internals & Configuration](docs/jit.md)
 - [Distributed Mesh & Discovery](docs/distributed.md)
+- [Vortex-Transmuter Guide & Roadmap](docs/vortex.md)
 
 ---
 
