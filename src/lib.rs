@@ -23,7 +23,9 @@ pub mod node;
 
 use crate::pid::Pid;
 #[cfg(feature = "vortex")]
-use crate::vortex::VortexEngine;
+use crate::vortex::{
+    VortexEngine, VortexGhostPolicy, VortexGhostResolution, VortexVioCall,
+};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -69,7 +71,7 @@ pub struct Runtime {
     monitor_backoff_max: Arc<Mutex<Duration>>,
     monitor_failure_threshold: Arc<Mutex<usize>>,
     #[cfg(feature = "vortex")]
-    vortex_engine: Option<VortexEngine>,
+    vortex_engine: Option<Arc<Mutex<VortexEngine>>>,
     registry: Arc<registry::NameRegistry>,
     /// Mapping for locally‑spawned proxies that forward to remote actors.
     /// Key is the local proxy PID; value is (remote address, remote PID).
@@ -103,6 +105,10 @@ pub struct Runtime {
     // Timers: map from timer id -> cancellation sender
     timers: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
     timer_counter: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_ghost_counter: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_replay_count: Arc<AtomicU64>,
 }
 
 impl Runtime {
@@ -133,6 +139,10 @@ impl Runtime {
             release_gil_strict: Arc::new(Mutex::new(false)),
             timers: Arc::new(Mutex::new(HashMap::new())),
             timer_counter: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_ghost_counter: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_replay_count: Arc::new(AtomicU64::new(0)),
             network_io_timeout: Arc::new(Mutex::new(Duration::from_secs(5))),
             network_max_payload: Arc::new(Mutex::new(1024 * 1024)),
             network_max_name_len: Arc::new(Mutex::new(1024)),
@@ -144,7 +154,7 @@ impl Runtime {
             behavior_versions: Arc::new(DashMap::new()),
             behavior_history: Arc::new(DashMap::new()),
             #[cfg(feature = "vortex")]
-            vortex_engine: Some(VortexEngine::new()),
+            vortex_engine: Some(Arc::new(Mutex::new(VortexEngine::new()))),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -229,7 +239,169 @@ impl Runtime {
 
     #[cfg(feature = "vortex")]
     pub fn vortex_engine(&self) -> Option<VortexEngine> {
-        self.vortex_engine.clone()
+        self.vortex_engine
+            .as_ref()
+            .and_then(|engine| engine.lock().ok().map(|guard| guard.clone()))
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_start_transaction_with_checkpoint(
+        &self,
+        id: u64,
+        locals: HashMap<String, Vec<u8>>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => {
+                guard.start_transaction_with_checkpoint(id, locals);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_stage_transaction_vio(&self, op: String, payload: Vec<u8>) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.stage_transaction_vio(op, payload),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_commit_transaction(&self) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.commit_transaction(),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_take_committed_transaction_vio(&self) -> Option<Vec<VortexVioCall>> {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(mut guard) => Some(guard.take_committed_transaction_vio()),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_start_ghost_transaction_with_checkpoint(
+        &self,
+        id: u64,
+        locals: HashMap<String, Vec<u8>>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => {
+                guard.start_ghost_transaction_with_checkpoint(id, locals);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_stage_ghost_transaction_vio(
+        &self,
+        ghost_id: u64,
+        op: String,
+        payload: Vec<u8>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.stage_ghost_transaction_vio(ghost_id, op, payload),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_resolve_primary_ghost_race(
+        &self,
+        ghost_id: u64,
+        winner_id: u64,
+        policy: VortexGhostPolicy,
+    ) -> Option<VortexGhostResolution> {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.resolve_primary_ghost_race(ghost_id, winner_id, policy),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_replay_committed_vio_calls<F>(&self, calls: &[VortexVioCall], executor: F) -> Option<usize>
+    where
+        F: FnMut(&VortexVioCall) -> bool,
+    {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(guard) => Some(guard.replay_committed_vio_calls(calls, executor)),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_replay_count(&self) -> u64 {
+        self.vortex_auto_replay_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_auto_checkpoint_and_replay_on_suspend(&self, pid: Pid, budget: usize) {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return;
+        };
+
+        let primary_id = self.vortex_ghost_counter.fetch_add(1, Ordering::Relaxed);
+        let ghost_id = self.vortex_ghost_counter.fetch_add(1, Ordering::Relaxed);
+
+        let mut primary_locals = HashMap::new();
+        primary_locals.insert("pid".to_string(), pid.to_le_bytes().to_vec());
+        primary_locals.insert("budget".to_string(), (budget as u64).to_le_bytes().to_vec());
+
+        let mut ghost_locals = HashMap::new();
+        ghost_locals.insert("pid".to_string(), pid.to_le_bytes().to_vec());
+        ghost_locals.insert("budget".to_string(), (budget as u64).to_le_bytes().to_vec());
+
+        let Ok(mut guard) = engine.lock() else {
+            return;
+        };
+
+        guard.start_transaction_with_checkpoint(primary_id, primary_locals);
+        let _ = guard.stage_transaction_vio("suspend_primary".to_string(), pid.to_le_bytes().to_vec());
+
+        guard.start_ghost_transaction_with_checkpoint(ghost_id, ghost_locals);
+        let _ = guard.stage_ghost_transaction_vio(ghost_id, "suspend_ghost".to_string(), pid.to_le_bytes().to_vec());
+
+        if let Some(resolution) = guard.resolve_primary_ghost_race(
+            ghost_id,
+            ghost_id,
+            VortexGhostPolicy::FirstSafePointWins,
+        ) {
+            let applied = guard.replay_committed_vio_calls(&resolution.committed_vio, |_| true);
+            if applied > 0 {
+                self.vortex_auto_replay_count
+                    .fetch_add(applied as u64, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Get the current release_gil limits (max_threads, pool_size).
@@ -1106,6 +1278,8 @@ impl Runtime {
 
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
+            #[cfg(feature = "vortex")]
+            let rt_vortex_clone = rt_exit_clone.clone();
 
             #[cfg(feature = "vortex")]
             let mut vortex_engine = rt_exit_clone
@@ -1118,6 +1292,7 @@ impl Runtime {
                     #[cfg(feature = "vortex")]
                     {
                         if let Err(_) = vortex_engine.preempt_tick() {
+                            rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                             vortex_engine.detach_stalled_thread();
                             vortex_engine.replenish_budget(budget);
                             tokio::task::yield_now().await;
@@ -1136,6 +1311,7 @@ impl Runtime {
                                 #[cfg(feature = "vortex")]
                                 {
                                     if let Err(_) = vortex_engine.preempt_tick() {
+                                        rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                                         vortex_engine.detach_stalled_thread();
                                         vortex_engine.replenish_budget(budget);
                                         tokio::task::yield_now().await;
@@ -2188,5 +2364,131 @@ mod tests {
             .rollback_behavior(pid, 1)
             .expect_err("rollback should fail");
         assert!(err.contains("history"));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_ghost_lifecycle_wrappers_work() {
+        let rt = Runtime::new();
+
+        assert!(rt.vortex_start_transaction_with_checkpoint(10, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("io_primary".to_string(), b"p".to_vec()));
+
+        assert!(rt.vortex_start_ghost_transaction_with_checkpoint(20, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_a".to_string(), b"a".to_vec()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_b".to_string(), b"b".to_vec()));
+
+        let resolution = rt
+            .vortex_resolve_primary_ghost_race(20, 20, crate::vortex::VortexGhostPolicy::FirstSafePointWins)
+            .expect("resolution should exist");
+        assert_eq!(resolution.winner_id, 20);
+        assert_eq!(resolution.committed_vio.len(), 2);
+
+        let mut seen = Vec::new();
+        let applied = rt
+            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |call| {
+                seen.push(call.op.clone());
+                true
+            })
+            .expect("replay should be available");
+        assert_eq!(applied, 2);
+        assert_eq!(seen, vec!["io_ghost_a".to_string(), "io_ghost_b".to_string()]);
+
+        let second = rt.vortex_resolve_primary_ghost_race(20, 20, crate::vortex::VortexGhostPolicy::FirstSafePointWins);
+        assert!(second.is_none());
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_commit_and_take_committed_vio() {
+        let rt = Runtime::new();
+        assert!(rt.vortex_start_transaction_with_checkpoint(30, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("io_commit".to_string(), b"x".to_vec()));
+        assert!(rt.vortex_commit_transaction());
+
+        let committed = rt
+            .vortex_take_committed_transaction_vio()
+            .expect("engine should exist");
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].op, "io_commit");
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_ghost_wrappers_during_actor_execution() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_observed_handler(8);
+
+        assert!(rt.send(pid, mailbox::Message::User(b"before".to_vec().into())).is_ok());
+
+        assert!(rt.vortex_start_transaction_with_checkpoint(101, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("primary_call".to_string(), b"p".to_vec()));
+        assert!(rt.vortex_start_ghost_transaction_with_checkpoint(202, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(202, "ghost_call".to_string(), b"g".to_vec()));
+
+        let resolution = rt
+            .vortex_resolve_primary_ghost_race(202, 202, crate::vortex::VortexGhostPolicy::FirstSafePointWins)
+            .expect("resolution should succeed");
+        assert_eq!(resolution.winner_id, 202);
+        assert_eq!(resolution.committed_vio.len(), 1);
+
+        let applied = rt
+            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |_call| true)
+            .expect("replay should be available");
+        assert_eq!(applied, 1);
+
+        assert!(rt.send(pid, mailbox::Message::User(b"after".to_vec().into())).is_ok());
+
+        let observed = timeout(Duration::from_secs(1), async {
+            loop {
+                let msgs = rt
+                    .get_observed_messages(pid)
+                    .expect("observed actor should exist");
+
+                let user_msgs: Vec<Vec<u8>> = msgs
+                    .into_iter()
+                    .filter_map(|m| match m {
+                        mailbox::Message::User(b) => Some(b.to_vec()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if user_msgs.len() >= 2 {
+                    break user_msgs;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for observed messages");
+
+        assert!(observed.iter().any(|m| m.as_slice() == b"before"));
+        assert!(observed.iter().any(|m| m.as_slice() == b"after"));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_ghost_hook_triggers_on_preempt_suspend() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+
+        // Drive enough preemption checks to force suspend-path execution.
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if rt.vortex_auto_replay_count() > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto replay hook to run on preempt suspend");
+
+        assert!(rt.vortex_auto_replay_count() > 0);
     }
 }

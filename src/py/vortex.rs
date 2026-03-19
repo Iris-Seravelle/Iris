@@ -1,8 +1,7 @@
 use crate::py::vortex_bytecode::{
     decode_wordcode, encode_wordcode, instrument_with_probe, opcode_meta, probe_instructions,
-    quickening_support,
+    quickening_support, evaluate_rewrite_compatibility, validate_probe_compatibility,
     verify_cache_layout,
-    verify_wordcode_bytes,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -93,10 +92,6 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .getattr("co_code")
         .and_then(|v| v.extract())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_code: {e}")))?;
-    if verify_wordcode_bytes(raw).is_err() {
-        set_guard_telemetry("fallback", "invalid_wordcode_shape", py_minor, false, false);
-        return fallback_shadow(py, py_func, "invalid wordcode shape");
-    }
 
     let globals_any = py_func
         .getattr("__globals__")
@@ -121,60 +116,67 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .set_item("_vortex_check", check_fn)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-inject: {e}")))?;
 
-    // Primary RFC path: bytecode-level shadow clone with verifier gate.
-    let enable_quickened_rewrite = py
-        .eval(
-            "__import__('os').environ.get('IRIS_VORTEX_ENABLE_QUICKENED_REWRITE', '0') == '1'",
-            None,
-            None,
-        )
-        .and_then(|v| v.extract::<bool>())
-        .unwrap_or(false);
+    // Primary RFC path: bytecode-level shadow clone with capability checks.
+    let meta = match opcode_meta(py) {
+        Ok(m) => m,
+        Err(_) => {
+            set_guard_telemetry("fallback", "opcode_metadata_unavailable", py_minor, false, false);
+            return fallback_shadow(py, py_func, "opcode metadata unavailable");
+        }
+    };
 
-    let quickening_allowed = py_minor < 11 || enable_quickened_rewrite;
-    if !quickening_allowed {
-        set_guard_telemetry("fallback", "quickening_guard_disabled", py_minor, false, false);
-        return fallback_shadow(py, py_func, "quickening guard disabled");
+    let quickening = match quickening_support(py) {
+        Ok(q) => q,
+        Err(_) => {
+            set_guard_telemetry("fallback", "quickening_metadata_unavailable", py_minor, false, false);
+            return fallback_shadow(py, py_func, "quickening metadata unavailable");
+        }
+    };
+
+    if let Err(reason) = evaluate_rewrite_compatibility(raw, meta.extended_arg, &quickening) {
+        set_guard_telemetry("fallback", reason, py_minor, false, false);
+        return fallback_shadow(py, py_func, reason);
     }
 
     set_guard_telemetry("rewrite", "attempt", py_minor, true, false);
-    if let Ok(meta) = opcode_meta(py) {
-        let original = decode_wordcode(raw, meta.extended_arg);
-        if let Ok(probe) = probe_instructions(py, meta.extended_arg) {
-            if let Ok(patched) = instrument_with_probe(&original, &probe, &meta) {
-                if let Ok(q) = quickening_support(py) {
-                    if verify_cache_layout(&original, &q).is_err() || verify_cache_layout(&patched, &q).is_err() {
-                        set_guard_telemetry("fallback", "cache_layout_rejected", py_minor, true, false);
-                        return fallback_shadow(py, py_func, "cache layout rejected");
-                    }
-                }
+    let original = decode_wordcode(raw, meta.extended_arg);
+    if let Ok(probe) = probe_instructions(py, meta.extended_arg) {
+        if let Err(reason) = validate_probe_compatibility(&probe, &quickening) {
+            set_guard_telemetry("fallback", reason, py_minor, true, false);
+            return fallback_shadow(py, py_func, reason);
+        }
 
-                let patched_raw = encode_wordcode(&patched, meta.extended_arg);
-                if patched_raw.len() <= MAX_PATCHED_CODE_BYTES {
-                    let kwargs = [("co_code", PyBytes::new(py, &patched_raw))].into_py_dict(py);
-                    if let Ok(new_code) = code.call_method("replace", (), Some(kwargs)) {
-                        if let Ok(types_mod) = py.import("types") {
-                            if let Ok(shadow) = types_mod.getattr("FunctionType").and_then(|ctor| {
-                                ctor.call1((
-                                    new_code,
-                                    globals,
-                                    py_func.getattr("__name__")?,
-                                    py_func.getattr("__defaults__")?,
-                                    py_func.getattr("__closure__")?,
-                                ))
-                            }) {
-                                if let Ok(kwdefaults) = py_func.getattr("__kwdefaults__") {
-                                    let _ = shadow.setattr("__kwdefaults__", kwdefaults);
-                                }
-                                set_guard_telemetry("rewrite", "applied", py_minor, true, true);
-                                return Ok(shadow.into());
+        if let Ok(patched) = instrument_with_probe(&original, &probe, &meta) {
+            if verify_cache_layout(&patched, &quickening).is_err() {
+                set_guard_telemetry("fallback", "patched_cache_layout_invalid", py_minor, true, false);
+                return fallback_shadow(py, py_func, "patched cache layout invalid");
+            }
+
+            let patched_raw = encode_wordcode(&patched, meta.extended_arg);
+            if patched_raw.len() <= MAX_PATCHED_CODE_BYTES {
+                let kwargs = [("co_code", PyBytes::new(py, &patched_raw))].into_py_dict(py);
+                if let Ok(new_code) = code.call_method("replace", (), Some(kwargs)) {
+                    if let Ok(types_mod) = py.import("types") {
+                        if let Ok(shadow) = types_mod.getattr("FunctionType").and_then(|ctor| {
+                            ctor.call1((
+                                new_code,
+                                globals,
+                                py_func.getattr("__name__")?,
+                                py_func.getattr("__defaults__")?,
+                                py_func.getattr("__closure__")?,
+                            ))
+                        }) {
+                            if let Ok(kwdefaults) = py_func.getattr("__kwdefaults__") {
+                                let _ = shadow.setattr("__kwdefaults__", kwdefaults);
                             }
+                            set_guard_telemetry("rewrite", "applied", py_minor, true, true);
+                            return Ok(shadow.into());
                         }
                     }
-                } else {
-                    set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
-                    return fallback_shadow(py, py_func, "patched code too large");
                 }
+            } else {
+                set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
+                return fallback_shadow(py, py_func, "patched code too large");
             }
         }
     }

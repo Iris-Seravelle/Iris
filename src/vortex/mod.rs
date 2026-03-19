@@ -36,7 +36,9 @@ pub use watcher::VortexWatcher;
 pub use transmuter::VortexTransmuter;
 
 #[cfg(feature = "vortex")]
-pub use transaction::VortexTransaction;
+pub use transaction::{
+	VortexGhostPolicy, VortexGhostResolution, VortexTransaction, VortexVioCall,
+};
 
 #[cfg(feature = "vortex")]
 pub use rescue_pool::RescuePool;

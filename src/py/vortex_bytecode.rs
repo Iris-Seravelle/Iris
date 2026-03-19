@@ -312,6 +312,45 @@ pub fn verify_cache_layout(
     Ok(())
 }
 
+pub fn evaluate_rewrite_compatibility(
+    raw: &[u8],
+    extended_arg: u8,
+    quickening: &QuickeningSupport,
+) -> Result<(), &'static str> {
+    match verify_wordcode_bytes(raw) {
+        Ok(()) => {}
+        Err(VerifyError::InvalidWordcodeShape) => return Err("invalid_wordcode_shape"),
+        Err(VerifyError::OversizedCode) => return Err("oversized_wordcode"),
+        Err(_) => return Err("invalid_wordcode"),
+    }
+
+    if quickening.cache_opcode.is_some() && quickening.inline_cache_entries.len() < 256 {
+        return Err("inline_cache_entries_incomplete");
+    }
+
+    let original = decode_wordcode(raw, extended_arg);
+    if verify_cache_layout(&original, quickening).is_err() {
+        return Err("original_cache_layout_invalid");
+    }
+
+    Ok(())
+}
+
+pub fn validate_probe_compatibility(
+    probe: &[Instruction],
+    quickening: &QuickeningSupport,
+) -> Result<(), &'static str> {
+    if probe.is_empty() {
+        return Err("empty_probe");
+    }
+
+    if verify_cache_layout(probe, quickening).is_err() {
+        return Err("probe_cache_layout_invalid");
+    }
+
+    Ok(())
+}
+
 pub fn probe_instructions(py: Python, extended_arg: u8) -> PyResult<Vec<Instruction>> {
     let locals = PyDict::new(py);
     py.run(
@@ -448,5 +487,72 @@ mod tests {
             Instruction { op: 5, arg: 0 },
         ];
         assert_eq!(verify_cache_layout(&code, &quick), Ok(()));
+    }
+
+    #[test]
+    fn evaluate_rewrite_compatibility_rejects_incomplete_cache_table() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: vec![0u16; 8],
+        };
+
+        let raw = vec![5u8, 0u8];
+        assert_eq!(
+            evaluate_rewrite_compatibility(&raw, 144, &quick),
+            Err("inline_cache_entries_incomplete")
+        );
+    }
+
+    #[test]
+    fn evaluate_rewrite_compatibility_rejects_invalid_raw_shape() {
+        let quick = QuickeningSupport {
+            cache_opcode: None,
+            inline_cache_entries: vec![],
+        };
+
+        let raw = vec![1u8];
+        assert_eq!(
+            evaluate_rewrite_compatibility(&raw, 144, &quick),
+            Err("invalid_wordcode_shape")
+        );
+    }
+
+    #[test]
+    fn evaluate_rewrite_compatibility_accepts_minimal_non_quickened() {
+        let quick = QuickeningSupport {
+            cache_opcode: None,
+            inline_cache_entries: vec![],
+        };
+
+        let raw = vec![5u8, 0u8, 6u8, 0u8];
+        assert_eq!(evaluate_rewrite_compatibility(&raw, 144, &quick), Ok(()));
+    }
+
+    #[test]
+    fn evaluate_rewrite_compatibility_rejects_invalid_original_cache_layout() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: {
+                let mut v = vec![0u16; 256];
+                v[10] = 1;
+                v
+            },
+        };
+
+        // Opcode 10 requires one CACHE opcode right after it, but 5 appears instead.
+        let raw = vec![10u8, 0u8, 5u8, 0u8];
+        assert_eq!(
+            evaluate_rewrite_compatibility(&raw, 144, &quick),
+            Err("original_cache_layout_invalid")
+        );
+    }
+
+    #[test]
+    fn validate_probe_compatibility_rejects_empty_probe() {
+        let quick = QuickeningSupport {
+            cache_opcode: None,
+            inline_cache_entries: vec![],
+        };
+        assert_eq!(validate_probe_compatibility(&[], &quick), Err("empty_probe"));
     }
 }
