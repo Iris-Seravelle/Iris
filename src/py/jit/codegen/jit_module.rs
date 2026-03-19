@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Linkage;
 
 use crate::py::jit::simd;
 
@@ -41,18 +40,18 @@ pub(crate) enum BufferElemType {
 
 thread_local! {
     static TLS_JIT_MODULE: std::cell::RefCell<Option<JITModule>> =
-        std::cell::RefCell::new(None);
+    std::cell::RefCell::new(None);
 }
 
 thread_local! {
     pub(crate) static TLS_JIT_TYPE_PROFILE: std::cell::RefCell<HashMap<usize, JitExecProfile>> =
-        std::cell::RefCell::new(HashMap::new());
+    std::cell::RefCell::new(HashMap::new());
 }
 
 /// Create/use a thread-local JIT module and invoke `f` with it.
 pub(crate) fn with_jit_module<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut JITModule) -> R,
+F: FnOnce(&mut JITModule) -> R,
 {
     TLS_JIT_MODULE.with(|cell| {
         let mut opt = cell.borrow_mut();
@@ -77,25 +76,25 @@ where
             let requested_plan = simd::auto_vectorization_plan();
             let (isa, active_plan) = match build_isa(requested_plan) {
                 Ok(isa) => (isa, requested_plan),
-                Err(err) if requested_plan.auto_vectorize => {
-                    let fallback_plan = simd::SimdPlan::default();
-                    crate::py::jit::jit_log(|| {
-                        format!(
-                            "[Iris][jit][simd] host rejected SIMD plan {:?} (err={:?}); falling back to scalar",
-                            requested_plan, err
-                        )
-                    });
-                    match build_isa(fallback_plan) {
-                        Ok(isa) => (isa, fallback_plan),
+                        Err(err) if requested_plan.auto_vectorize => {
+                            let fallback_plan = simd::SimdPlan::default();
+                            crate::py::jit::jit_log(|| {
+                                format!(
+                                    "[Iris][jit][simd] host rejected SIMD plan {:?} (err={:?}); falling back to scalar",
+                                        requested_plan, err
+                                )
+                            });
+                            match build_isa(fallback_plan) {
+                                Ok(isa) => (isa, fallback_plan),
                         Err(fallback_err) => {
                             panic!(
                                 "failed to create ISA with SIMD plan ({:?}) and scalar fallback ({:?})",
-                                err, fallback_err
+                                   err, fallback_err
                             )
                         }
-                    }
-                }
-                Err(err) => panic!("failed to create ISA: {:?}", err),
+                            }
+                        }
+                        Err(err) => panic!("failed to create ISA: {:?}", err),
             };
 
             crate::py::jit::jit_log(|| {

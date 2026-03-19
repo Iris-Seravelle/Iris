@@ -1,4 +1,4 @@
-// src/py/jit/codegen/types.rs
+// src/py/jit/codegen/jit_types.rs
 //! Shared type definitions used by the JIT codegen pipeline.
 
 /// Symbol aliasing rules used for primitive function mapping.
@@ -47,6 +47,36 @@ pub struct JitEntry {
     pub return_type: JitReturnType,
     pub(crate) lowered_kernel: Option<LoweredKernel>,
     pub(crate) variant_strategy: QuantumVariantStrategy,
+}
+
+impl JitEntry {
+    /// Check if this entry has a valid, compiled function pointer.
+    pub fn is_valid(&self) -> bool {
+        self.func_ptr != 0
+    }
+
+    pub fn with_strategy(mut self, strategy: QuantumVariantStrategy) -> Self {
+        self.variant_strategy = strategy;
+        self
+    }
+
+    pub(crate) fn allows_lowered_kernel(&self) -> bool {
+        self.variant_strategy != QuantumVariantStrategy::ScalarFallback
+    }
+
+    pub(crate) fn loop_unroll_for_entry(&self) -> usize {
+        match self.variant_strategy {
+            QuantumVariantStrategy::ScalarFallback => 1,
+            _ => super::simd_unroll_factor(),
+        }
+    }
+
+    pub(crate) fn math_mode_for_entry(&self) -> SimdMathMode {
+        match self.variant_strategy {
+            QuantumVariantStrategy::FastTrigExperiment => SimdMathMode::FastApprox,
+            _ => super::simd_math_mode_from_env(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
