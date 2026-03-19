@@ -16,6 +16,8 @@ use crate::Runtime;
 use super::mailbox::PyMailbox;
 use super::pool::{make_release_gil_channel, PoolTask, GIL_WORKER_POOL};
 use super::utils::{message_to_py, run_python_matcher};
+#[cfg(feature = "vortex")]
+use crate::vortex::VortexGhostPolicy;
 
 #[pyclass]
 pub struct PyRuntime {
@@ -183,6 +185,46 @@ impl PyRuntime {
     /// Enable or disable strict failure mode for release_gil (error on limit exceeded).
     fn set_release_gil_strict(&self, strict: bool) -> PyResult<()> {
         self.inner.set_release_gil_strict(strict);
+        Ok(())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_set_auto_ghost_policy(&self, policy: String) -> PyResult<bool> {
+        let parsed = match policy.to_lowercase().as_str() {
+            "firstsafepointwins" | "first_safe_point_wins" | "first-safe-point-wins" => {
+                VortexGhostPolicy::FirstSafePointWins
+            }
+            "preferprimary" | "prefer_primary" | "prefer-primary" => VortexGhostPolicy::PreferPrimary,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "invalid vortex policy (expected FirstSafePointWins or PreferPrimary)",
+                ))
+            }
+        };
+        Ok(self.inner.vortex_set_auto_ghost_policy(parsed))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_auto_ghost_policy(&self) -> PyResult<Option<String>> {
+        Ok(self.inner.vortex_auto_ghost_policy().map(|p| match p {
+            VortexGhostPolicy::FirstSafePointWins => "FirstSafePointWins".to_string(),
+            VortexGhostPolicy::PreferPrimary => "PreferPrimary".to_string(),
+        }))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_auto_resolution_counts(&self) -> PyResult<(u64, u64)> {
+        Ok(self.inner.vortex_auto_resolution_counts())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_auto_replay_count(&self) -> PyResult<u64> {
+        Ok(self.inner.vortex_auto_replay_count())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_reset_auto_telemetry(&self) -> PyResult<()> {
+        self.inner.vortex_reset_auto_telemetry();
         Ok(())
     }
 

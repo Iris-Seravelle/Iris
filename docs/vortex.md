@@ -92,7 +92,9 @@ Implemented in engine:
 Implemented wrappers in `Runtime` (feature `vortex`):
 - Transaction lifecycle: start/stage/commit/take committed V-IO.
 - Ghost lifecycle: start/stage/resolve race/replay.
-- Auto replay telemetry accessor: `vortex_auto_replay_count()`.
+- Auto policy controls: set/get automatic ghost arbitration policy.
+- Auto telemetry accessors: replay count and resolution counts `(primary_wins, ghost_wins)`.
+- Auto telemetry reset: clear counters to deterministic baseline for repeated runs.
 
 This allows exercising Vortex behavior from runtime boundaries, not only from direct engine tests.
 

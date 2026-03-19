@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use tokio::time::{sleep, timeout, Duration};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_preemption_on_while_true() {
@@ -285,5 +286,160 @@ def sample3():
         assert_eq!(reason, "original_cache_layout_invalid");
         assert!(!rewrite_attempted);
         assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method0("vortex_reset_auto_telemetry")
+            .unwrap();
+
+        let counts: (u64, u64) = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_resolution_counts")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let replay: u64 = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_replay_count")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(counts, (0, 0));
+        assert_eq!(replay, 0);
+
+        let ok: bool = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_auto_ghost_policy", ("PreferPrimary",))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(ok);
+
+        let current: String = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_ghost_policy")
+            .unwrap()
+            .extract::<Option<String>>()
+            .unwrap()
+            .unwrap();
+        assert_eq!(current, "PreferPrimary");
+    });
+
+    let cb = Python::with_gil(|py| {
+        py.eval("lambda _msg: None", None, None)
+            .unwrap()
+            .to_object(py)
+    });
+
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_py_handler", (cb, 8usize, false))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    Python::with_gil(|py| {
+        for _ in 0..1400u32 {
+            let _ = rt_py.as_ref(py).call_method1(
+                "send",
+                (pid, pyo3::types::PyBytes::new(py, b"tick")),
+            );
+        }
+    });
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let replay: u64 = Python::with_gil(|py| {
+                rt_py
+                    .as_ref(py)
+                    .call_method0("vortex_get_auto_replay_count")
+                    .unwrap()
+                    .extract()
+                    .unwrap()
+            });
+
+            if replay > 0 {
+                break;
+            }
+
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("auto replay telemetry should increase");
+
+    Python::with_gil(|py| {
+        let counts: (u64, u64) = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_resolution_counts")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(counts.0 > 0);
+        assert_eq!(counts.1, 0);
+
+        let replay: u64 = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_replay_count")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(replay > 0);
+
+        rt_py
+            .as_ref(py)
+            .call_method0("vortex_reset_auto_telemetry")
+            .unwrap();
+        let counts_after: (u64, u64) = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_resolution_counts")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let replay_after: u64 = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_auto_replay_count")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(counts_after, (0, 0));
+        assert_eq!(replay_after, 0);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_auto_policy_rejects_invalid_value() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let res = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_auto_ghost_policy", ("not-a-policy",));
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
     });
 }

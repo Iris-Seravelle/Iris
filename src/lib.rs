@@ -109,6 +109,12 @@ pub struct Runtime {
     vortex_ghost_counter: Arc<AtomicU64>,
     #[cfg(feature = "vortex")]
     vortex_auto_replay_count: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_primary_wins: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_ghost_wins: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_policy: Arc<Mutex<VortexGhostPolicy>>,
 }
 
 impl Runtime {
@@ -143,6 +149,12 @@ impl Runtime {
             vortex_ghost_counter: Arc::new(AtomicU64::new(1)),
             #[cfg(feature = "vortex")]
             vortex_auto_replay_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_primary_wins: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_ghost_wins: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_policy: Arc::new(Mutex::new(VortexGhostPolicy::FirstSafePointWins)),
             network_io_timeout: Arc::new(Mutex::new(Duration::from_secs(5))),
             network_max_payload: Arc::new(Mutex::new(1024 * 1024)),
             network_max_name_len: Arc::new(Mutex::new(1024)),
@@ -365,6 +377,38 @@ impl Runtime {
     }
 
     #[cfg(feature = "vortex")]
+    pub fn vortex_set_auto_ghost_policy(&self, policy: VortexGhostPolicy) -> bool {
+        match self.vortex_auto_policy.lock() {
+            Ok(mut guard) => {
+                *guard = policy;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_ghost_policy(&self) -> Option<VortexGhostPolicy> {
+        self.vortex_auto_policy.lock().ok().map(|guard| *guard)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_resolution_counts(&self) -> (u64, u64) {
+        (
+            self.vortex_auto_primary_wins.load(Ordering::Relaxed),
+            self.vortex_auto_ghost_wins.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_reset_auto_telemetry(&self) {
+        self.vortex_auto_replay_count.store(0, Ordering::Relaxed);
+        self.vortex_auto_primary_wins.store(0, Ordering::Relaxed);
+        self.vortex_auto_ghost_wins.store(0, Ordering::Relaxed);
+        self.vortex_ghost_counter.store(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "vortex")]
     fn vortex_auto_checkpoint_and_replay_on_suspend(&self, pid: Pid, budget: usize) {
         let Some(engine) = self.vortex_engine.as_ref() else {
             return;
@@ -391,11 +435,19 @@ impl Runtime {
         guard.start_ghost_transaction_with_checkpoint(ghost_id, ghost_locals);
         let _ = guard.stage_ghost_transaction_vio(ghost_id, "suspend_ghost".to_string(), pid.to_le_bytes().to_vec());
 
-        if let Some(resolution) = guard.resolve_primary_ghost_race(
-            ghost_id,
-            ghost_id,
-            VortexGhostPolicy::FirstSafePointWins,
-        ) {
+        let policy = self
+            .vortex_auto_policy
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(VortexGhostPolicy::FirstSafePointWins);
+
+        if let Some(resolution) = guard.resolve_primary_ghost_race(ghost_id, ghost_id, policy) {
+            if resolution.winner_id == primary_id {
+                self.vortex_auto_primary_wins.fetch_add(1, Ordering::Relaxed);
+            } else if resolution.winner_id == ghost_id {
+                self.vortex_auto_ghost_wins.fetch_add(1, Ordering::Relaxed);
+            }
+
             let applied = guard.replay_committed_vio_calls(&resolution.committed_vio, |_| true);
             if applied > 0 {
                 self.vortex_auto_replay_count
@@ -2490,5 +2542,71 @@ mod tests {
         .expect("expected auto replay hook to run on preempt suspend");
 
         assert!(rt.vortex_auto_replay_count() > 0);
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(primary_wins + ghost_wins > 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_policy_prefer_primary_updates_counters() {
+        let rt = Runtime::new();
+        assert!(rt.vortex_set_auto_ghost_policy(crate::vortex::VortexGhostPolicy::PreferPrimary));
+        assert_eq!(
+            rt.vortex_auto_ghost_policy(),
+            Some(crate::vortex::VortexGhostPolicy::PreferPrimary)
+        );
+
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+                if primary_wins > 0 || ghost_wins > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto policy counters to update");
+
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(primary_wins > 0);
+        assert_eq!(ghost_wins, 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_telemetry_can_reset() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if rt.vortex_auto_replay_count() > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto telemetry to increase");
+
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(rt.vortex_auto_replay_count() > 0);
+        assert!(primary_wins + ghost_wins > 0);
+
+        rt.vortex_reset_auto_telemetry();
+        let (primary_wins_after, ghost_wins_after) = rt.vortex_auto_resolution_counts();
+        assert_eq!(rt.vortex_auto_replay_count(), 0);
+        assert_eq!(primary_wins_after, 0);
+        assert_eq!(ghost_wins_after, 0);
     }
 }
