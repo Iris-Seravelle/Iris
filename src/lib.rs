@@ -12,6 +12,9 @@ pub mod pid;
 pub mod registry;
 pub mod supervisor;
 
+#[cfg(feature = "vortex")]
+pub mod vortex;
+
 #[cfg(feature = "pyo3")]
 pub mod py;
 
@@ -19,6 +22,8 @@ pub mod py;
 pub mod node;
 
 use crate::pid::Pid;
+#[cfg(feature = "vortex")]
+use crate::vortex::VortexEngine;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -63,6 +68,8 @@ pub struct Runtime {
     monitor_backoff_factor: Arc<Mutex<f64>>,
     monitor_backoff_max: Arc<Mutex<Duration>>,
     monitor_failure_threshold: Arc<Mutex<usize>>,
+    #[cfg(feature = "vortex")]
+    vortex_engine: Option<VortexEngine>,
     registry: Arc<registry::NameRegistry>,
     /// Mapping for locally‑spawned proxies that forward to remote actors.
     /// Key is the local proxy PID; value is (remote address, remote PID).
@@ -136,6 +143,8 @@ impl Runtime {
             proxy_by_remote: Arc::new(DashMap::new()),
             behavior_versions: Arc::new(DashMap::new()),
             behavior_history: Arc::new(DashMap::new()),
+            #[cfg(feature = "vortex")]
+            vortex_engine: Some(VortexEngine::new()),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -216,6 +225,11 @@ impl Runtime {
     /// `release_gil=true` will return an error if the dedicated-thread limit is exceeded.
     pub fn set_release_gil_strict(&self, strict: bool) {
         *self.release_gil_strict.lock().unwrap() = strict;
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_engine(&self) -> Option<VortexEngine> {
+        self.vortex_engine.clone()
     }
 
     /// Get the current release_gil limits (max_threads, pool_size).
@@ -1092,9 +1106,26 @@ impl Runtime {
 
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
+
+            #[cfg(feature = "vortex")]
+            let mut vortex_engine = rt_exit_clone
+                .vortex_engine()
+                .unwrap_or_else(|| crate::vortex::VortexEngine::new());
+
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
                 while let Some(first_msg) = rx.recv().await {
+                    #[cfg(feature = "vortex")]
+                    {
+                        if let Err(_) = vortex_engine.preempt_tick() {
+                            vortex_engine.detach_stalled_thread();
+                            vortex_engine.replenish_budget(budget);
+                            tokio::task::yield_now().await;
+                            vortex_engine.reclaim_thread();
+                            continue;
+                        }
+                    }
+
                     let h = h_loop.clone();
                     (h)(first_msg).await;
                     processed += 1;
@@ -1102,6 +1133,17 @@ impl Runtime {
                     while processed < budget {
                         match rx.try_recv() {
                             Some(next_msg) => {
+                                #[cfg(feature = "vortex")]
+                                {
+                                    if let Err(_) = vortex_engine.preempt_tick() {
+                                        vortex_engine.detach_stalled_thread();
+                                        vortex_engine.replenish_budget(budget);
+                                        tokio::task::yield_now().await;
+                                        vortex_engine.reclaim_thread();
+                                        break;
+                                    }
+                                }
+
                                 let h = h_loop.clone();
                                 (h)(next_msg).await;
                                 processed += 1;

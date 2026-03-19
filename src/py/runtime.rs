@@ -338,10 +338,12 @@ impl PyRuntime {
                                     let guard = b.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    if let Err(e) = cb.call1((pybytes,)) {
-                                        eprintln!("[Iris] Python actor exception: {}", e);
-                                        e.print(py);
-                                    }
+                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -383,10 +385,12 @@ impl PyRuntime {
                                 let guard = b.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
-                                if let Err(e) = cb.call1((pybytes,)) {
-                                    eprintln!("[Iris] Python actor exception: {}", e);
-                                    e.print(py);
-                                }
+                                crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                             });
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(
@@ -442,10 +446,12 @@ impl PyRuntime {
                             let guard = b.read();
                             let cb = guard.as_ref(py);
                             let pybytes = PyBytes::new(py, &bytes);
-                            if let Err(e) = cb.call1((pybytes,)) {
-                                eprintln!("[Iris] Python actor exception: {}", e);
-                                e.print(py);
-                            }
+                            crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                         });
                     }
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {
@@ -519,10 +525,12 @@ impl PyRuntime {
                                         let guard = behavior.read();
                                         let cb = guard.as_ref(py);
                                         let pybytes = PyBytes::new(py, &bytes);
+                                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
                                         }
+                                    });
                                     });
                                 }
                             }
@@ -567,10 +575,12 @@ impl PyRuntime {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    if let Err(e) = cb.call1((pybytes,)) {
-                                        eprintln!("[Iris] Python actor exception: {}", e);
-                                        e.print(py);
-                                    }
+                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                                 });
                             }
                             _ => {}
@@ -672,10 +682,12 @@ impl PyRuntime {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    if let Err(e) = cb.call1((pybytes,)) {
-                                        eprintln!("[Iris] Python actor exception: {}", e);
-                                        e.print(py);
-                                    }
+                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -719,10 +731,12 @@ impl PyRuntime {
                                 let guard = behavior.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
-                                if let Err(e) = cb.call1((pybytes,)) {
-                                    eprintln!("[Iris] Python actor exception: {}", e);
-                                    e.print(py);
-                                }
+                                crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        if let Err(e) = cb.call1((pybytes,)) {
+                                            eprintln!("[Iris] Python actor exception: {}", e);
+                                            e.print(py);
+                                        }
+                                    });
                             });
                         }
                         _ => {}
@@ -756,10 +770,12 @@ impl PyRuntime {
 
                     Python::with_gil(|py| {
                         // Just call the function. It is expected to block on mailbox.recv()
-                        if let Err(e) = py_callable.call1(py, (mailbox,)) {
-                            eprintln!("[Iris] Python mailbox actor exception: {}", e);
-                            e.print(py);
-                        }
+                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                                    eprintln!("[Iris] Python mailbox actor exception: {}", e);
+                                    e.print(py);
+                                }
+                            });
                     });
                 });
 
@@ -793,10 +809,12 @@ impl PyRuntime {
                     }
 
                     Python::with_gil(|py| {
-                        if let Err(e) = py_callable.call1(py, (mailbox,)) {
-                            eprintln!("[Iris] Python mailbox actor exception: {}", e);
-                            e.print(py);
-                        }
+                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                                    eprintln!("[Iris] Python mailbox actor exception: {}", e);
+                                    e.print(py);
+                                }
+                            });
                     });
                 });
 

@@ -42,6 +42,7 @@ default = ["pyo3", "jit"]
 pyo3 = ["dep:pyo3", "dep:pyo3-asyncio"]
 jit = ["dep:cranelift", "dep:cranelift-module", "dep:cranelift-jit", "dep:cranelift-native"]
 node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
+vortex = []
 
 [dev-dependencies]
 futures = "0.3"
