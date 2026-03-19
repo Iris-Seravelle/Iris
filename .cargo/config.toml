@@ -1,0 +1,4 @@
+[alias]
+# Fast local test cycle without JIT/Python default features.
+test-fast = "test --no-default-features --lib"
+test-backpressure = "test --no-default-features --lib backpressure -- --nocapture"

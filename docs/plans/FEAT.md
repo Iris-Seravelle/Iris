@@ -44,7 +44,7 @@
 * [x] **Overflow Policies**
   Drop-new, drop-old, block, redirect, or spill to actor.  (Implemented with tests across Rust and Python.)
 
-* [ ] **Backpressure Signals**
+* [x] **Backpressure Signals**
   Runtime can refuse messages or slow producers under load.
 
 ---

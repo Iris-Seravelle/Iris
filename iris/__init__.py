@@ -370,4 +370,20 @@ class Runtime:
         """Return the number of queued user messages for the actor with `pid`."""
         return self._inner.mailbox_size(pid)
 
+    def mailbox_backpressure(self, pid: int) -> Optional[str]:
+        """Return inferred backpressure status (NORMAL, HIGH, CRITICAL) for the actor."""
+        return self._inner.mailbox_backpressure(pid)
+
+    def send_with_backpressure(self, pid: int, data: bytes) -> Tuple[bool, Optional[str]]:
+        """Send data and get instant backpressure feedback (Python wrapper)."""
+        success = self.send(pid, data)
+        level = self.mailbox_backpressure(pid)
+        return success, level
+
+    def send_user_with_backpressure(self, pid: int, data: bytes) -> Tuple[bool, Optional[str]]:
+        """Send data and get instant backpressure feedback using send_user path."""
+        success = self.send(pid, data)
+        level = self.mailbox_backpressure(pid)
+        return success, level
+
 __all__ = ["Runtime", "PySystemMessage", "version", "allocate_buffer", "PyMailbox"]

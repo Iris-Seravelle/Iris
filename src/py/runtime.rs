@@ -398,7 +398,8 @@ impl PyRuntime {
                             // drop-request, ignore
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
-                        | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {}
+                        | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong)
+                        | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Backpressure(_)) => {}
                     }
                 }
             }
@@ -451,7 +452,8 @@ impl PyRuntime {
                     }
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {}
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
-                    | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong) => {}
+                    | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong)
+                    | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Backpressure(_)) => {}
                 }
             }
         };
@@ -887,6 +889,13 @@ impl PyRuntime {
 
     fn mailbox_size(&self, pid: u64) -> PyResult<Option<usize>> {
         Ok(self.inner.mailbox_size(pid))
+    }
+
+    fn mailbox_backpressure(&self, pid: u64) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .mailbox_backpressure(pid)
+            .map(|level| level.as_str().to_string()))
     }
 
     fn children_count(&self) -> usize {

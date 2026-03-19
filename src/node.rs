@@ -43,8 +43,14 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
                     info.metadata.clone(),
                 ),
                 SystemMessage::HotSwap(_) => ("HOT_SWAP", None),
-                SystemMessage::Ping => ("PING", None),
-                SystemMessage::Pong => ("PONG", None),
+                SystemMessage::Ping => ("PING", None, None, None),
+                SystemMessage::Pong => ("PONG", None, None, None),
+                SystemMessage::Backpressure(level) => (
+                    "BACKPRESSURE",
+                    None,
+                    Some(level.as_str().to_string()),
+                    None,
+                ),
             };
 
             let mut obj = env.create_object()?;
@@ -131,6 +137,12 @@ impl From<Message> for WrappedMessage {
                     SystemMessage::HotSwap(_) => ("HOT_SWAP".to_string(), None, None, None),
                     SystemMessage::Ping => ("PING".to_string(), None, None, None),
                     SystemMessage::Pong => ("PONG".to_string(), None, None, None),
+                    SystemMessage::Backpressure(level) => (
+                        "BACKPRESSURE".to_string(),
+                        None,
+                        Some(level.as_str().to_string()),
+                        None,
+                    ),
                 };
                 WrappedMessage {
                     data: None,

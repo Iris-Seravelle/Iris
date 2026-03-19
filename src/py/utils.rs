@@ -64,6 +64,13 @@ pub(crate) fn message_to_py(py: Python, msg: mailbox::Message) -> PyObject {
             metadata: None,
         }
         .into_py(py),
+        mailbox::Message::System(mailbox::SystemMessage::Backpressure(level)) => PySystemMessage {
+            type_name: "BACKPRESSURE".to_string(),
+            target_pid: None,
+            reason: level.as_str().to_string(),
+            metadata: None,
+        }
+        .into_py(py),
         mailbox::Message::System(mailbox::SystemMessage::DropOld) => py.None(),
     }
 }
@@ -125,6 +132,18 @@ pub(crate) fn run_python_matcher(py: Python, matcher: &PyObject, msg: &mailbox::
                     type_name: "PONG".to_string(),
                     target_pid: None,
                     reason: "".to_string(),
+                    metadata: None,
+                };
+                match matcher.call1(py, (obj.into_py(py),)) {
+                    Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                    Err(_) => false,
+                }
+            }
+            mailbox::SystemMessage::Backpressure(level) => {
+                let obj = PySystemMessage {
+                    type_name: "BACKPRESSURE".to_string(),
+                    target_pid: None,
+                    reason: level.as_str().to_string(),
                     metadata: None,
                 };
                 match matcher.call1(py, (obj.into_py(py),)) {

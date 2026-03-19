@@ -87,6 +87,8 @@ pub struct Runtime {
     virtual_specs: Arc<DashMap<Pid, VirtualActorSpec>>,
     /// Per-virtual-actor activation lock to prevent duplicate activation races.
     virtual_activate_locks: Arc<DashMap<Pid, Arc<Mutex<()>>>>,
+    /// Track last known backpressure level for each pid, to emit signals on change.
+    backpressure_state: Arc<DashMap<Pid, mailbox::BackpressureLevel>>,
     // Runtime-configurable limits for Python GIL-release behavior
     release_gil_max_threads: Arc<Mutex<usize>>,
     gil_pool_size: Arc<Mutex<usize>>,
@@ -116,6 +118,7 @@ impl Runtime {
             children_by_parent: Arc::new(DashMap::new()),
             bounded_capacity: Arc::new(DashMap::new()),
             overflow_policy: Arc::new(DashMap::new()),
+            backpressure_state: Arc::new(DashMap::new()),
             virtual_specs: Arc::new(DashMap::new()),
             virtual_activate_locks: Arc::new(DashMap::new()),
             release_gil_max_threads: Arc::new(Mutex::new(0)),
@@ -786,6 +789,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.backpressure_state
+            .insert(pid, mailbox::BackpressureLevel::Normal);
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -856,6 +861,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        self.backpressure_state
+            .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default policy
         self.bounded_capacity.insert(pid, capacity);
         self.overflow_policy
@@ -935,6 +942,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        self.backpressure_state
+            .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default overflow policy
         self.bounded_capacity.insert(pid, capacity);
         self.overflow_policy
@@ -1185,6 +1194,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        self.backpressure_state
+            .insert(pid, mailbox::BackpressureLevel::Normal);
         let vec = Arc::new(Mutex::new(Vec::new()));
         self.observers.insert(pid, vec.clone());
 
@@ -1285,6 +1296,45 @@ impl Runtime {
         None
     }
 
+    fn emit_backpressure_signal(&self, pid: Pid, level: mailbox::BackpressureLevel) {
+        let existing = self
+            .backpressure_state
+            .get(&pid)
+            .map(|entry| *entry.value())
+            .unwrap_or(mailbox::BackpressureLevel::Normal);
+
+        if existing != level {
+            self.backpressure_state.insert(pid, level);
+        }
+    }
+
+    fn update_backpressure_after_enqueue(
+        &self,
+        pid: Pid,
+        sender: &mailbox::MailboxSender,
+    ) -> Option<mailbox::BackpressureLevel> {
+        // Unbounded mailboxes are always considered Normal, skip map churn.
+        let Some(cap) = self.bounded_capacity.get(&pid).map(|entry| *entry.value()) else {
+            return None;
+        };
+
+        let prev = self
+            .backpressure_state
+            .get(&pid)
+            .map(|entry| *entry.value())
+            .unwrap_or(mailbox::BackpressureLevel::Normal);
+        let level = sender.backpressure_level_with_hysteresis(Some(cap), prev);
+        self.emit_backpressure_signal(pid, level);
+        Some(level)
+    }
+
+    pub fn mailbox_backpressure(&self, pid: Pid) -> Option<mailbox::BackpressureLevel> {
+        self.mailboxes.get(&pid).map(|sender| {
+            let cap = self.bounded_capacity.get(&pid).map(|entry| *entry.value());
+            sender.backpressure_level(cap)
+        })
+    }
+
     pub fn send(&self, pid: Pid, msg: mailbox::Message) -> Result<(), mailbox::Message> {
         let _ = self.ensure_virtual_actor_active(pid);
 
@@ -1330,11 +1380,32 @@ impl Runtime {
                 }
             }
         }
-        if let Some(sender) = self.mailboxes.get(&pid) {
-            sender.send(msg)
+        let result = if let Some(sender) = self.mailboxes.get(&pid) {
+            let res = sender.send(msg);
+            if res.is_ok() {
+                self.update_backpressure_after_enqueue(pid, sender.value());
+            }
+            res
         } else {
             Err(msg)
-        }
+        };
+
+        result
+    }
+
+    /// Send with immediate backpressure feedback for bounded mailboxes.
+    ///
+    /// This avoids an additional map lookup by computing pressure on the same
+    /// enqueue path and returning the resulting level to the caller.
+    pub fn send_with_backpressure(
+        &self,
+        pid: Pid,
+        msg: mailbox::Message,
+    ) -> Result<mailbox::BackpressureLevel, mailbox::Message> {
+        self.send(pid, msg)?;
+        Ok(self
+            .mailbox_backpressure(pid)
+            .unwrap_or(mailbox::BackpressureLevel::Normal))
     }
 
     /// Send user bytes with a fast path that avoids wrapping in `Message` at callsite.
@@ -1385,11 +1456,29 @@ impl Runtime {
                 }
             }
         }
-        if let Some(sender) = self.mailboxes.get(&pid) {
-            sender.send_user_bytes(bytes)
+        let result = if let Some(sender) = self.mailboxes.get(&pid) {
+            let res = sender.send_user_bytes(bytes);
+            if res.is_ok() {
+                self.update_backpressure_after_enqueue(pid, sender.value());
+            }
+            res
         } else {
             Err(bytes)
-        }
+        };
+
+        result
+    }
+
+    /// Send user bytes with immediate backpressure feedback for bounded mailboxes.
+    pub fn send_user_with_backpressure(
+        &self,
+        pid: Pid,
+        bytes: bytes::Bytes,
+    ) -> Result<mailbox::BackpressureLevel, bytes::Bytes> {
+        self.send_user(pid, bytes)?;
+        Ok(self
+            .mailbox_backpressure(pid)
+            .unwrap_or(mailbox::BackpressureLevel::Normal))
     }
 
     /// Set overflow policy for an existing bounded mailbox.
@@ -1497,6 +1586,7 @@ impl Runtime {
         if let Some((_key, (addr, rpid))) = self.remote_proxies.remove(&pid) {
             self.proxy_by_remote.remove(&(addr.clone(), rpid));
         }
+        self.backpressure_state.remove(&pid);
         self.behavior_versions.remove(&pid);
         self.behavior_history.remove(&pid);
         // remove the pid from its parent's child list (if any)
@@ -1741,6 +1831,183 @@ mod tests {
 
         assert_eq!(first, mailbox::Message::User(b"b1".to_vec().into()));
         assert_eq!(second, mailbox::Message::User(b"b2".to_vec().into()));
+    }
+
+    #[tokio::test]
+    async fn mailbox_backpressure_signals_based_on_capacity() {
+        let rt = Runtime::new();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let start_rx = start_rx;
+                async move {
+                    // hold consumption until the test has asserted queue pressure.
+                    let _ = start_rx.await;
+                    while mailbox.recv().await.is_some() {}
+                }
+            },
+            5,
+        );
+
+        let mut sent = 0;
+        for i in 1..=10 {
+            let payload = format!("msg{}", i);
+            if rt
+                .send(pid, mailbox::Message::User(payload.into_bytes().into()))
+                .is_ok()
+            {
+                sent += 1;
+            } else {
+                break;
+            }
+        }
+
+        assert!(sent >= 4, "expected at least 4 messages to be accepted, got {}", sent);
+
+        let level = rt
+            .mailbox_backpressure(pid)
+            .expect("backpressure should be available");
+        assert!(matches!(level, mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical));
+
+        if sent >= 5 {
+            assert_eq!(level, mailbox::BackpressureLevel::Critical);
+        } else {
+            assert_eq!(level, mailbox::BackpressureLevel::High);
+        }
+
+        let _ = start_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn mailbox_backpressure_send_user_path_updates_level() {
+        let rt = Runtime::new();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let start_rx = start_rx;
+                async move {
+                    let _ = start_rx.await;
+                    while mailbox.recv().await.is_some() {}
+                }
+            },
+            4,
+        );
+
+        for i in 0..3 {
+            let payload = bytes::Bytes::from(format!("u{}", i));
+            assert!(rt.send_user(pid, payload).is_ok());
+        }
+        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::High));
+
+        assert!(rt.send_user(pid, bytes::Bytes::from_static(b"u3")).is_ok());
+        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+
+        let _ = start_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn mailbox_backpressure_recovers_to_normal_after_drain() {
+        let rt = Runtime::new();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let start_rx = start_rx;
+                async move {
+                    let _ = start_rx.await;
+                    while mailbox.recv().await.is_some() {}
+                }
+            },
+            3,
+        );
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"d1".to_vec().into()))
+            .is_ok());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"d2".to_vec().into()))
+            .is_ok());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"d3".to_vec().into()))
+            .is_ok());
+        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+
+        let _ = start_tx.send(());
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if rt.mailbox_size(pid) == Some(0) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("mailbox should drain");
+
+        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Normal));
+    }
+
+    #[tokio::test]
+    async fn mailbox_backpressure_unknown_pid_is_none() {
+        let rt = Runtime::new();
+        assert_eq!(rt.mailbox_backpressure(u64::MAX), None);
+    }
+
+    #[tokio::test]
+    async fn send_with_backpressure_returns_live_level() {
+        let rt = Runtime::new();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+
+        let pid = rt.spawn_actor_bounded(
+            move |mut mailbox: mailbox::MailboxReceiver| {
+                let start_rx = start_rx;
+                async move {
+                    let _ = start_rx.await;
+                    while mailbox.recv().await.is_some() {}
+                }
+            },
+            5,
+        );
+
+        let l1 = rt
+            .send_with_backpressure(pid, mailbox::Message::User(b"a".to_vec().into()))
+            .expect("first send should succeed");
+        assert_eq!(l1, mailbox::BackpressureLevel::Normal);
+
+        let l2 = rt
+            .send_with_backpressure(pid, mailbox::Message::User(b"b".to_vec().into()))
+            .expect("second send should succeed");
+        assert_eq!(l2, mailbox::BackpressureLevel::Normal);
+
+        let l3 = rt
+            .send_with_backpressure(pid, mailbox::Message::User(b"c".to_vec().into()))
+            .expect("third send should succeed");
+        assert_eq!(l3, mailbox::BackpressureLevel::Normal);
+
+        let l4 = rt
+            .send_with_backpressure(pid, mailbox::Message::User(b"d".to_vec().into()))
+            .expect("fourth send should succeed");
+        assert_eq!(l4, mailbox::BackpressureLevel::High);
+
+        let l5 = rt
+            .send_with_backpressure(pid, mailbox::Message::User(b"e".to_vec().into()))
+            .expect("fifth send should succeed");
+        assert_eq!(l5, mailbox::BackpressureLevel::Critical);
+
+        let _ = start_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn send_user_with_backpressure_unknown_pid_returns_err() {
+        let rt = Runtime::new();
+        let payload = bytes::Bytes::from_static(b"missing");
+        let err = rt
+            .send_user_with_backpressure(u64::MAX, payload.clone())
+            .expect_err("missing pid should return original payload");
+        assert_eq!(err, payload);
     }
 
     #[tokio::test]

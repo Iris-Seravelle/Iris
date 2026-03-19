@@ -100,6 +100,9 @@ rt.cancel_timer(timer)
 ## Mailbox helpers and introspection
 
 - `mailbox_size(pid: int) -> Optional[int]` — number of queued user messages, or `None` if PID unknown.
+- `mailbox_backpressure(pid: int) -> Optional[str]` — inferred backpressure level for the mailbox: `"NORMAL"`, `"HIGH"`, or `"CRITICAL"`.
+- `send_with_backpressure(pid: int, data: bytes) -> Tuple[bool, str]` — send with immediate pressure result (tight loop use case; returns send success and current `BackpressureLevel`).
+- `send_user_with_backpressure(pid: int, buffer_id: int) -> Tuple[bool, str]` — same as above for zero-copy buffer path.
 - `selective_recv(pid, matcher: Callable, timeout: Optional[float] = None) -> Awaitable[Optional[bytes | PySystemMessage]]` — await a message that satisfies `matcher` (for observed actors).
 - `selective_recv_blocking(pid, matcher, timeout=None)` — blocking convenience wrapper.
 

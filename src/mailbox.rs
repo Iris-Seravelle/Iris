@@ -41,6 +41,28 @@ pub struct ExitInfo {
     pub metadata: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackpressureLevel {
+    Normal,
+    High,
+    Critical,
+}
+
+impl BackpressureLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackpressureLevel::Normal => "NORMAL",
+            BackpressureLevel::High => "HIGH",
+            BackpressureLevel::Critical => "CRITICAL",
+        }
+    }
+}
+
+const HIGH_ENTER_PCT: u64 = 70;
+const HIGH_EXIT_PCT: u64 = 60;
+const CRITICAL_ENTER_PCT: u64 = 90;
+const CRITICAL_EXIT_PCT: u64 = 80;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemMessage {
     Exit(ExitInfo),
@@ -53,6 +75,8 @@ pub enum SystemMessage {
     Ping,
     /// Response to a heartbeat signal.
     Pong,
+    /// Backpressure notification from runtime.
+    Backpressure(BackpressureLevel),
 }
 
 /// Strategy for handling overflow in a bounded mailbox.
@@ -193,6 +217,80 @@ impl MailboxSender {
     /// Return the number of user messages currently queued for this mailbox.
     pub fn len(&self) -> usize {
         self.counter.load(Ordering::Relaxed)
+    }
+
+    /// Compute backpressure level given an optional configured capacity.
+    pub fn backpressure_level(&self, capacity: Option<usize>) -> BackpressureLevel {
+        if let Some(cap) = capacity {
+            let len = self.len();
+            if cap == 0 {
+                return BackpressureLevel::Critical;
+            }
+            if len >= cap {
+                BackpressureLevel::Critical
+            } else {
+                let pct = (len as u64).saturating_mul(100) / (cap as u64);
+                if pct >= 90 {
+                    BackpressureLevel::Critical
+                } else if pct >= 70 {
+                    BackpressureLevel::High
+                } else {
+                    BackpressureLevel::Normal
+                }
+            }
+        } else {
+            BackpressureLevel::Normal
+        }
+    }
+
+    /// Compute backpressure using hysteresis to avoid level flapping near thresholds.
+    pub fn backpressure_level_with_hysteresis(
+        &self,
+        capacity: Option<usize>,
+        previous: BackpressureLevel,
+    ) -> BackpressureLevel {
+        let Some(cap) = capacity else {
+            return BackpressureLevel::Normal;
+        };
+        if cap == 0 {
+            return BackpressureLevel::Critical;
+        }
+
+        let len = self.len();
+        if len >= cap {
+            return BackpressureLevel::Critical;
+        }
+
+        let pct = (len as u64).saturating_mul(100) / (cap as u64);
+        match previous {
+            BackpressureLevel::Normal => {
+                if pct >= CRITICAL_ENTER_PCT {
+                    BackpressureLevel::Critical
+                } else if pct >= HIGH_ENTER_PCT {
+                    BackpressureLevel::High
+                } else {
+                    BackpressureLevel::Normal
+                }
+            }
+            BackpressureLevel::High => {
+                if pct >= CRITICAL_ENTER_PCT {
+                    BackpressureLevel::Critical
+                } else if pct < HIGH_EXIT_PCT {
+                    BackpressureLevel::Normal
+                } else {
+                    BackpressureLevel::High
+                }
+            }
+            BackpressureLevel::Critical => {
+                if pct < HIGH_EXIT_PCT {
+                    BackpressureLevel::Normal
+                } else if pct < CRITICAL_EXIT_PCT {
+                    BackpressureLevel::High
+                } else {
+                    BackpressureLevel::Critical
+                }
+            }
+        }
     }
 }
 
@@ -502,5 +600,41 @@ mod tests {
             Message::User(b) => assert_eq!(b.as_ref(), b"m2"),
             _ => panic!("expected user message"),
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_channel_capacity_matches_request() {
+        let (tx, _rx) = bounded_channel(5);
+
+        for i in 0..5 {
+            let data = vec![b'a' + (i as u8)];
+            assert!(tx.send(Message::User(Bytes::copy_from_slice(&data))).is_ok());
+        }
+
+        assert!(tx.send(Message::User(Bytes::from_static(b"overflow"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn backpressure_hysteresis_prevents_flapping() {
+        let (tx, mut rx) = bounded_channel(10);
+
+        for i in 0..9 {
+            let payload = vec![b'a' + (i as u8)];
+            tx.send(Message::User(Bytes::copy_from_slice(&payload))).unwrap();
+        }
+
+        // 9/10 keeps us in critical from normal.
+        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Normal);
+        assert_eq!(level, BackpressureLevel::Critical);
+
+        // Drain one message -> 8/10 should remain critical due to hysteresis exit threshold.
+        let _ = rx.recv().await;
+        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Critical);
+        assert_eq!(level, BackpressureLevel::Critical);
+
+        // Drain another message -> 7/10 should now relax to high.
+        let _ = rx.recv().await;
+        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Critical);
+        assert_eq!(level, BackpressureLevel::High);
     }
 }
