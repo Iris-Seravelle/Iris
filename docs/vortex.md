@@ -69,7 +69,7 @@ Typical telemetry reasons:
 - `shadow_function_construction_failed`
 
 Note:
-- A test-only deterministic hook exists for one patched-exception fallback branch to keep CI behavior stable across CPython runtime variance.
+- Test-only deterministic hooks exist for selected late-stage fallback branches to keep CI behavior stable across CPython runtime variance.
 
 ### 2.3 Bytecode verifier and compatibility checks
 
@@ -78,7 +78,8 @@ Implemented:
 - Jump target and relative jump validation.
 - Inline-cache layout verification using runtime quickening metadata.
 - Probe compatibility validation prior to instrumentation.
-- Exception-table invariant checks (range and depth constraints).
+- Exception-table invariant checks (range/depth, handler-target bounds, ordering, and duplicate-entry rejection).
+- Quickening-aware handler-target validation rejects exception handlers that land on `CACHE` opcode slots.
 - Stack-size minimum gate for safe probe injection assumptions.
 
 Design intent:

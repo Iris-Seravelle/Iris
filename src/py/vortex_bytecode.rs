@@ -353,7 +353,7 @@ pub fn validate_probe_compatibility(
     Ok(())
 }
 
-pub fn read_exception_entries(py: Python, code: &PyAny) -> PyResult<Vec<(usize, usize, usize)>> {
+pub fn read_exception_entries(py: Python, code: &PyAny) -> PyResult<Vec<(usize, usize, usize, usize)>> {
     let locals = PyDict::new(py);
     locals.set_item("code_obj", code)?;
     py.run(
@@ -361,7 +361,15 @@ pub fn read_exception_entries(py: Python, code: &PyAny) -> PyResult<Vec<(usize, 
 import dis
 bc = dis.Bytecode(code_obj)
 entries = getattr(bc, "exception_entries", ())
-__iris_exc_entries = [(int(e.start), int(e.end), int(e.depth)) for e in entries]
+__iris_exc_entries = [
+    (
+        int(e.start),
+        int(e.end),
+        int(e.depth),
+        int(getattr(e, "target", e.start)),
+    )
+    for e in entries
+]
 "#,
         None,
         Some(locals),
@@ -375,18 +383,56 @@ __iris_exc_entries = [(int(e.start), int(e.end), int(e.depth)) for e in entries]
 }
 
 pub fn verify_exception_table_invariants(
-    entries: &[(usize, usize, usize)],
+    entries: &[(usize, usize, usize, usize)],
     code_units: usize,
     stack_size: usize,
 ) -> Result<(), VerifyError> {
-    for (start, end, depth) in entries {
+    let mut seen = HashSet::with_capacity(entries.len());
+    let mut prev: Option<(usize, usize, usize, usize)> = None;
+
+    for (start, end, depth, target) in entries {
         if *start >= *end || *end > code_units {
             return Err(VerifyError::InvalidExceptionTable);
         }
         if *depth > stack_size {
             return Err(VerifyError::StackDepthInvariant);
         }
+        if *target >= code_units {
+            return Err(VerifyError::InvalidExceptionTable);
+        }
+
+        let current = (*start, *end, *depth, *target);
+        if let Some(p) = prev {
+            if current < p {
+                return Err(VerifyError::InvalidExceptionTable);
+            }
+        }
+        if !seen.insert(current) {
+            return Err(VerifyError::InvalidExceptionTable);
+        }
+        prev = Some(current);
     }
+    Ok(())
+}
+
+pub fn verify_exception_handler_targets(
+    entries: &[(usize, usize, usize, usize)],
+    code: &[Instruction],
+    quickening: &QuickeningSupport,
+) -> Result<(), VerifyError> {
+    let Some(cache_opcode) = quickening.cache_opcode else {
+        return Ok(());
+    };
+
+    for (_, _, _, target) in entries {
+        if *target >= code.len() {
+            return Err(VerifyError::InvalidExceptionTable);
+        }
+        if code[*target].op == cache_opcode {
+            return Err(VerifyError::InvalidExceptionTable);
+        }
+    }
+
     Ok(())
 }
 
@@ -605,7 +651,7 @@ mod tests {
 
     #[test]
     fn verify_exception_table_invariants_rejects_out_of_range_entry() {
-        let entries = vec![(0usize, 5usize, 1usize)];
+        let entries = vec![(0usize, 5usize, 1usize, 0usize)];
         assert_eq!(
             verify_exception_table_invariants(&entries, 4, 8),
             Err(VerifyError::InvalidExceptionTable)
@@ -614,11 +660,75 @@ mod tests {
 
     #[test]
     fn verify_exception_table_invariants_rejects_depth_over_stack() {
-        let entries = vec![(0usize, 1usize, 9usize)];
+        let entries = vec![(0usize, 1usize, 9usize, 0usize)];
         assert_eq!(
             verify_exception_table_invariants(&entries, 4, 8),
             Err(VerifyError::StackDepthInvariant)
         );
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_rejects_unsorted_ranges() {
+        let entries = vec![(2usize, 3usize, 0usize, 0usize), (0usize, 1usize, 0usize, 0usize)];
+        assert_eq!(
+            verify_exception_table_invariants(&entries, 4, 8),
+            Err(VerifyError::InvalidExceptionTable)
+        );
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_rejects_duplicate_entries() {
+        let entries = vec![(0usize, 1usize, 0usize, 2usize), (0usize, 1usize, 0usize, 2usize)];
+        assert_eq!(
+            verify_exception_table_invariants(&entries, 4, 8),
+            Err(VerifyError::InvalidExceptionTable)
+        );
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_accepts_sorted_unique_entries() {
+        let entries = vec![(0usize, 1usize, 0usize, 2usize), (1usize, 3usize, 1usize, 3usize)];
+        assert_eq!(verify_exception_table_invariants(&entries, 4, 8), Ok(()));
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_rejects_handler_target_out_of_range() {
+        let entries = vec![(0usize, 1usize, 0usize, 9usize)];
+        assert_eq!(
+            verify_exception_table_invariants(&entries, 4, 8),
+            Err(VerifyError::InvalidExceptionTable)
+        );
+    }
+
+    #[test]
+    fn verify_exception_handler_targets_rejects_cache_opcode_target() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: vec![0u16; 256],
+        };
+        let code = vec![Instruction { op: 10, arg: 0 }, Instruction { op: 0, arg: 0 }];
+        let entries = vec![(0usize, 1usize, 0usize, 1usize)];
+
+        assert_eq!(
+            verify_exception_handler_targets(&entries, &code, &quick),
+            Err(VerifyError::InvalidExceptionTable)
+        );
+    }
+
+    #[test]
+    fn verify_exception_handler_targets_accepts_non_cache_target() {
+        let quick = QuickeningSupport {
+            cache_opcode: Some(0),
+            inline_cache_entries: vec![0u16; 256],
+        };
+        let code = vec![
+            Instruction { op: 10, arg: 0 },
+            Instruction { op: 0, arg: 0 },
+            Instruction { op: 5, arg: 0 },
+        ];
+        let entries = vec![(0usize, 1usize, 0usize, 2usize)];
+
+        assert_eq!(verify_exception_handler_targets(&entries, &code, &quick), Ok(()));
     }
 
     #[test]

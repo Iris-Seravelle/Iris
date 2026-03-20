@@ -1,8 +1,10 @@
+#![allow(non_local_definitions)]
+
 use crate::py::vortex_bytecode::{
     decode_wordcode, encode_wordcode, instrument_with_probe, opcode_meta, probe_instructions,
     quickening_support, evaluate_rewrite_compatibility, validate_probe_compatibility,
     verify_cache_layout, read_exception_entries, verify_exception_table_invariants,
-    verify_stacksize_minimum,
+    verify_exception_handler_targets, verify_stacksize_minimum,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -46,6 +48,20 @@ fn set_guard_telemetry(mode: &str, reason: &str, py_minor: i32, attempted: bool,
         g.rewrite_attempted = attempted;
         g.rewrite_applied = applied;
     }
+}
+
+fn test_hook_enabled(py: Python, key: &str) -> bool {
+    let locals = PyDict::new(py);
+    if locals.set_item("_iris_key", key).is_err() {
+        return false;
+    }
+    py.eval(
+        "__import__('os').environ.get(_iris_key, '0') == '1'",
+        None,
+        Some(locals),
+    )
+    .and_then(|v| v.extract::<bool>())
+    .unwrap_or(false)
 }
 
 #[pyfunction]
@@ -160,21 +176,50 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_shadow(py, py_func, "exception table invalid");
     }
 
+    let original = decode_wordcode(raw, meta.extended_arg);
+    if verify_exception_handler_targets(&original_entries, &original, &quickening).is_err() {
+        set_guard_telemetry("fallback", "exception_table_invalid", py_minor, false, false);
+        return fallback_shadow(py, py_func, "exception table invalid");
+    }
+
     set_guard_telemetry("rewrite", "attempt", py_minor, true, false);
-    let force_patched_exception_invalid = py
-        .eval(
-            "__import__('os').environ.get('IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID', '0') == '1'",
-            None,
-            None,
-        )
-        .and_then(|v| v.extract::<bool>())
-        .unwrap_or(false);
+    let force_patched_exception_invalid =
+        test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID");
     if force_patched_exception_invalid {
         set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_CODE_REPLACE_FAILED") {
+        set_guard_telemetry("fallback", "code_replace_failed", py_minor, true, false);
+        return fallback_shadow(py, py_func, "code replace failed");
+    }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_TYPES_MODULE_UNAVAILABLE") {
+        set_guard_telemetry("fallback", "types_module_unavailable", py_minor, true, false);
+        return fallback_shadow(py, py_func, "types module unavailable");
+    }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_SHADOW_CONSTRUCTION_FAILED") {
+        set_guard_telemetry("fallback", "shadow_function_construction_failed", py_minor, true, false);
+        return fallback_shadow(py, py_func, "shadow function construction failed");
+    }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PROBE_INSTRUMENTATION_FAILED") {
+        set_guard_telemetry("fallback", "probe_instrumentation_failed", py_minor, true, false);
+        return fallback_shadow(py, py_func, "probe instrumentation failed");
+    }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_STACK_METADATA_UNAVAILABLE") {
+        set_guard_telemetry("fallback", "patched_stack_metadata_unavailable", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched stack metadata unavailable");
+    }
+    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_METADATA_UNAVAILABLE") {
+        set_guard_telemetry(
+            "fallback",
+            "patched_exception_table_metadata_unavailable",
+            py_minor,
+            true,
+            false,
+        );
+        return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
+    }
 
-    let original = decode_wordcode(raw, meta.extended_arg);
     let probe = match probe_instructions(py, meta.extended_arg) {
         Ok(v) => v,
         Err(_) => {
@@ -233,6 +278,10 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     if verify_exception_table_invariants(&patched_entries, patched_raw.len() / 2, patched_stack_size)
         .is_err()
     {
+        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched exception table invalid");
+    }
+    if verify_exception_handler_targets(&patched_entries, &patched, &quickening).is_err() {
         set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
