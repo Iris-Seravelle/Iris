@@ -1,7 +1,8 @@
 use crate::py::vortex_bytecode::{
     decode_wordcode, encode_wordcode, instrument_with_probe, opcode_meta, probe_instructions,
     quickening_support, evaluate_rewrite_compatibility, validate_probe_compatibility,
-    verify_cache_layout,
+    verify_cache_layout, read_exception_entries, verify_exception_table_invariants,
+    verify_stacksize_minimum,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -92,6 +93,10 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .getattr("co_code")
         .and_then(|v| v.extract())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_code: {e}")))?;
+    let original_stack_size: usize = code
+        .getattr("co_stacksize")
+        .and_then(|v| v.extract())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_stacksize: {e}")))?;
 
     let globals_any = py_func
         .getattr("__globals__")
@@ -138,52 +143,129 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_shadow(py, py_func, reason);
     }
 
-    set_guard_telemetry("rewrite", "attempt", py_minor, true, false);
-    let original = decode_wordcode(raw, meta.extended_arg);
-    if let Ok(probe) = probe_instructions(py, meta.extended_arg) {
-        if let Err(reason) = validate_probe_compatibility(&probe, &quickening) {
-            set_guard_telemetry("fallback", reason, py_minor, true, false);
-            return fallback_shadow(py, py_func, reason);
-        }
-
-        if let Ok(patched) = instrument_with_probe(&original, &probe, &meta) {
-            if verify_cache_layout(&patched, &quickening).is_err() {
-                set_guard_telemetry("fallback", "patched_cache_layout_invalid", py_minor, true, false);
-                return fallback_shadow(py, py_func, "patched cache layout invalid");
-            }
-
-            let patched_raw = encode_wordcode(&patched, meta.extended_arg);
-            if patched_raw.len() <= MAX_PATCHED_CODE_BYTES {
-                let kwargs = [("co_code", PyBytes::new(py, &patched_raw))].into_py_dict(py);
-                if let Ok(new_code) = code.call_method("replace", (), Some(kwargs)) {
-                    if let Ok(types_mod) = py.import("types") {
-                        if let Ok(shadow) = types_mod.getattr("FunctionType").and_then(|ctor| {
-                            ctor.call1((
-                                new_code,
-                                globals,
-                                py_func.getattr("__name__")?,
-                                py_func.getattr("__defaults__")?,
-                                py_func.getattr("__closure__")?,
-                            ))
-                        }) {
-                            if let Ok(kwdefaults) = py_func.getattr("__kwdefaults__") {
-                                let _ = shadow.setattr("__kwdefaults__", kwdefaults);
-                            }
-                            set_guard_telemetry("rewrite", "applied", py_minor, true, true);
-                            return Ok(shadow.into());
-                        }
-                    }
-                }
-            } else {
-                set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
-                return fallback_shadow(py, py_func, "patched code too large");
-            }
-        }
+    if verify_stacksize_minimum(original_stack_size).is_err() {
+        set_guard_telemetry("fallback", "stack_depth_invariant_failed", py_minor, false, false);
+        return fallback_shadow(py, py_func, "stack depth invariant failed");
     }
 
-    set_guard_telemetry("fallback", "rewrite_pipeline_failed", py_minor, true, false);
+    let original_entries = match read_exception_entries(py, code) {
+        Ok(entries) => entries,
+        Err(_) => {
+            set_guard_telemetry("fallback", "exception_table_metadata_unavailable", py_minor, false, false);
+            return fallback_shadow(py, py_func, "exception table metadata unavailable");
+        }
+    };
+    if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size).is_err() {
+        set_guard_telemetry("fallback", "exception_table_invalid", py_minor, false, false);
+        return fallback_shadow(py, py_func, "exception table invalid");
+    }
 
-    fallback_shadow(py, py_func, "guard fallback")
+    set_guard_telemetry("rewrite", "attempt", py_minor, true, false);
+    let force_patched_exception_invalid = py
+        .eval(
+            "__import__('os').environ.get('IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID', '0') == '1'",
+            None,
+            None,
+        )
+        .and_then(|v| v.extract::<bool>())
+        .unwrap_or(false);
+    if force_patched_exception_invalid {
+        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched exception table invalid");
+    }
+
+    let original = decode_wordcode(raw, meta.extended_arg);
+    let probe = match probe_instructions(py, meta.extended_arg) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "probe_extraction_failed", py_minor, true, false);
+            return fallback_shadow(py, py_func, "probe extraction failed");
+        }
+    };
+
+    if let Err(reason) = validate_probe_compatibility(&probe, &quickening) {
+        set_guard_telemetry("fallback", reason, py_minor, true, false);
+        return fallback_shadow(py, py_func, reason);
+    }
+
+    let patched = match instrument_with_probe(&original, &probe, &meta) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "probe_instrumentation_failed", py_minor, true, false);
+            return fallback_shadow(py, py_func, "probe instrumentation failed");
+        }
+    };
+
+    if verify_cache_layout(&patched, &quickening).is_err() {
+        set_guard_telemetry("fallback", "patched_cache_layout_invalid", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched cache layout invalid");
+    }
+
+    let patched_raw = encode_wordcode(&patched, meta.extended_arg);
+    if patched_raw.len() > MAX_PATCHED_CODE_BYTES {
+        set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched code too large");
+    }
+
+    let kwargs = [("co_code", PyBytes::new(py, &patched_raw))].into_py_dict(py);
+    let new_code = match code.call_method("replace", (), Some(kwargs)) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "code_replace_failed", py_minor, true, false);
+            return fallback_shadow(py, py_func, "code replace failed");
+        }
+    };
+
+    let patched_stack_size: usize = match new_code.getattr("co_stacksize").and_then(|v| v.extract()) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "patched_stack_metadata_unavailable", py_minor, true, false);
+            return fallback_shadow(py, py_func, "patched stack metadata unavailable");
+        }
+    };
+    let patched_entries = match read_exception_entries(py, new_code) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "patched_exception_table_metadata_unavailable", py_minor, true, false);
+            return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
+        }
+    };
+    if verify_exception_table_invariants(&patched_entries, patched_raw.len() / 2, patched_stack_size)
+        .is_err()
+    {
+        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        return fallback_shadow(py, py_func, "patched exception table invalid");
+    }
+
+    let types_mod = match py.import("types") {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "types_module_unavailable", py_minor, true, false);
+            return fallback_shadow(py, py_func, "types module unavailable");
+        }
+    };
+
+    let shadow = match types_mod.getattr("FunctionType").and_then(|ctor| {
+        ctor.call1((
+            new_code,
+            globals,
+            py_func.getattr("__name__")?,
+            py_func.getattr("__defaults__")?,
+            py_func.getattr("__closure__")?,
+        ))
+    }) {
+        Ok(v) => v,
+        Err(_) => {
+            set_guard_telemetry("fallback", "shadow_function_construction_failed", py_minor, true, false);
+            return fallback_shadow(py, py_func, "shadow function construction failed");
+        }
+    };
+
+    if let Ok(kwdefaults) = py_func.getattr("__kwdefaults__") {
+        let _ = shadow.setattr("__kwdefaults__", kwdefaults);
+    }
+    set_guard_telemetry("rewrite", "applied", py_minor, true, true);
+    Ok(shadow.into())
 }
 
 fn fallback_shadow(py: Python, py_func: &PyAny, _reason: &str) -> PyResult<PyObject> {

@@ -24,6 +24,8 @@ pub enum VerifyError {
     InvalidJumpTarget,
     InvalidRelativeJump,
     InvalidCacheLayout,
+    InvalidExceptionTable,
+    StackDepthInvariant,
 }
 
 #[derive(Debug, Clone)]
@@ -351,6 +353,51 @@ pub fn validate_probe_compatibility(
     Ok(())
 }
 
+pub fn read_exception_entries(py: Python, code: &PyAny) -> PyResult<Vec<(usize, usize, usize)>> {
+    let locals = PyDict::new(py);
+    locals.set_item("code_obj", code)?;
+    py.run(
+        r#"
+import dis
+bc = dis.Bytecode(code_obj)
+entries = getattr(bc, "exception_entries", ())
+__iris_exc_entries = [(int(e.start), int(e.end), int(e.depth)) for e in entries]
+"#,
+        None,
+        Some(locals),
+    )?;
+
+    let entries = locals
+        .get_item("__iris_exc_entries")
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: missing result"))?
+        .downcast::<PyList>()?;
+    entries.extract()
+}
+
+pub fn verify_exception_table_invariants(
+    entries: &[(usize, usize, usize)],
+    code_units: usize,
+    stack_size: usize,
+) -> Result<(), VerifyError> {
+    for (start, end, depth) in entries {
+        if *start >= *end || *end > code_units {
+            return Err(VerifyError::InvalidExceptionTable);
+        }
+        if *depth > stack_size {
+            return Err(VerifyError::StackDepthInvariant);
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_stacksize_minimum(stack_size: usize) -> Result<(), VerifyError> {
+    // Probe executes a callable check and requires temporary stack headroom.
+    if stack_size < 2 {
+        return Err(VerifyError::StackDepthInvariant);
+    }
+    Ok(())
+}
+
 pub fn probe_instructions(py: Python, extended_arg: u8) -> PyResult<Vec<Instruction>> {
     let locals = PyDict::new(py);
     py.run(
@@ -554,5 +601,29 @@ mod tests {
             inline_cache_entries: vec![],
         };
         assert_eq!(validate_probe_compatibility(&[], &quick), Err("empty_probe"));
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_rejects_out_of_range_entry() {
+        let entries = vec![(0usize, 5usize, 1usize)];
+        assert_eq!(
+            verify_exception_table_invariants(&entries, 4, 8),
+            Err(VerifyError::InvalidExceptionTable)
+        );
+    }
+
+    #[test]
+    fn verify_exception_table_invariants_rejects_depth_over_stack() {
+        let entries = vec![(0usize, 1usize, 9usize)];
+        assert_eq!(
+            verify_exception_table_invariants(&entries, 4, 8),
+            Err(VerifyError::StackDepthInvariant)
+        );
+    }
+
+    #[test]
+    fn verify_stacksize_minimum_rejects_tiny_stack() {
+        assert_eq!(verify_stacksize_minimum(1), Err(VerifyError::StackDepthInvariant));
+        assert_eq!(verify_stacksize_minimum(2), Ok(()));
     }
 }

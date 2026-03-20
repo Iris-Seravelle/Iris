@@ -290,6 +290,268 @@ def sample3():
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_fallback_reports_exception_table_invalid() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &m).unwrap();
+        py.run(
+            r#"
+def sample_exc():
+    a = 1
+    b = 2
+    return a + b
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let sample = globals.get_item("sample_exc").unwrap();
+        let dis = py.import("dis").unwrap();
+        let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
+        let original_inline = if had_inline {
+            Some(dis.getattr("_inline_cache_entries").unwrap().to_object(py))
+        } else {
+            None
+        };
+        dis.setattr("_inline_cache_entries", PyList::new(py, vec![0u16; 256]))
+            .unwrap();
+
+        let original_bytecode = dis.getattr("Bytecode").unwrap().to_object(py);
+        let locals = PyDict::new(py);
+        locals.set_item("dis", dis).unwrap();
+        py.run(
+            r#"
+import types
+
+class _IrisBadEntry:
+    def __init__(self):
+        self.start = 0
+        self.end = 999999
+        self.depth = 0
+
+class _IrisBadBytecode:
+    def __init__(self, _code):
+        self.exception_entries = [_IrisBadEntry()]
+
+dis.Bytecode = _IrisBadBytecode
+"#,
+            Some(locals),
+            Some(locals),
+        )
+        .unwrap();
+
+        let shadow_res = m
+            .getattr(py, "transmute_function")
+            .unwrap()
+            .call1(py, (sample,));
+
+        dis.setattr("Bytecode", original_bytecode).unwrap();
+        if had_inline {
+            dis.setattr("_inline_cache_entries", original_inline.unwrap())
+                .unwrap();
+        } else {
+            let _ = dis.delattr("_inline_cache_entries");
+        }
+
+        let shadow = shadow_res.unwrap();
+        assert!(!shadow.as_ref(py).is(sample));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let rewrite_applied: bool = guard_dict
+            .get_item("rewrite_applied")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert_eq!(mode, "fallback");
+        assert_eq!(reason, "exception_table_invalid");
+        assert!(!rewrite_attempted);
+        assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_fallback_reports_patched_exception_table_invalid() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &m).unwrap();
+        py.run(
+            r#"
+def sample_patched_exc():
+    a = 1
+    b = 2
+    return a + b
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let sample = globals.get_item("sample_patched_exc").unwrap();
+        let dis = py.import("dis").unwrap();
+        let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
+        let original_inline = if had_inline {
+            Some(dis.getattr("_inline_cache_entries").unwrap().to_object(py))
+        } else {
+            None
+        };
+        dis.setattr("_inline_cache_entries", PyList::new(py, vec![0u16; 256]))
+            .unwrap();
+
+        let os = py.import("os").unwrap();
+        let environ = os.getattr("environ").unwrap();
+        environ
+            .set_item("IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID", "1")
+            .unwrap();
+
+        let shadow_res = m
+            .getattr(py, "transmute_function")
+            .unwrap()
+            .call1(py, (sample,));
+
+        let _ = environ.del_item("IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID");
+        if had_inline {
+            dis.setattr("_inline_cache_entries", original_inline.unwrap())
+                .unwrap();
+        } else {
+            let _ = dis.delattr("_inline_cache_entries");
+        }
+
+        let shadow = shadow_res.unwrap();
+        assert!(!shadow.as_ref(py).is(sample));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let rewrite_applied: bool = guard_dict
+            .get_item("rewrite_applied")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert_eq!(mode, "fallback");
+        assert_eq!(reason, "patched_exception_table_invalid");
+        assert!(rewrite_attempted);
+        assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_fallback_reports_probe_extraction_failed() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &m).unwrap();
+        py.run(
+            r#"
+def sample_probe_fail():
+    a = 1
+    b = 2
+    return a + b
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let sample = globals.get_item("sample_probe_fail").unwrap();
+        let dis = py.import("dis").unwrap();
+
+        let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
+        let original_inline = if had_inline {
+            Some(dis.getattr("_inline_cache_entries").unwrap().to_object(py))
+        } else {
+            None
+        };
+        dis.setattr("_inline_cache_entries", PyList::new(py, vec![0u16; 256]))
+            .unwrap();
+
+        let original_get_instructions = dis.getattr("get_instructions").unwrap().to_object(py);
+        let locals = PyDict::new(py);
+        locals.set_item("dis", dis).unwrap();
+        py.run(
+            r#"
+def _iris_fail_get_instructions(*_args, **_kwargs):
+    raise RuntimeError("forced probe extraction failure")
+
+dis.get_instructions = _iris_fail_get_instructions
+"#,
+            Some(locals),
+            Some(locals),
+        )
+        .unwrap();
+
+        let shadow_res = m
+            .getattr(py, "transmute_function")
+            .unwrap()
+            .call1(py, (sample,));
+
+        dis.setattr("get_instructions", original_get_instructions).unwrap();
+        if had_inline {
+            dis.setattr("_inline_cache_entries", original_inline.unwrap())
+                .unwrap();
+        } else {
+            let _ = dis.delattr("_inline_cache_entries");
+        }
+
+        let shadow = shadow_res.unwrap();
+        assert!(!shadow.as_ref(py).is(sample));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let rewrite_applied: bool = guard_dict
+            .get_item("rewrite_applied")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert_eq!(mode, "fallback");
+        assert_eq!(reason, "probe_extraction_failed");
+        assert!(rewrite_attempted);
+        assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
     let rt_py = Python::with_gil(|py| {
         let module = iris::py::make_module(py).expect("make_module");

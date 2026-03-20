@@ -46,6 +46,7 @@ Implemented:
 - Shadow-function transmutation with guard telemetry.
 - Capability-based compatibility checks (not simple Python-version switches).
 - Structured fallback reasons for unsupported or unsafe layouts.
+- Stage-specific rewrite failure telemetry (probe extraction, instrumentation, code replace, and shadow construction).
 
 Typical telemetry reasons:
 - `opcode_metadata_unavailable`
@@ -55,7 +56,20 @@ Typical telemetry reasons:
 - `original_cache_layout_invalid`
 - `patched_cache_layout_invalid`
 - `patched_code_too_large`
-- `rewrite_pipeline_failed`
+- `stack_depth_invariant_failed`
+- `exception_table_metadata_unavailable`
+- `exception_table_invalid`
+- `patched_stack_metadata_unavailable`
+- `patched_exception_table_metadata_unavailable`
+- `patched_exception_table_invalid`
+- `probe_extraction_failed`
+- `probe_instrumentation_failed`
+- `code_replace_failed`
+- `types_module_unavailable`
+- `shadow_function_construction_failed`
+
+Note:
+- A test-only deterministic hook exists for one patched-exception fallback branch to keep CI behavior stable across CPython runtime variance.
 
 ### 2.3 Bytecode verifier and compatibility checks
 
@@ -64,6 +78,8 @@ Implemented:
 - Jump target and relative jump validation.
 - Inline-cache layout verification using runtime quickening metadata.
 - Probe compatibility validation prior to instrumentation.
+- Exception-table invariant checks (range and depth constraints).
+- Stack-size minimum gate for safe probe injection assumptions.
 
 Design intent:
 - Continue operating on instruction-level IR and verifier checks to stay resilient to CPython bytecode format evolution.
@@ -96,6 +112,13 @@ Implemented wrappers in `Runtime` (feature `vortex`):
 - Auto telemetry accessors: replay count and resolution counts `(primary_wins, ghost_wins)`.
 - Auto telemetry reset: clear counters to deterministic baseline for repeated runs.
 
+Python `PyRuntime` wrappers expose:
+- `vortex_set_auto_ghost_policy(...)`
+- `vortex_get_auto_ghost_policy()`
+- `vortex_get_auto_resolution_counts()`
+- `vortex_get_auto_replay_count()`
+- `vortex_reset_auto_telemetry()`
+
 This allows exercising Vortex behavior from runtime boundaries, not only from direct engine tests.
 
 ---
@@ -114,7 +137,7 @@ Legend:
 | 4.1 Quiescence-gated hot-swap | Implemented (engine level) | Staging and safe-point apply behavior implemented and tested in engine. |
 | 4.2 Rescue pool detached stalling | Implemented (core primitive) | Rescue pool APIs and tests are present; broader operational policy tuning remains iterative. |
 | 5.1 High-level IR future-proofing | Partial | Instruction IR + compatibility gates are present; continuous adaptation for new CPython internals remains ongoing. |
-| 5.2 Vortex static verifier | Partial | Verifier checks for shape/jumps/cache layout are active; deeper exception-table and stack-depth invariants are still being expanded. |
+| 5.2 Vortex static verifier | Partial | Verifier checks now cover shape/jumps/cache layout plus exception-table and stack-depth gates; exception-handler semantics are still being expanded. |
 | Genetic budgeting | Planned | Not implemented yet. |
 | Watchdog forced interrupt path | Planned | Not implemented yet. |
 | Bytecode-level isolation rewrites | Planned | Not implemented yet. |
@@ -126,7 +149,8 @@ Legend:
 Current verification includes:
 - Engine-level tests for transactions, ghost race resolution, replay behavior, and staged swap semantics.
 - Runtime-level tests for Vortex wrapper lifecycle and automatic suspend hook replay.
-- PyO3 integration tests for real Python execution and fallback telemetry reasons.
+- Runtime + PyRuntime policy/telemetry tests (including invalid policy and reset behavior).
+- PyO3 integration tests for real Python execution and stage-specific fallback telemetry reasons.
 - Bytecode utility tests for verifier behavior and compatibility rejection cases.
 
 Targeted commands:
@@ -156,7 +180,7 @@ This keeps behavior deterministic and debuggable while compatibility support exp
 ## 6. Known Gaps and Next Milestones
 
 Short-term milestones:
-1. Expand verifier to include stronger exception table and stack-depth preservation checks.
+1. Complete verifier follow-up work for exception-handler semantics and stack-preservation coverage beyond current range/depth/min-stack gates.
 2. Increase direct rewrite success on modern quickening-heavy runtimes without relaxing safety gates.
 3. Push ghost race policies deeper into default runtime scheduling decisions.
 4. Expose richer telemetry for automatic suspend hook (counts by reason/policy).
@@ -165,6 +189,11 @@ Mid-term milestones:
 1. Integrate watchdog/escalation strategy for severe stalls.
 2. Introduce adaptive quantum tuning (genetic budgeting style).
 3. Explore actor memory-isolation rewrite policies under strict guard mode.
+
+Later-phase milestones:
+1. Add asyncio-aligned execution interop/mirroring goals after verifier and scheduler policy maturity.
+2. Reduce Python function-color boundaries where safe, so transmuted flows can feel more uniform across sync/async call paths.
+3. Validate these changes behind strict guard telemetry before making them default runtime behavior.
 
 ---
 
