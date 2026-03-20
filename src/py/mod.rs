@@ -11,7 +11,6 @@ pub mod pool;
 pub mod runtime;
 pub mod utils;
 pub mod vortex;
-pub mod vortex_bytecode;
 pub mod wrappers;
 
 // re-export a few helpers for external callers (tests, build scripts, etc.)

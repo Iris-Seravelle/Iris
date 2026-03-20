@@ -23,7 +23,7 @@ Primary modules:
 - `src/vortex/transaction.rs`
 - `src/vortex/transmuter.rs`
 - `src/py/vortex.rs`
-- `src/py/vortex_bytecode.rs`
+- `src/vortex/vortex_bytecode.rs`
 
 ---
 
@@ -121,6 +121,11 @@ Python `PyRuntime` wrappers expose:
 - `vortex_reset_auto_telemetry()`
 - `vortex_set_genetic_budgeting(bool)`
 - `vortex_get_genetic_budgeting()`
+- `vortex_set_genetic_thresholds(low, high)`
+- `vortex_get_genetic_thresholds()`
+- `vortex_get_genetic_history(pid)`
+- `vortex_get_all_genetic_history()`
+- `vortex_reset_genetic_history()`
 
 This allows exercising Vortex behavior from runtime boundaries, not only from direct engine tests.
 
@@ -128,13 +133,16 @@ This allows exercising Vortex behavior from runtime boundaries, not only from di
 
 Implemented (runtime primitive):
 - Optional runtime toggle for adaptive budgeting (`vortex_set_genetic_budgeting` / `vortex_genetic_budgeting_enabled`).
+- Runtime configurable thresholds (low/high) via `vortex_set_genetic_thresholds` / `vortex_get_genetic_thresholds`.
 - Adaptive budget policy in the Vortex preemption loop:
   - Shrinks budget on suspend events.
   - Gradually grows budget on clean cycles.
   - Clamps within safe min/max bounds derived from base budget.
+- PID-level run history available via `vortex_get_genetic_history(pid)` / `vortex_get_all_genetic_history()`.
+- History reset via `vortex_reset_genetic_history()`.
 
 Scope note:
-- This is an initial scheduler primitive and not yet a full historical-learning policy.
+- This is an initial scheduler primitive with live policy knobs; full historical-learning policy remains a roadmap item.
 
 ---
 
@@ -174,6 +182,13 @@ Targeted commands:
 cargo test --lib runtime_vortex_ --no-default-features --features vortex -- --nocapture
 cargo test --lib runtime_vortex_auto_ghost_hook_triggers_on_preempt_suspend --no-default-features --features vortex -- --nocapture
 cargo test --test pyo3_vortex --no-default-features --features "pyo3 vortex" -- --nocapture
+```
+
+Fast aliases in `.cargo/config.toml`:
+
+```bash
+cargo test-fast        # no-default-features fast loop
+cargo test-vortex      # vortex feature focused
 ```
 
 ---

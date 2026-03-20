@@ -238,6 +238,27 @@ impl PyRuntime {
         Ok(self.inner.vortex_genetic_budgeting_enabled().unwrap_or(false))
     }
 
+    #[cfg(feature = "vortex")]
+    fn vortex_get_genetic_history(&self, pid: u64) -> PyResult<Option<(usize, usize)>> {
+        Ok(self.inner.vortex_genetic_history(pid))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_all_genetic_history(&self) -> PyResult<Vec<(u64, usize, usize)>> {
+        Ok(self
+            .inner
+            .vortex_get_all_genetic_history()
+            .into_iter()
+            .map(|(pid, suspend_count, total_count)| (pid, suspend_count, total_count))
+            .collect())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_reset_genetic_history(&self) -> PyResult<()> {
+        self.inner.vortex_reset_genetic_history();
+        Ok(())
+    }
+
     /// Phase 5: Send a binary payload to a PID on a remote node.
     fn send_remote(&self, addr: String, pid: u64, data: &PyBytes) -> PyResult<()> {
         let bytes = bytes::Bytes::copy_from_slice(data.as_bytes());

@@ -21,6 +21,9 @@ pub mod transmuter;
 pub mod transaction;
 
 #[cfg(feature = "vortex")]
+pub mod vortex_bytecode;
+
+#[cfg(feature = "vortex")]
 pub mod rescue_pool;
 
 #[cfg(feature = "vortex")]

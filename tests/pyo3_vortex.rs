@@ -1406,3 +1406,114 @@ async fn test_pyruntime_vortex_genetic_budgeting_toggle() {
         assert!(!after_false);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_genetic_threshold_roundtrip() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let (low, high): (f64, f64) = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_genetic_thresholds")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!((low, high), (0.4, 0.7));
+
+        let ok: bool = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_genetic_thresholds", (0.2f64, 0.5f64))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(ok);
+
+        let (low, high): (f64, f64) = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_genetic_thresholds")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!((low, high), (0.2, 0.5));
+
+        let ok_bad: bool = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_genetic_thresholds", (0.7f64, 0.2f64))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(!ok_bad);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let id: u64 = rt_py
+            .as_ref(py)
+            .call_method1("spawn_py_handler", (py.eval("lambda _msg: None", None, None).unwrap(), 4usize, false))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        let initial: Option<(usize, usize)> = rt_py
+            .as_ref(py)
+            .call_method1("vortex_get_genetic_history", (id,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(initial, Some((0, 0)));
+
+        /* exercise rendezvous */
+        for _ in 0..40 {
+            let _ = rt_py.as_ref(py).call_method1(
+                "send",
+                (id, pyo3::types::PyBytes::new(py, b"x")),
+            );
+        }
+
+        // Wait for some processing and possible suspends
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let after: Option<(usize, usize)> = rt_py
+            .as_ref(py)
+            .call_method1("vortex_get_genetic_history", (id,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(after.is_some());
+        assert!(after.unwrap().1 >= 1);
+
+        let all: Vec<(u64, usize, usize)> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_all_genetic_history")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(all.iter().any(|(pid, _, _)| *pid == id));
+
+        rt_py.as_ref(py).call_method0("vortex_reset_genetic_history").unwrap();
+
+        let reset_all: Vec<(u64, usize, usize)> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_all_genetic_history")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(reset_all.is_empty());

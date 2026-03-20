@@ -1,6 +1,6 @@
 #![allow(non_local_definitions)]
 
-use crate::py::vortex_bytecode::{
+use crate::vortex::vortex_bytecode::{
     decode_wordcode, encode_wordcode, instrument_with_probe, opcode_meta, probe_instructions,
     quickening_support, evaluate_rewrite_compatibility, validate_probe_compatibility,
     verify_cache_layout, read_exception_entries, verify_exception_table_invariants,
