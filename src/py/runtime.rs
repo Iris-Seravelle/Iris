@@ -228,6 +228,16 @@ impl PyRuntime {
         Ok(())
     }
 
+    #[cfg(feature = "vortex")]
+    fn vortex_set_genetic_budgeting(&self, enabled: bool) -> PyResult<bool> {
+        Ok(self.inner.vortex_set_genetic_budgeting(enabled))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_genetic_budgeting(&self) -> PyResult<bool> {
+        Ok(self.inner.vortex_genetic_budgeting_enabled().unwrap_or(false))
+    }
+
     /// Phase 5: Send a binary payload to a PID on a remote node.
     fn send_remote(&self, addr: String, pid: u64, data: &PyBytes) -> PyResult<()> {
         let bytes = bytes::Bytes::copy_from_slice(data.as_bytes());

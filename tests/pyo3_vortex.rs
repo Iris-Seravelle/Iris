@@ -290,6 +290,88 @@ def sample3():
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_fallback_reports_stack_depth_invariant_failed() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &m).unwrap();
+        py.run(
+            r#"
+def sample_small_stack():
+    return 1
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let sample = globals.get_item("sample_small_stack").unwrap();
+        let original_code = sample.getattr("__code__").unwrap().to_object(py);
+        let locals = PyDict::new(py);
+        locals.set_item("fn", sample).unwrap();
+        py.run(
+            r#"
+fn.__code__ = fn.__code__.replace(co_stacksize=1)
+"#,
+            Some(locals),
+            Some(locals),
+        )
+        .unwrap();
+
+        let dis = py.import("dis").unwrap();
+        let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
+        let original_inline = if had_inline {
+            Some(dis.getattr("_inline_cache_entries").unwrap().to_object(py))
+        } else {
+            None
+        };
+        dis.setattr("_inline_cache_entries", PyList::new(py, vec![0u16; 256]))
+            .unwrap();
+
+        let shadow_res = m
+            .getattr(py, "transmute_function")
+            .unwrap()
+            .call1(py, (sample,));
+
+        sample.setattr("__code__", original_code).unwrap();
+        if had_inline {
+            dis.setattr("_inline_cache_entries", original_inline.unwrap())
+                .unwrap();
+        } else {
+            let _ = dis.delattr("_inline_cache_entries");
+        }
+
+        let shadow = shadow_res.unwrap();
+        assert!(!shadow.as_ref(py).is(sample));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let rewrite_applied: bool = guard_dict
+            .get_item("rewrite_applied")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert_eq!(mode, "fallback");
+        assert_eq!(reason, "stack_depth_invariant_failed");
+        assert!(!rewrite_attempted);
+        assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_fallback_reports_exception_table_invalid() {
     Python::with_gil(|py| {
         let m = iris::py::make_module(py).unwrap();
@@ -380,6 +462,94 @@ dis.Bytecode = _IrisBadBytecode
 
         assert_eq!(mode, "fallback");
         assert_eq!(reason, "exception_table_invalid");
+        assert!(!rewrite_attempted);
+        assert!(!rewrite_applied);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_fallback_reports_exception_table_metadata_unavailable() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &m).unwrap();
+        py.run(
+            r#"
+def sample_exc_meta_unavailable():
+    a = 1
+    b = 2
+    return a + b
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let sample = globals.get_item("sample_exc_meta_unavailable").unwrap();
+        let dis = py.import("dis").unwrap();
+        let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
+        let original_inline = if had_inline {
+            Some(dis.getattr("_inline_cache_entries").unwrap().to_object(py))
+        } else {
+            None
+        };
+        dis.setattr("_inline_cache_entries", PyList::new(py, vec![0u16; 256]))
+            .unwrap();
+
+        let original_bytecode = dis.getattr("Bytecode").unwrap().to_object(py);
+        let locals = PyDict::new(py);
+        locals.set_item("dis", dis).unwrap();
+        py.run(
+            r#"
+class _IrisFailBytecode:
+    def __init__(self, _code):
+        raise RuntimeError("forced bytecode metadata failure")
+
+dis.Bytecode = _IrisFailBytecode
+"#,
+            Some(locals),
+            Some(locals),
+        )
+        .unwrap();
+
+        let shadow_res = m
+            .getattr(py, "transmute_function")
+            .unwrap()
+            .call1(py, (sample,));
+
+        dis.setattr("Bytecode", original_bytecode).unwrap();
+        if had_inline {
+            dis.setattr("_inline_cache_entries", original_inline.unwrap())
+                .unwrap();
+        } else {
+            let _ = dis.delattr("_inline_cache_entries");
+        }
+
+        let shadow = shadow_res.unwrap();
+        assert!(!shadow.as_ref(py).is(sample));
+
+        let guard = m
+            .getattr(py, "get_guard_status")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let guard_dict = guard.downcast::<PyDict>(py).unwrap();
+        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let rewrite_attempted: bool = guard_dict
+            .get_item("rewrite_attempted")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let rewrite_applied: bool = guard_dict
+            .get_item("rewrite_applied")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert_eq!(mode, "fallback");
+        assert_eq!(reason, "exception_table_metadata_unavailable");
         assert!(!rewrite_attempted);
         assert!(!rewrite_applied);
     });
@@ -1180,5 +1350,59 @@ async fn test_pyruntime_vortex_auto_policy_rejects_invalid_value() {
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_genetic_budgeting_toggle() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let initial: bool = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_genetic_budgeting")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(!initial);
+
+        let ok_true: bool = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_genetic_budgeting", (true,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(ok_true);
+
+        let after_true: bool = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_genetic_budgeting")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(after_true);
+
+        let ok_false: bool = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_genetic_budgeting", (false,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(ok_false);
+
+        let after_false: bool = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_genetic_budgeting")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(!after_false);
     });
 }

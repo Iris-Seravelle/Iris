@@ -40,6 +40,18 @@ type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ErasedMessageHandler = Arc<dyn Fn(mailbox::Message) -> BoxFutureUnit + Send + Sync>;
 const MAX_BEHAVIOR_HISTORY: usize = 16;
 
+fn next_dynamic_budget(current: usize, base: usize, saw_suspend: bool) -> usize {
+    let base = base.max(1);
+    let min_budget = (base / 4).max(1);
+    let max_budget = base.saturating_mul(4).max(base);
+
+    if saw_suspend {
+        return (current / 2).max(min_budget);
+    }
+
+    current.saturating_add(1).min(max_budget)
+}
+
 #[derive(Clone)]
 struct VirtualActorSpec {
     handler: ErasedMessageHandler,
@@ -115,6 +127,8 @@ pub struct Runtime {
     vortex_auto_ghost_wins: Arc<AtomicU64>,
     #[cfg(feature = "vortex")]
     vortex_auto_policy: Arc<Mutex<VortexGhostPolicy>>,
+    #[cfg(feature = "vortex")]
+    vortex_genetic_budgeting_enabled: Arc<Mutex<bool>>,
 }
 
 impl Runtime {
@@ -155,6 +169,8 @@ impl Runtime {
             vortex_auto_ghost_wins: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "vortex")]
             vortex_auto_policy: Arc::new(Mutex::new(VortexGhostPolicy::FirstSafePointWins)),
+            #[cfg(feature = "vortex")]
+            vortex_genetic_budgeting_enabled: Arc::new(Mutex::new(false)),
             network_io_timeout: Arc::new(Mutex::new(Duration::from_secs(5))),
             network_max_payload: Arc::new(Mutex::new(1024 * 1024)),
             network_max_name_len: Arc::new(Mutex::new(1024)),
@@ -406,6 +422,25 @@ impl Runtime {
         self.vortex_auto_primary_wins.store(0, Ordering::Relaxed);
         self.vortex_auto_ghost_wins.store(0, Ordering::Relaxed);
         self.vortex_ghost_counter.store(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_genetic_budgeting(&self, enabled: bool) -> bool {
+        match self.vortex_genetic_budgeting_enabled.lock() {
+            Ok(mut guard) => {
+                *guard = enabled;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_genetic_budgeting_enabled(&self) -> Option<bool> {
+        self.vortex_genetic_budgeting_enabled
+            .lock()
+            .ok()
+            .map(|guard| *guard)
     }
 
     #[cfg(feature = "vortex")]
@@ -1340,15 +1375,27 @@ impl Runtime {
 
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
+                let mut dynamic_budget = budget.max(1);
+                #[cfg(feature = "vortex")]
+                let enable_genetic_budgeting = rt_vortex_clone
+                    .vortex_genetic_budgeting_enabled()
+                    .unwrap_or(false);
+                #[cfg(not(feature = "vortex"))]
+                let enable_genetic_budgeting = false;
                 while let Some(first_msg) = rx.recv().await {
+                    let mut saw_suspend_in_cycle = false;
                     #[cfg(feature = "vortex")]
                     {
                         if let Err(_) = vortex_engine.preempt_tick() {
+                            saw_suspend_in_cycle = true;
                             rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                             vortex_engine.detach_stalled_thread();
                             vortex_engine.replenish_budget(budget);
                             tokio::task::yield_now().await;
                             vortex_engine.reclaim_thread();
+                            if enable_genetic_budgeting {
+                                dynamic_budget = next_dynamic_budget(dynamic_budget, budget, saw_suspend_in_cycle);
+                            }
                             continue;
                         }
                     }
@@ -1357,17 +1404,25 @@ impl Runtime {
                     (h)(first_msg).await;
                     processed += 1;
 
-                    while processed < budget {
+                    while processed < dynamic_budget {
                         match rx.try_recv() {
                             Some(next_msg) => {
                                 #[cfg(feature = "vortex")]
                                 {
                                     if let Err(_) = vortex_engine.preempt_tick() {
+                                        saw_suspend_in_cycle = true;
                                         rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                                         vortex_engine.detach_stalled_thread();
                                         vortex_engine.replenish_budget(budget);
                                         tokio::task::yield_now().await;
                                         vortex_engine.reclaim_thread();
+                                        if enable_genetic_budgeting {
+                                            dynamic_budget = next_dynamic_budget(
+                                                dynamic_budget,
+                                                budget,
+                                                saw_suspend_in_cycle,
+                                            );
+                                        }
                                         break;
                                     }
                                 }
@@ -1380,9 +1435,12 @@ impl Runtime {
                         }
                     }
 
-                    if processed >= budget {
+                    if processed >= dynamic_budget {
                         processed = 0;
                         tokio::task::yield_now().await;
+                        if enable_genetic_budgeting {
+                            dynamic_budget = next_dynamic_budget(dynamic_budget, budget, saw_suspend_in_cycle);
+                        }
                     }
                 }
             });
@@ -2608,5 +2666,27 @@ mod tests {
         assert_eq!(rt.vortex_auto_replay_count(), 0);
         assert_eq!(primary_wins_after, 0);
         assert_eq!(ghost_wins_after, 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_genetic_budgeting_toggle_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
+        assert!(rt.vortex_set_genetic_budgeting(true));
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(true));
+        assert!(rt.vortex_set_genetic_budgeting(false));
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_genetic_budget_policy_math() {
+        // base=8 => min=2, max=32
+        assert_eq!(next_dynamic_budget(8, 8, false), 9);
+        assert_eq!(next_dynamic_budget(32, 8, false), 32);
+        assert_eq!(next_dynamic_budget(8, 8, true), 4);
+        assert_eq!(next_dynamic_budget(3, 8, true), 2);
+        assert_eq!(next_dynamic_budget(1, 8, true), 2);
     }
 }

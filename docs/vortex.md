@@ -119,8 +119,22 @@ Python `PyRuntime` wrappers expose:
 - `vortex_get_auto_resolution_counts()`
 - `vortex_get_auto_replay_count()`
 - `vortex_reset_auto_telemetry()`
+- `vortex_set_genetic_budgeting(bool)`
+- `vortex_get_genetic_budgeting()`
 
 This allows exercising Vortex behavior from runtime boundaries, not only from direct engine tests.
+
+### 2.7 Genetic budgeting primitive
+
+Implemented (runtime primitive):
+- Optional runtime toggle for adaptive budgeting (`vortex_set_genetic_budgeting` / `vortex_genetic_budgeting_enabled`).
+- Adaptive budget policy in the Vortex preemption loop:
+  - Shrinks budget on suspend events.
+  - Gradually grows budget on clean cycles.
+  - Clamps within safe min/max bounds derived from base budget.
+
+Scope note:
+- This is an initial scheduler primitive and not yet a full historical-learning policy.
 
 ---
 
@@ -139,7 +153,7 @@ Legend:
 | 4.2 Rescue pool detached stalling | Implemented (core primitive) | Rescue pool APIs and tests are present; broader operational policy tuning remains iterative. |
 | 5.1 High-level IR future-proofing | Partial | Instruction IR + compatibility gates are present; continuous adaptation for new CPython internals remains ongoing. |
 | 5.2 Vortex static verifier | Partial | Verifier checks now cover shape/jumps/cache layout plus exception-table and stack-depth gates; exception-handler semantics are still being expanded. |
-| Genetic budgeting | Planned | Not implemented yet. |
+| Genetic budgeting | Partial | Runtime adaptive budget primitive is implemented behind an explicit toggle; full historical/policy tuning is still pending. |
 | Watchdog forced interrupt path | Planned | Not implemented yet. |
 | Bytecode-level isolation rewrites | Planned | Not implemented yet. |
 
