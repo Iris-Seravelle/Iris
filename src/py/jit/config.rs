@@ -6,10 +6,18 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicI8, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Once, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::info;
+
+static JIT_TRACING_INIT: Once = Once::new();
+
+fn ensure_tracing_subscriber() {
+    JIT_TRACING_INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt::try_init();
+    });
+}
 
 use crate::py::jit::codegen::JitReturnType;
 
@@ -190,7 +198,7 @@ where
         }
     }
 
-    // Use `tracing` when available; falls back to stderr if no subscriber is set.
+    ensure_tracing_subscriber();
     info!(target: "iris::jit", "{}", msg());
 }
 
