@@ -282,6 +282,20 @@ mod tests {
     }
 
     #[test]
+    fn lowered_unary_eval_pair_supports_wide_vector_math() {
+        let result = lowered_unary_eval_pair(
+            LoweredUnaryKernel::Sin,
+            0.5_f64,
+            1.0_f64,
+            SimdMathMode::FastApprox,
+        );
+        assert!(result.is_some());
+        let (y0, y1) = result.unwrap();
+        assert!((y0 - 0.4794).abs() < 0.001);
+        assert!((y1 - 0.84147).abs() < 0.001);
+    }
+
+    #[test]
     fn detect_lowered_kernel_for_filtered_ternary_expr() {
         let src = "((x % 2 == 0 or x > 75.0) and (not x < 10.0)) ? (x > 50.0 ? x * math.sin(x) : x * math.cos(x)) : 0.0";
         let mut p = parser::Parser::new(parser::tokenize(src));

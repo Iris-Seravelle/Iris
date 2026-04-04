@@ -18,6 +18,8 @@ pub mod vortex;
 #[cfg(feature = "pyo3")]
 pub mod py;
 
+pub mod logging;
+
 #[cfg(feature = "node")]
 pub mod node;
 
@@ -156,6 +158,8 @@ pub struct Runtime {
 impl Runtime {
     /// Create a new runtime instance and initialize the networking and registry sub-systems.
     pub fn new() -> Self {
+        crate::logging::init_logger();
+
         #[cfg(feature = "pyo3")]
         {
             pyo3::prepare_freethreaded_python();

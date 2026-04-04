@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import logging
 import textwrap
 import warnings
 import copy
@@ -26,8 +27,8 @@ from typing import Callable, Optional, Any
 
 try:
     import msgpack as _msgpack
-except Exception:  # pragma: no cover - optional at runtime
-    _msgpack = None  # type: ignore
+except Exception:
+    _msgpack = None
 
 try:
     from .iris import (
@@ -48,31 +49,31 @@ try:
         get_quantum_compile_budget as _get_quantum_compile_budget,
         configure_quantum_cooldown as _configure_quantum_cooldown,
         get_quantum_cooldown as _get_quantum_cooldown,
-    )  # pyo3 extension
-except ImportError:  # allow tests to import without extension built
-    register_offload = None  # type: ignore
-    offload_call = None  # type: ignore
-    call_jit = None  # type: ignore
-    call_jit_step_loop_f64 = None  # type: ignore
-    configure_jit_logging = None  # type: ignore
-    is_jit_logging_enabled = None  # type: ignore
-    configure_quantum_speculation = None  # type: ignore
-    is_quantum_speculation_enabled = None  # type: ignore
-    _get_quantum_profile = None  # type: ignore
-    _seed_quantum_profile = None  # type: ignore
-    _configure_quantum_speculation_threshold = None  # type: ignore
-    _get_quantum_speculation_threshold = None  # type: ignore
-    _configure_quantum_log_threshold = None  # type: ignore
-    _get_quantum_log_threshold = None  # type: ignore
-    _configure_quantum_compile_budget = None  # type: ignore
-    _get_quantum_compile_budget = None  # type: ignore
-    _configure_quantum_cooldown = None  # type: ignore
-    _get_quantum_cooldown = None  # type: ignore
+    ) 
+except ImportError: 
+    register_offload = None
+    offload_call = None
+    call_jit = None
+    call_jit_step_loop_f64 = None
+    configure_jit_logging = None
+    is_jit_logging_enabled = None
+    configure_quantum_speculation = None
+    is_quantum_speculation_enabled = None
+    _get_quantum_profile = None
+    _seed_quantum_profile = None
+    _configure_quantum_speculation_threshold = None
+    _get_quantum_speculation_threshold = None
+    _configure_quantum_log_threshold = None
+    _get_quantum_log_threshold = None
+    _configure_quantum_compile_budget = None
+    _get_quantum_compile_budget = None
+    _configure_quantum_cooldown = None
+    _get_quantum_cooldown = None
 
 try:
-    from .iris import call_jit_step_loop_f64  # type: ignore
+    from .iris import call_jit_step_loop_f64
 except Exception:
-    call_jit_step_loop_f64 = None  # type: ignore
+    call_jit_step_loop_f64 = None
 
 
 _IRIS_META_SCHEMA = 1
@@ -94,6 +95,9 @@ _IRIS_META_PENDING: dict[str, tuple[Callable[..., Any], str, list[str], Optional
 _IRIS_META_STATE_LOCK = threading.RLock()
 
 
+_jit_meta_logger = logging.getLogger("iris.jit.meta")
+
+
 def _jit_meta_log(message: str) -> None:
     try:
         enabled = bool(get_jit_logging())
@@ -106,10 +110,18 @@ def _jit_meta_log(message: str) -> None:
             return
     except Exception:
         pass
+
     try:
-        sys.stderr.write(f"[Iris][jit][meta] {message}\n")
+        if not logging.root.handlers and not _jit_meta_logger.handlers:
+            logging.basicConfig(level=logging.INFO)
+        if not _jit_meta_logger.isEnabledFor(logging.INFO):
+            _jit_meta_logger.setLevel(logging.INFO)
+        _jit_meta_logger.info(message)
     except Exception:
-        pass
+        try:
+            sys.stderr.write(f"[Iris][jit][meta] {message}\n")
+        except Exception:
+            pass
 
 
 def _empty_metadata_doc() -> dict[str, Any]:

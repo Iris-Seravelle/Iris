@@ -5,8 +5,7 @@ use super::{
     LoweredExpr, LoweredUnaryKernel, SimdMathMode,
 };
 
-#[cfg(target_arch = "aarch64")]
-use super::{fast_cos_approx_pair_neon, fast_sin_approx_pair_neon};
+use wide::f64x2;
 
 #[inline(always)]
 pub(crate) fn lowered_unary_eval_pair(
@@ -19,25 +18,18 @@ pub(crate) fn lowered_unary_eval_pair(
         return None;
     }
 
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return match op {
-            LoweredUnaryKernel::Sin => Some(fast_sin_approx_pair_neon(x0, x1)),
-            LoweredUnaryKernel::Cos => Some(fast_cos_approx_pair_neon(x0, x1)),
-            LoweredUnaryKernel::Tan => {
-                let (s0, s1) = fast_sin_approx_pair_neon(x0, x1);
-                let (c0, c1) = fast_cos_approx_pair_neon(x0, x1);
-                Some((s0 / c0, s1 / c1))
-            }
-            _ => None,
-        };
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        let _ = (op, x0, x1);
-        None
-    }
+    let values = f64x2::from([x0, x1]);
+    let out = match op {
+        LoweredUnaryKernel::Sin => values.sin(),
+        LoweredUnaryKernel::Cos => values.cos(),
+        LoweredUnaryKernel::Tan => values.tan(),
+        LoweredUnaryKernel::Exp => values.exp(),
+        LoweredUnaryKernel::Log => values.ln(),
+        LoweredUnaryKernel::Sqrt => values.sqrt(),
+        _ => return None,
+    };
+    let out_arr = out.to_array();
+    Some((out_arr[0], out_arr[1]))
 }
 
 #[inline(always)]

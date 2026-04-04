@@ -135,6 +135,7 @@ fn path_supervisor_children(rt: PyRef<PyRuntime>, path: String) -> PyResult<Vec<
 
 #[cfg(feature = "pyo3")]
 fn populate_module(m: &PyModule) -> PyResult<()> {
+    crate::logging::init_logger();
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyRuntime>()?;
     m.add_class::<super::utils::PySystemMessage>()?;

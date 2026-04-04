@@ -6,19 +6,12 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicI8, Ordering};
-use std::sync::{Once, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::info;
 
-static JIT_TRACING_INIT: Once = Once::new();
-
-fn ensure_tracing_subscriber() {
-    JIT_TRACING_INIT.call_once(|| {
-        let _ = tracing_subscriber::fmt::try_init();
-    });
-}
-
+use crate::logging;
 use crate::py::jit::codegen::JitReturnType;
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -198,7 +191,7 @@ where
         }
     }
 
-    ensure_tracing_subscriber();
+    logging::init_logger();
     info!(target: "iris::jit", "{}", msg());
 }
 
