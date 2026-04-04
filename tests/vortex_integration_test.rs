@@ -1,4 +1,6 @@
+#[cfg(feature = "vortex")]
 use iris::Runtime;
+#[cfg(feature = "vortex")]
 use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
 
 #[cfg(feature = "vortex")]

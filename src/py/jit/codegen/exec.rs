@@ -700,11 +700,7 @@ fn try_exec_trailing_count(
     if entry.arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
         for i in 0..entry.arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             stack_args[i] = val;
         }
         let mut produced = 0;
@@ -721,11 +717,7 @@ fn try_exec_trailing_count(
     } else {
         let mut heap_args = Vec::with_capacity(entry.arg_count);
         for i in 0..entry.arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             heap_args.push(val);
         }
         let mut produced = 0;
@@ -832,7 +824,7 @@ fn try_exec_profiled(
                     let mut stack_args = [0.0_f64; MAX_FAST_ARGS];
                     let mut scalar_mismatch = false;
                     for i in 0..arg_count {
-                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let item = unsafe { pyo3::ffi::PyTuple_GetItem(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                         if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                             unsafe { pyo3::ffi::PyErr_Clear() };
@@ -1074,11 +1066,7 @@ fn exec_scalar_args(
     if arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
         for i in 0..arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             stack_args[i] = val;
         }
         store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
@@ -1088,11 +1076,7 @@ fn exec_scalar_args(
 
     let mut heap_args = Vec::with_capacity(arg_count);
     for i in 0..arg_count {
-        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-        let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-            return Err(pyo3::PyErr::fetch(py));
-        }
+        let val = args.get_item(i)?.extract::<f64>()?;
         heap_args.push(val);
     }
     store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);

@@ -1,6 +1,110 @@
 #![cfg(feature = "pyo3")]
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_send_after_delivers_message() {
+    // create runtime, spawn actor and schedule timer while holding the GIL
+    let (rt_obj, pid): (PyObject, u64) = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).unwrap();
+        let rt = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .unwrap()
+            .call0()
+            .unwrap();
+
+        // Spawn an observed handler to collect messages
+        let pid: u64 = rt
+            .call_method1("spawn_observed_handler", (10usize,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // Schedule a message after 50ms
+        let _timer_id: u64 = rt
+            .call_method1("send_after", (pid, 50u64, PyBytes::new(py, b"delayed")))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        (rt.into_py(py), pid)
+    });
+
+    // allow the runtime to process (non-blocking)
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // now check messages with GIL again
+    Python::with_gil(|py| {
+        let rt = rt_obj.as_ref(py);
+        let msgs: Vec<pyo3::PyObject> = rt
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert!(msgs.len() >= 1, "expected at least one delivered message");
+    });
+}
+
+#[tokio::test]
+async fn py_zero_copy_send() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    // spawn observed handler
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_observed_handler", (1usize,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    // allocate a Rust-owned buffer and write into it from Python
+    Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let rv = module
+            .as_ref(py)
+            .call_method1("allocate_buffer", (5usize,))
+            .unwrap();
+        let (id, mem, cap): (u64, pyo3::PyObject, pyo3::PyObject) = rv.extract().unwrap();
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("mem", mem.as_ref(py)).unwrap();
+        locals.set_item("cap", cap.as_ref(py)).unwrap();
+        py.run("mem[:5] = b'hello'", None, Some(locals)).unwrap();
+        // send the buffer without copying
+        rt_py
+            .as_ref(py)
+            .call_method1("send_buffer", (pid, id))
+            .unwrap();
+    });
+
+    // allow the tokio tasks to run
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let msgs: Vec<Vec<u8>> = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(&msgs[0], b"hello");
+}
 
 #[tokio::test]
 async fn py_runtime_spawn_and_send() {
@@ -71,7 +175,7 @@ async fn py_runtime_spawn_and_send() {
             Some(locals),
         )
         .unwrap();
-        let make_cb = locals.get_item("make_cb").unwrap();
+        let make_cb = locals.get_item("make_cb").unwrap().unwrap();
         let cb: pyo3::PyObject = make_cb.call1((lst_obj.as_ref(py),)).unwrap().into();
 
         // spawn a Python handler and send a message
@@ -126,7 +230,7 @@ async fn py_runtime_spawn_and_send() {
             Some(locals),
         )
         .unwrap();
-        let factory: pyo3::PyObject = locals.get_item("factory").unwrap().into();
+        let factory: pyo3::PyObject = locals.get_item("factory").unwrap().unwrap().into();
 
         rt_obj
             .call_method1("supervise_with_factory", (pid, factory, "RestartOne"))
@@ -175,7 +279,7 @@ def cb(msg, msgs=msgs):
             Some(locals),
         )
         .unwrap();
-        locals.get_item("cb").unwrap().to_object(py)
+        locals.get_item("cb").unwrap().unwrap().to_object(py)
     });
 
     let pid: u64 = Python::with_gil(|py| {
@@ -269,9 +373,8 @@ async fn py_structured_concurrency_normal_and_crash() {
         )
         .unwrap();
         let lst = pyo3::types::PyList::empty(py);
-        let cb = locals
-            .get_item("make_cb")
-            .unwrap()
+        let make_cb = locals.get_item("make_cb").unwrap().unwrap();
+        let cb = make_cb
             .call1((lst,))
             .unwrap()
             .into_py(py);
@@ -345,7 +448,7 @@ async fn py_structured_concurrency_normal_and_crash() {
         let src = "def cb(_):\n    raise Exception('crash')\n";
         let locals = pyo3::types::PyDict::new(py);
         py.run(src, None, Some(locals)).unwrap();
-        locals.get_item("cb").unwrap().into_py(py)
+        locals.get_item("cb").unwrap().unwrap().into_py(py)
     });
     let parent_crash: u64 = Python::with_gil(|py| {
         rt_py
@@ -426,7 +529,7 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
                 Some(locals),
             )
             .unwrap();
-            let cb: pyo3::PyObject = locals.get_item("cb").unwrap().into();
+            let cb: pyo3::PyObject = locals.get_item("cb").unwrap().unwrap().into();
 
             let worker_pids: Vec<u64> = rt
                 .call_method1("spawn_child_pool", (parent_pid, cb, 4usize, 64usize, false))

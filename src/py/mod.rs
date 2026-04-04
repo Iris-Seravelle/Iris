@@ -10,6 +10,7 @@ pub mod mailbox;
 pub mod pool;
 pub mod runtime;
 pub mod utils;
+#[cfg(feature = "vortex")]
 pub mod vortex;
 pub mod wrappers;
 

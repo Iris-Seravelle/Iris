@@ -13,6 +13,22 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::mailbox::OverflowPolicy;
 use crate::Runtime;
 
+#[cfg(feature = "vortex")]
+fn run_py_rescue_blocking<F>(f: F)
+where
+    F: FnOnce(),
+{
+    crate::vortex::rescue_pool::RescuePool::run_blocking(f);
+}
+
+#[cfg(not(feature = "vortex"))]
+fn run_py_rescue_blocking<F>(f: F)
+where
+    F: FnOnce(),
+{
+    f();
+}
+
 use super::mailbox::PyMailbox;
 use super::pool::{make_release_gil_channel, PoolTask, GIL_WORKER_POOL};
 use super::utils::{message_to_py, run_python_matcher};
@@ -239,8 +255,55 @@ impl PyRuntime {
     }
 
     #[cfg(feature = "vortex")]
+    fn vortex_set_genetic_thresholds(&self, low: f64, high: f64) -> PyResult<bool> {
+        Ok(self.inner.vortex_set_genetic_thresholds(low, high))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_genetic_thresholds(&self) -> PyResult<Option<(f64, f64)>> {
+        Ok(self.inner.vortex_genetic_thresholds())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_set_isolation_disallowed_ops(&self, ops: Vec<u8>) -> PyResult<bool> {
+        crate::py::vortex::set_isolation_disallowed_ops(ops.clone());
+        Ok(self.inner.vortex_set_isolation_disallowed_ops(ops))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_isolation_disallowed_ops(&self) -> PyResult<Option<Vec<u8>>> {
+        Ok(Some(crate::py::vortex::get_isolation_disallowed_ops()))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_watchdog_enable(&self) -> PyResult<bool> {
+        Ok(self.inner.vortex_watchdog_enable())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_watchdog_disable(&self) -> PyResult<bool> {
+        Ok(self.inner.vortex_watchdog_disable())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_watchdog_enabled(&self) -> PyResult<Option<bool>> {
+        Ok(self.inner.vortex_watchdog_enabled())
+    }
+
+    #[cfg(feature = "vortex")]
     fn vortex_get_genetic_history(&self, pid: u64) -> PyResult<Option<(usize, usize)>> {
         Ok(self.inner.vortex_genetic_history(pid))
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_set_isolation_mode(&self, enabled: bool) -> PyResult<()> {
+        crate::py::vortex::set_isolation_mode(enabled);
+        Ok(())
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_get_isolation_mode(&self) -> PyResult<bool> {
+        Ok(crate::py::vortex::get_isolation_mode())
     }
 
     #[cfg(feature = "vortex")]
@@ -411,7 +474,7 @@ impl PyRuntime {
                                     let guard = b.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                    run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -458,7 +521,7 @@ impl PyRuntime {
                                 let guard = b.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
-                                crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -519,7 +582,7 @@ impl PyRuntime {
                             let guard = b.read();
                             let cb = guard.as_ref(py);
                             let pybytes = PyBytes::new(py, &bytes);
-                            crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                            run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -598,7 +661,7 @@ impl PyRuntime {
                                         let guard = behavior.read();
                                         let cb = guard.as_ref(py);
                                         let pybytes = PyBytes::new(py, &bytes);
-                                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                        run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -648,7 +711,7 @@ impl PyRuntime {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                    run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -755,7 +818,7 @@ impl PyRuntime {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
-                                    crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                    run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -804,7 +867,7 @@ impl PyRuntime {
                                 let guard = behavior.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
-                                crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                                run_py_rescue_blocking(|| {
                                         if let Err(e) = cb.call1((pybytes,)) {
                                             eprintln!("[Iris] Python actor exception: {}", e);
                                             e.print(py);
@@ -843,7 +906,7 @@ impl PyRuntime {
 
                     Python::with_gil(|py| {
                         // Just call the function. It is expected to block on mailbox.recv()
-                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                        run_py_rescue_blocking(|| {
                                 if let Err(e) = py_callable.call1(py, (mailbox,)) {
                                     eprintln!("[Iris] Python mailbox actor exception: {}", e);
                                     e.print(py);
@@ -882,7 +945,7 @@ impl PyRuntime {
                     }
 
                     Python::with_gil(|py| {
-                        crate::vortex::rescue_pool::RescuePool::run_blocking(|| {
+                        run_py_rescue_blocking(|| {
                                 if let Err(e) = py_callable.call1(py, (mailbox,)) {
                                     eprintln!("[Iris] Python mailbox actor exception: {}", e);
                                     e.print(py);

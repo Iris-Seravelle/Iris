@@ -158,6 +158,7 @@ fn populate_module(m: &PyModule) -> PyResult<()> {
     crate::py::jit::init_py(m)?;
     #[cfg(all(feature = "pyo3", not(feature = "jit")))]
     crate::py::jit_stub::init_py(m)?;
+    #[cfg(feature = "vortex")]
     crate::py::vortex::init_py(m)?;
     Ok(())
 }

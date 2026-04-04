@@ -3,9 +3,6 @@
 use std::ffi::CStr;
 use crate::py::jit::codegen::BufferElemType;
 
-#[cfg(feature = "pyo3")]
-use pyo3::AsPyPointer;
-
 // helper for zero-copy buffer access used by the JIT runner
 pub(crate) struct BufferView {
     pub(crate) view: pyo3::ffi::Py_buffer,

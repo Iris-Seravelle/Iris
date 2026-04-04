@@ -123,6 +123,13 @@ Python `PyRuntime` wrappers expose:
 - `vortex_get_genetic_budgeting()`
 - `vortex_set_genetic_thresholds(low, high)`
 - `vortex_get_genetic_thresholds()`
+- `vortex_set_isolation_disallowed_ops(ops)`
+- `vortex_get_isolation_disallowed_ops()`
+- `vortex_set_isolation_mode(bool)`
+- `vortex_get_isolation_mode()`
+- `vortex_watchdog_enable()`
+- `vortex_watchdog_disable()`
+- `vortex_watchdog_enabled()`
 - `vortex_get_genetic_history(pid)`
 - `vortex_get_all_genetic_history()`
 - `vortex_reset_genetic_history()`

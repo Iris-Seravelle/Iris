@@ -40,6 +40,7 @@ type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ErasedMessageHandler = Arc<dyn Fn(mailbox::Message) -> BoxFutureUnit + Send + Sync>;
 const MAX_BEHAVIOR_HISTORY: usize = 16;
 
+#[cfg(feature = "vortex")]
 fn next_dynamic_budget(
     current: usize,
     base: usize,
@@ -52,18 +53,15 @@ fn next_dynamic_budget(
     let min_budget = (base / 4).max(1);
     let max_budget = base.saturating_mul(4).max(base);
 
-    let mut adjusted = current;
-
-    // Aggressively penalize high suspend rates.
-    if suspend_rate > high_thresh {
-        adjusted = (current * 60 / 100).max(min_budget);
+    let adjusted = if suspend_rate > high_thresh {
+        (current * 60 / 100).max(min_budget)
     } else if suspend_rate > low_thresh {
-        adjusted = (current * 80 / 100).max(min_budget);
+        (current * 80 / 100).max(min_budget)
     } else if saw_suspend {
-        adjusted = (current / 2).max(min_budget);
+        (current / 2).max(min_budget)
     } else {
-        adjusted = (current.saturating_add(1)).min(max_budget);
-    }
+        (current.saturating_add(1)).min(max_budget)
+    };
 
     adjusted.clamp(min_budget, max_budget)
 }
@@ -100,6 +98,8 @@ pub struct Runtime {
     monitor_failure_threshold: Arc<Mutex<usize>>,
     #[cfg(feature = "vortex")]
     vortex_engine: Option<Arc<Mutex<VortexEngine>>>,
+    #[cfg(feature = "vortex")]
+    vortex_watcher: Option<Arc<vortex::VortexWatcher>>,
     registry: Arc<registry::NameRegistry>,
     /// Mapping for locally‑spawned proxies that forward to remote actors.
     /// Key is the local proxy PID; value is (remote address, remote PID).
@@ -148,6 +148,8 @@ pub struct Runtime {
     #[cfg(feature = "vortex")]
     vortex_genetic_thresholds: Arc<Mutex<(f64, f64)>>,
     #[cfg(feature = "vortex")]
+    vortex_isolation_disallowed_ops: Arc<Mutex<std::collections::HashSet<u8>>>,
+    #[cfg(feature = "vortex")]
     vortex_genetic_history: Arc<DashMap<Pid, (usize, usize)>>,
 }
 
@@ -194,6 +196,8 @@ impl Runtime {
             #[cfg(feature = "vortex")]
             vortex_genetic_thresholds: Arc::new(Mutex::new((0.4, 0.7))),
             #[cfg(feature = "vortex")]
+            vortex_isolation_disallowed_ops: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            #[cfg(feature = "vortex")]
             vortex_genetic_history: Arc::new(DashMap::new()),
             network_io_timeout: Arc::new(Mutex::new(Duration::from_secs(5))),
             network_max_payload: Arc::new(Mutex::new(1024 * 1024)),
@@ -207,6 +211,8 @@ impl Runtime {
             behavior_history: Arc::new(DashMap::new()),
             #[cfg(feature = "vortex")]
             vortex_engine: Some(Arc::new(Mutex::new(VortexEngine::new()))),
+            #[cfg(feature = "vortex")]
+            vortex_watcher: Some(Arc::new(vortex::VortexWatcher::new())),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -487,6 +493,55 @@ impl Runtime {
             .lock()
             .ok()
             .map(|guard| *guard)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_isolation_disallowed_ops(&self, ops: Vec<u8>) -> bool {
+        match self.vortex_isolation_disallowed_ops.lock() {
+            Ok(mut guard) => {
+                guard.clear();
+                for op in ops {
+                    guard.insert(op);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_get_isolation_disallowed_ops(&self) -> Option<Vec<u8>> {
+        self.vortex_isolation_disallowed_ops
+            .lock()
+            .ok()
+            .map(|guard| guard.iter().copied().collect())
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_enable(&self) -> bool {
+        if let Some(watcher) = self.vortex_watcher.as_ref() {
+            watcher.enable();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_disable(&self) -> bool {
+        if let Some(watcher) = self.vortex_watcher.as_ref() {
+            watcher.disable();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_enabled(&self) -> Option<bool> {
+        self.vortex_watcher
+            .as_ref()
+            .map(|w| w.is_enabled())
     }
 
     #[cfg(feature = "vortex")]
@@ -1439,15 +1494,27 @@ impl Runtime {
 
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
+                #[cfg(feature = "vortex")]
                 let mut dynamic_budget = budget.max(1);
+                #[cfg(not(feature = "vortex"))]
+                let dynamic_budget = budget.max(1);
                 while let Some(first_msg) = rx.recv().await {
+                    #[cfg(feature = "vortex")]
+                    if rt_vortex_clone.vortex_watchdog_enabled().unwrap_or(false) {
+                        tokio::task::yield_now().await;
+                    }
+
+                    #[cfg(feature = "vortex")]
                     let mut saw_suspend_in_cycle = false;
+                    #[cfg(not(feature = "vortex"))]
+                    let _saw_suspend_in_cycle = false;
+
                     #[cfg(feature = "vortex")]
                     let enable_genetic_budgeting = rt_vortex_clone
                         .vortex_genetic_budgeting_enabled()
                         .unwrap_or(false);
                     #[cfg(not(feature = "vortex"))]
-                    let enable_genetic_budgeting = false;
+                    let _enable_genetic_budgeting = false;
 
                     #[cfg(feature = "vortex")]
                     {
@@ -1519,33 +1586,36 @@ impl Runtime {
                     if processed >= dynamic_budget {
                         processed = 0;
                         tokio::task::yield_now().await;
-                        if enable_genetic_budgeting {
-                            let (suspend_count, total_count) =
-                                rt_vortex_clone.vortex_genetic_history(pid).unwrap_or((0, 0));
-                            let total_count = total_count.saturating_add(1);
-                            let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
-                            let suspend_rate = if total_count == 0 {
-                                0.0
-                            } else {
-                                (suspend_count as f64) / (total_count as f64)
-                            };
+                        #[cfg(feature = "vortex")]
+                        {
+                            if enable_genetic_budgeting {
+                                let (suspend_count, total_count) =
+                                    rt_vortex_clone.vortex_genetic_history(pid).unwrap_or((0, 0));
+                                let total_count = total_count.saturating_add(1);
+                                let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
+                                let suspend_rate = if total_count == 0 {
+                                    0.0
+                                } else {
+                                    (suspend_count as f64) / (total_count as f64)
+                                };
 
-                            rt_vortex_clone
-                                .vortex_genetic_history
-                                .insert(pid, (suspend_count, total_count));
+                                rt_vortex_clone
+                                    .vortex_genetic_history
+                                    .insert(pid, (suspend_count, total_count));
 
-                            let (low, high) = rt_vortex_clone
-                                .vortex_genetic_thresholds()
-                                .unwrap_or((0.4, 0.7));
+                                let (low, high) = rt_vortex_clone
+                                    .vortex_genetic_thresholds()
+                                    .unwrap_or((0.4, 0.7));
 
-                            dynamic_budget = next_dynamic_budget(
-                                dynamic_budget,
-                                budget,
-                                saw_suspend_in_cycle,
-                                suspend_rate,
-                                low,
-                                high,
-                            );
+                                dynamic_budget = next_dynamic_budget(
+                                    dynamic_budget,
+                                    budget,
+                                    saw_suspend_in_cycle,
+                                    suspend_rate,
+                                    low,
+                                    high,
+                                );
+                            }
                         }
                     }
                 }
@@ -2858,5 +2928,16 @@ mod tests {
         assert!(!rt.vortex_set_genetic_thresholds(0.7, 0.2));
         assert!(!rt.vortex_set_genetic_thresholds(-0.1, 0.5));
         assert!(!rt.vortex_set_genetic_thresholds(0.1, 1.2));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_isolation_disallow_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.vortex_get_isolation_disallowed_ops(), Some(vec![]));
+        assert!(rt.vortex_set_isolation_disallowed_ops(vec![90, 91]));
+        let mut got = rt.vortex_get_isolation_disallowed_ops().unwrap();
+        got.sort();
+        assert_eq!(got, vec![90, 91]);
     }
 }

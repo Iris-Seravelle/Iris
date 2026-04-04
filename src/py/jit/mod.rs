@@ -17,8 +17,6 @@ use pyo3::prelude::*;
 #[cfg(feature = "pyo3")]
 use pyo3::types::{PyDict, PyTuple};
 
-use pyo3::AsPyPointer;
-
 pub(crate) mod codegen;
 pub(crate) mod config;
 pub(crate) mod heuristics;

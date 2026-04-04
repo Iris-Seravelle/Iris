@@ -1454,6 +1454,164 @@ async fn test_pyruntime_vortex_genetic_threshold_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_watchdog_toggle() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let enabled: Option<bool> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_watchdog_enabled")
+            .unwrap()
+            .extract()
+            .unwrap();
+        // Watchdog starts disabled by default.
+        assert!(!enabled.unwrap_or(true));
+
+        let ok = rt_py
+            .as_ref(py)
+            .call_method0("vortex_watchdog_enable")
+            .unwrap()
+            .extract::<bool>()
+            .unwrap();
+        assert!(ok);
+
+        let enabled: Option<bool> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_watchdog_enabled")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(enabled.unwrap_or(false));
+
+        let ok = rt_py
+            .as_ref(py)
+            .call_method0("vortex_watchdog_disable")
+            .unwrap()
+            .extract::<bool>()
+            .unwrap();
+        assert!(ok);
+
+        let enabled: Option<bool> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_watchdog_enabled")
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(!enabled.unwrap_or(true));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_isolation_disallow_ops() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let dis = py.import("dis").unwrap();
+        let opmap = dis.getattr("opmap").unwrap();
+        let store_global: u8 = opmap.get_item("STORE_GLOBAL").unwrap().extract().unwrap();
+        let store_attr: u8 = opmap.get_item("STORE_ATTR").unwrap().extract().unwrap();
+
+        rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_isolation_disallowed_ops", (vec![store_global, store_attr],))
+            .unwrap();
+
+        let ops: Option<Vec<u8>> = rt_py
+            .as_ref(py)
+            .call_method0("vortex_get_isolation_disallowed_ops")
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert!(ops.is_some());
+        let mut ops = ops.unwrap();
+        ops.sort();
+        let mut expected = vec![store_global, store_attr];
+        expected.sort();
+        assert_eq!(ops, expected);
+
+        rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_isolation_disallowed_ops", (Vec::<u8>::new(),))
+            .unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pyruntime_vortex_isolation_mode_store_blocking() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+    });
+
+    Python::with_gil(|py| {
+        let _ = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_isolation_mode", (true,));
+
+        // Allow STORE_GLOBAL for this test (STORE_ATTR remains blocked in transform).
+        rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_isolation_disallowed_ops", (Vec::<u8>::new(),))
+            .unwrap();
+
+        let module = iris::py::make_module(py).expect("make_module");
+        let globals = PyDict::new(py);
+        globals.set_item("iris", &module).unwrap();
+        py.run(
+            "def isolated_write_read():\n    global isolation_test\n    isolation_test = 1\n    return isolation_test\n",
+            Some(globals),
+            None,
+        )
+        .unwrap();
+        let fn_obj = globals.get_item("isolated_write_read").unwrap();
+
+        let transmuted = module
+            .as_ref(py)
+            .getattr("transmute_function")
+            .unwrap()
+            .call1((fn_obj,))
+            .unwrap();
+
+        module
+            .as_ref(py)
+            .getattr("set_budget")
+            .unwrap()
+            .call1((100usize,))
+            .unwrap();
+
+        let result: i32 = transmuted.call0().unwrap().extract().unwrap();
+        // STORE_GLOBAL writes into isolated globals; LOAD_GLOBAL resolves from same isolated table.
+        assert_eq!(result, 1);
+
+        let leaked_in_original_globals = globals.contains("isolation_test").unwrap();
+        assert!(!leaked_in_original_globals);
+
+        let _ = rt_py
+            .as_ref(py)
+            .call_method1("vortex_set_isolation_mode", (false,));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
     let rt_py = Python::with_gil(|py| {
         let module = iris::py::make_module(py).expect("make_module");
@@ -1517,3 +1675,7 @@ async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
             .extract()
             .unwrap();
         assert!(reset_all.is_empty());
+
+        rt_py.as_ref(py).call_method1("stop", (id,)).unwrap();
+    });
+}

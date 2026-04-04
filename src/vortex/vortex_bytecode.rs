@@ -436,6 +436,38 @@ pub fn verify_exception_handler_targets(
     Ok(())
 }
 
+pub fn apply_isolation_transform(
+    code: &[Instruction],
+    py: Python,
+    disallowed_ops: Option<&std::collections::HashSet<u8>>,
+) -> PyResult<Vec<Instruction>> {
+    let dis = py.import("dis")?;
+    let store_attr: u8 = dis.getattr("opmap")?.get_item("STORE_ATTR")?.extract()?;
+
+    if let Some(disallowed) = disallowed_ops {
+        for ins in code {
+            if disallowed.contains(&ins.op) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "isolation disallowed opcode encountered",
+                ));
+            }
+        }
+    }
+
+    // In strict isolation mode, global/name stores are allowed because transmuted
+    // function globals are detached from module state. Attribute stores remain unsafe
+    // (object side effects can escape), so they are rejected.
+    for ins in code {
+        if ins.op == store_attr {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "isolation unsafe STORE_ATTR opcode encountered",
+            ));
+        }
+    }
+
+    Ok(code.to_vec())
+}
+
 pub fn verify_stacksize_minimum(stack_size: usize) -> Result<(), VerifyError> {
     // Probe executes a callable check and requires temporary stack headroom.
     if stack_size < 2 {

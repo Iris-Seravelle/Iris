@@ -9,12 +9,15 @@ use crate::vortex::vortex_bytecode::{
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyDict};
+use std::collections::HashSet;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pyo3::create_exception!(iris, VortexSuspend, pyo3::exceptions::PyException);
 
 static BUDGET: AtomicUsize = AtomicUsize::new(0);
+static ISOLATION_MODE: AtomicBool = AtomicBool::new(false);
+static ISOLATION_DISALLOWED_OPS: Lazy<Mutex<HashSet<u8>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 const MAX_PATCHED_CODE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -96,6 +99,31 @@ pub fn set_budget(budget: usize) {
 }
 
 #[pyfunction]
+pub fn set_isolation_mode(enabled: bool) {
+    ISOLATION_MODE.store(enabled, Ordering::Relaxed);
+}
+
+#[pyfunction]
+pub fn get_isolation_mode() -> bool {
+    ISOLATION_MODE.load(Ordering::Relaxed)
+}
+
+#[pyfunction]
+pub fn set_isolation_disallowed_ops(ops: Vec<u8>) {
+    let mut guard = ISOLATION_DISALLOWED_OPS.lock().unwrap();
+    guard.clear();
+    for op in ops {
+        guard.insert(op);
+    }
+}
+
+#[pyfunction]
+pub fn get_isolation_disallowed_ops() -> Vec<u8> {
+    let guard = ISOLATION_DISALLOWED_OPS.lock().unwrap();
+    guard.iter().copied().collect()
+}
+
+#[pyfunction]
 pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let py_minor: i32 = py
         .eval("__import__('sys').version_info.minor", None, None)
@@ -126,9 +154,10 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .and_then(|mods| mods.get_item("iris"))
     {
         Ok(m) => m,
-        Err(_) => globals
-            .get_item("iris")
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("vortex/module-lookup: iris missing"))?,
+        Err(_) => match globals.get_item("iris") {
+            Ok(m) => m,
+            Err(_) => return Err(pyo3::exceptions::PyRuntimeError::new_err("vortex/module-lookup: iris missing")),
+        },
     };
     let check_fn = local_mod
         .getattr("_vortex_check")
@@ -246,13 +275,32 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_shadow(py, py_func, "patched cache layout invalid");
     }
 
-    let patched_raw = encode_wordcode(&patched, meta.extended_arg);
-    if patched_raw.len() > MAX_PATCHED_CODE_BYTES {
+    let final_patched = if ISOLATION_MODE.load(Ordering::Relaxed) {
+        let disallowed_ops = ISOLATION_DISALLOWED_OPS.lock().unwrap();
+        match crate::vortex::vortex_bytecode::apply_isolation_transform(&patched, py, Some(&*disallowed_ops)) {
+            Ok(isolated) => {
+                if verify_cache_layout(&isolated, &quickening).is_err() {
+                    set_guard_telemetry("fallback", "isolation_cache_layout_invalid", py_minor, true, false);
+                    return fallback_shadow(py, py_func, "isolation cache layout invalid");
+                }
+                isolated
+            }
+            Err(_) => {
+                set_guard_telemetry("fallback", "isolation_transform_failed", py_minor, true, false);
+                return fallback_shadow(py, py_func, "isolation transform failed");
+            }
+        }
+    } else {
+        patched
+    };
+
+    let final_raw = encode_wordcode(&final_patched, meta.extended_arg);
+    if final_raw.len() > MAX_PATCHED_CODE_BYTES {
         set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
         return fallback_shadow(py, py_func, "patched code too large");
     }
 
-    let kwargs = [("co_code", PyBytes::new(py, &patched_raw))].into_py_dict(py);
+    let kwargs = [("co_code", PyBytes::new(py, &final_raw))].into_py_dict(py);
     let new_code = match code.call_method("replace", (), Some(kwargs)) {
         Ok(v) => v,
         Err(_) => {
@@ -275,13 +323,13 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
         }
     };
-    if verify_exception_table_invariants(&patched_entries, patched_raw.len() / 2, patched_stack_size)
+    if verify_exception_table_invariants(&patched_entries, final_raw.len() / 2, patched_stack_size)
         .is_err()
     {
         set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
-    if verify_exception_handler_targets(&patched_entries, &patched, &quickening).is_err() {
+    if verify_exception_handler_targets(&patched_entries, &final_patched, &quickening).is_err() {
         set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
@@ -294,10 +342,28 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         }
     };
 
+    let func_globals: &PyDict = if ISOLATION_MODE.load(Ordering::Relaxed) {
+        let locals2 = PyDict::new(py);
+        locals2.set_item("base_globals", globals)?;
+        // Isolation uses a detached globals dict so STORE_GLOBAL/STORE_NAME mutate only
+        // this shadow environment, never the original module globals.
+        py.run(
+            "isolated_globals = dict(base_globals)",
+            None,
+            Some(locals2),
+        )?;
+        locals2
+            .get_item("isolated_globals")
+            .unwrap()
+            .downcast::<PyDict>()?
+    } else {
+        globals
+    };
+
     let shadow = match types_mod.getattr("FunctionType").and_then(|ctor| {
         ctor.call1((
             new_code,
-            globals,
+            func_globals,
             py_func.getattr("__name__")?,
             py_func.getattr("__defaults__")?,
             py_func.getattr("__closure__")?,
@@ -327,11 +393,27 @@ fn fallback_shadow(py: Python, py_func: &PyAny, _reason: &str) -> PyResult<PyObj
 
     let locals = PyDict::new(py);
     locals.set_item("fn", py_func)?;
+    locals.set_item("isolation_mode", ISOLATION_MODE.load(Ordering::Relaxed))?;
     py.run(
         r#"
-def _iris_make_shadow(fn):
+def _iris_make_shadow(fn, isolation_mode=False):
+    import types
     import sys
-    target_code = fn.__code__
+
+    target_fn = fn
+    if isolation_mode:
+        isolated_globals = dict(fn.__globals__)
+        target_fn = types.FunctionType(
+            fn.__code__,
+            isolated_globals,
+            fn.__name__,
+            fn.__defaults__,
+            fn.__closure__,
+        )
+        if hasattr(fn, "__kwdefaults__"):
+            target_fn.__kwdefaults__ = fn.__kwdefaults__
+
+    target_code = target_fn.__code__
 
     def _trace(frame, event, arg):
         if frame.f_code is not target_code:
@@ -346,13 +428,13 @@ def _iris_make_shadow(fn):
         old = sys.gettrace()
         sys.settrace(_trace)
         try:
-            return fn(*a, **k)
+            return target_fn(*a, **k)
         finally:
             sys.settrace(old)
 
     return _wrapped
 
-shadow = _iris_make_shadow(fn)
+shadow = _iris_make_shadow(fn, isolation_mode)
 "#,
         Some(globals),
         Some(locals),
@@ -371,5 +453,9 @@ pub fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_budget, m)?)?;
     m.add_function(wrap_pyfunction!(get_guard_status, m)?)?;
     m.add_function(wrap_pyfunction!(transmute_function, m)?)?;
+    m.add_function(wrap_pyfunction!(set_isolation_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_isolation_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(set_isolation_disallowed_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(get_isolation_disallowed_ops, m)?)?;
     Ok(())
 }
