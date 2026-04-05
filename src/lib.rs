@@ -25,9 +25,7 @@ pub mod node;
 
 use crate::pid::Pid;
 #[cfg(feature = "vortex")]
-use crate::vortex::{
-    VortexEngine, VortexGhostPolicy, VortexGhostResolution, VortexVioCall,
-};
+use crate::vortex::{VortexEngine, VortexGhostPolicy, VortexGhostResolution, VortexVioCall};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -408,7 +406,11 @@ impl Runtime {
     }
 
     #[cfg(feature = "vortex")]
-    pub fn vortex_replay_committed_vio_calls<F>(&self, calls: &[VortexVioCall], executor: F) -> Option<usize>
+    pub fn vortex_replay_committed_vio_calls<F>(
+        &self,
+        calls: &[VortexVioCall],
+        executor: F,
+    ) -> Option<usize>
     where
         F: FnMut(&VortexVioCall) -> bool,
     {
@@ -543,9 +545,7 @@ impl Runtime {
 
     #[cfg(feature = "vortex")]
     pub fn vortex_watchdog_enabled(&self) -> Option<bool> {
-        self.vortex_watcher
-            .as_ref()
-            .map(|w| w.is_enabled())
+        self.vortex_watcher.as_ref().map(|w| w.is_enabled())
     }
 
     #[cfg(feature = "vortex")]
@@ -588,10 +588,15 @@ impl Runtime {
         };
 
         guard.start_transaction_with_checkpoint(primary_id, primary_locals);
-        let _ = guard.stage_transaction_vio("suspend_primary".to_string(), pid.to_le_bytes().to_vec());
+        let _ =
+            guard.stage_transaction_vio("suspend_primary".to_string(), pid.to_le_bytes().to_vec());
 
         guard.start_ghost_transaction_with_checkpoint(ghost_id, ghost_locals);
-        let _ = guard.stage_ghost_transaction_vio(ghost_id, "suspend_ghost".to_string(), pid.to_le_bytes().to_vec());
+        let _ = guard.stage_ghost_transaction_vio(
+            ghost_id,
+            "suspend_ghost".to_string(),
+            pid.to_le_bytes().to_vec(),
+        );
 
         let policy = self
             .vortex_auto_policy
@@ -601,7 +606,8 @@ impl Runtime {
 
         if let Some(resolution) = guard.resolve_primary_ghost_race(ghost_id, ghost_id, policy) {
             if resolution.winner_id == primary_id {
-                self.vortex_auto_primary_wins.fetch_add(1, Ordering::Relaxed);
+                self.vortex_auto_primary_wins
+                    .fetch_add(1, Ordering::Relaxed);
             } else if resolution.winner_id == ghost_id {
                 self.vortex_auto_ghost_wins.fetch_add(1, Ordering::Relaxed);
             }
@@ -1524,7 +1530,8 @@ impl Runtime {
                     {
                         if let Err(_) = vortex_engine.preempt_tick() {
                             saw_suspend_in_cycle = true;
-                            rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
+                            rt_vortex_clone
+                                .vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                             vortex_engine.detach_stalled_thread();
                             vortex_engine.replenish_budget(budget);
                             tokio::task::yield_now().await;
@@ -1557,7 +1564,10 @@ impl Runtime {
                                 {
                                     if let Err(_) = vortex_engine.preempt_tick() {
                                         saw_suspend_in_cycle = true;
-                                        rt_vortex_clone.vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
+                                        rt_vortex_clone
+                                            .vortex_auto_checkpoint_and_replay_on_suspend(
+                                                pid, budget,
+                                            );
                                         vortex_engine.detach_stalled_thread();
                                         vortex_engine.replenish_budget(budget);
                                         tokio::task::yield_now().await;
@@ -1593,8 +1603,9 @@ impl Runtime {
                         #[cfg(feature = "vortex")]
                         {
                             if enable_genetic_budgeting {
-                                let (suspend_count, total_count) =
-                                    rt_vortex_clone.vortex_genetic_history(pid).unwrap_or((0, 0));
+                                let (suspend_count, total_count) = rt_vortex_clone
+                                    .vortex_genetic_history(pid)
+                                    .unwrap_or((0, 0));
                                 let total_count = total_count.saturating_add(1);
                                 let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
                                 let suspend_rate = if total_count == 0 {
@@ -2371,12 +2382,19 @@ mod tests {
             }
         }
 
-        assert!(sent >= 4, "expected at least 4 messages to be accepted, got {}", sent);
+        assert!(
+            sent >= 4,
+            "expected at least 4 messages to be accepted, got {}",
+            sent
+        );
 
         let level = rt
             .mailbox_backpressure(pid)
             .expect("backpressure should be available");
-        assert!(matches!(level, mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical));
+        assert!(matches!(
+            level,
+            mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical
+        ));
 
         if sent >= 5 {
             assert_eq!(level, mailbox::BackpressureLevel::Critical);
@@ -2407,10 +2425,16 @@ mod tests {
             let payload = bytes::Bytes::from(format!("u{}", i));
             assert!(rt.send_user(pid, payload).is_ok());
         }
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::High));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::High)
+        );
 
         assert!(rt.send_user(pid, bytes::Bytes::from_static(b"u3")).is_ok());
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Critical)
+        );
 
         let _ = start_tx.send(());
     }
@@ -2440,7 +2464,10 @@ mod tests {
         assert!(rt
             .send(pid, mailbox::Message::User(b"d3".to_vec().into()))
             .is_ok());
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Critical)
+        );
 
         let _ = start_tx.send(());
 
@@ -2455,7 +2482,10 @@ mod tests {
         .await
         .expect("mailbox should drain");
 
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Normal));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Normal)
+        );
     }
 
     #[tokio::test]
@@ -2664,12 +2694,18 @@ mod tests {
         assert!(rt.vortex_start_transaction_with_checkpoint(10, std::collections::HashMap::new()));
         assert!(rt.vortex_stage_transaction_vio("io_primary".to_string(), b"p".to_vec()));
 
-        assert!(rt.vortex_start_ghost_transaction_with_checkpoint(20, std::collections::HashMap::new()));
+        assert!(
+            rt.vortex_start_ghost_transaction_with_checkpoint(20, std::collections::HashMap::new())
+        );
         assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_a".to_string(), b"a".to_vec()));
         assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_b".to_string(), b"b".to_vec()));
 
         let resolution = rt
-            .vortex_resolve_primary_ghost_race(20, 20, crate::vortex::VortexGhostPolicy::FirstSafePointWins)
+            .vortex_resolve_primary_ghost_race(
+                20,
+                20,
+                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+            )
             .expect("resolution should exist");
         assert_eq!(resolution.winner_id, 20);
         assert_eq!(resolution.committed_vio.len(), 2);
@@ -2682,9 +2718,16 @@ mod tests {
             })
             .expect("replay should be available");
         assert_eq!(applied, 2);
-        assert_eq!(seen, vec!["io_ghost_a".to_string(), "io_ghost_b".to_string()]);
+        assert_eq!(
+            seen,
+            vec!["io_ghost_a".to_string(), "io_ghost_b".to_string()]
+        );
 
-        let second = rt.vortex_resolve_primary_ghost_race(20, 20, crate::vortex::VortexGhostPolicy::FirstSafePointWins);
+        let second = rt.vortex_resolve_primary_ghost_race(
+            20,
+            20,
+            crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+        );
         assert!(second.is_none());
     }
 
@@ -2709,15 +2752,26 @@ mod tests {
         let rt = Runtime::new();
         let pid = rt.spawn_observed_handler(8);
 
-        assert!(rt.send(pid, mailbox::Message::User(b"before".to_vec().into())).is_ok());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"before".to_vec().into()))
+            .is_ok());
 
         assert!(rt.vortex_start_transaction_with_checkpoint(101, std::collections::HashMap::new()));
         assert!(rt.vortex_stage_transaction_vio("primary_call".to_string(), b"p".to_vec()));
-        assert!(rt.vortex_start_ghost_transaction_with_checkpoint(202, std::collections::HashMap::new()));
-        assert!(rt.vortex_stage_ghost_transaction_vio(202, "ghost_call".to_string(), b"g".to_vec()));
+        assert!(rt
+            .vortex_start_ghost_transaction_with_checkpoint(202, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(
+            202,
+            "ghost_call".to_string(),
+            b"g".to_vec()
+        ));
 
         let resolution = rt
-            .vortex_resolve_primary_ghost_race(202, 202, crate::vortex::VortexGhostPolicy::FirstSafePointWins)
+            .vortex_resolve_primary_ghost_race(
+                202,
+                202,
+                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+            )
             .expect("resolution should succeed");
         assert_eq!(resolution.winner_id, 202);
         assert_eq!(resolution.committed_vio.len(), 1);
@@ -2727,7 +2781,9 @@ mod tests {
             .expect("replay should be available");
         assert_eq!(applied, 1);
 
-        assert!(rt.send(pid, mailbox::Message::User(b"after".to_vec().into())).is_ok());
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"after".to_vec().into()))
+            .is_ok());
 
         let observed = timeout(Duration::from_secs(1), async {
             loop {

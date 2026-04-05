@@ -96,10 +96,7 @@ result = loop.run_until_complete(run_discovery(rt, addr))
         )
         .unwrap();
 
-        let resolved_any = locals
-            .get_item("result")
-            .unwrap()
-            .unwrap();
+        let resolved_any = locals.get_item("result").unwrap().unwrap();
         let resolved_pid: Option<u64> = resolved_any.extract().unwrap();
         assert!(
             resolved_pid.is_some(),

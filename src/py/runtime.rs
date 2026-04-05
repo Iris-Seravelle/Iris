@@ -6,6 +6,7 @@ use bytes;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3_asyncio::tokio::future_into_py;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
@@ -210,7 +211,9 @@ impl PyRuntime {
             "firstsafepointwins" | "first_safe_point_wins" | "first-safe-point-wins" => {
                 VortexGhostPolicy::FirstSafePointWins
             }
-            "preferprimary" | "prefer_primary" | "prefer-primary" => VortexGhostPolicy::PreferPrimary,
+            "preferprimary" | "prefer_primary" | "prefer-primary" => {
+                VortexGhostPolicy::PreferPrimary
+            }
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "invalid vortex policy (expected FirstSafePointWins or PreferPrimary)",
@@ -251,7 +254,10 @@ impl PyRuntime {
 
     #[cfg(feature = "vortex")]
     fn vortex_get_genetic_budgeting(&self) -> PyResult<bool> {
-        Ok(self.inner.vortex_genetic_budgeting_enabled().unwrap_or(false))
+        Ok(self
+            .inner
+            .vortex_genetic_budgeting_enabled()
+            .unwrap_or(false))
     }
 
     #[cfg(feature = "vortex")]
@@ -426,6 +432,9 @@ impl PyRuntime {
     ) -> PyResult<u64> {
         let release = release_gil.unwrap_or(false);
         let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+        let pid_holder = Arc::new(AtomicU64::new(0));
+        let pid_holder_clone = pid_holder.clone();
+        let rt = self.inner.clone();
         // compute maybe_tx using shared helper (propagates error on strict limit)
         let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
 
@@ -433,6 +442,8 @@ impl PyRuntime {
             let b = behavior.clone();
             let tx = maybe_tx.clone();
             let release_gil = release;
+            let pid_holder = pid_holder_clone.clone();
+            let rt = rt.clone();
             async move {
                 if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                     return;
@@ -445,6 +456,8 @@ impl PyRuntime {
                             let task = PoolTask::Execute {
                                 behavior: b.clone(),
                                 bytes: bytes.clone(),
+                                pid_holder: pid_holder.clone(),
+                                rt: rt.clone(),
                             };
                             let _ = tx.send(task);
                         }
@@ -467,20 +480,29 @@ impl PyRuntime {
                                 let task = PoolTask::Execute {
                                     behavior: b.clone(),
                                     bytes: bytes.clone(),
+                                    pid_holder: pid_holder.clone(),
+                                    rt: rt.clone(),
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                Python::with_gil(|py| {
+                                let success = Python::with_gil(|py| {
                                     let guard = b.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
+                                    let mut ok = true;
                                     run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
+                                        ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                            cb.call1((pybytes,)).map(|_| ())
+                                        });
                                     });
+                                    ok
                                 });
+                                if !success {
+                                    let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                    if pid != 0 {
+                                        rt.stop(pid);
+                                    }
+                                }
                             }
                         }
                         crate::mailbox::Message::System(
@@ -517,17 +539,24 @@ impl PyRuntime {
                             });
                         }
                         crate::mailbox::Message::User(bytes) => {
-                            Python::with_gil(|py| {
+                            let success = Python::with_gil(|py| {
                                 let guard = b.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
+                                let mut ok = true;
                                 run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((pybytes,)).map(|_| ())
                                     });
+                                });
+                                ok
                             });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(
                             _info,
@@ -539,13 +568,17 @@ impl PyRuntime {
                         }
                         crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
                         | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong)
-                        | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Backpressure(_)) => {}
+                        | crate::mailbox::Message::System(
+                            crate::mailbox::SystemMessage::Backpressure(_),
+                        ) => {}
                     }
                 }
             }
         };
 
-        Ok(self.inner.spawn_handler_with_budget(handler, budget))
+        let pid = self.inner.spawn_handler_with_budget(handler, budget);
+        pid_holder.store(pid, Ordering::SeqCst);
+        Ok(pid)
     }
 
     /// Lazy/virtual variant of spawn_py_handler.
@@ -559,9 +592,14 @@ impl PyRuntime {
         idle_timeout_ms: Option<u64>,
     ) -> PyResult<u64> {
         let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+        let pid_holder = Arc::new(AtomicU64::new(0));
+        let pid_holder_clone = pid_holder.clone();
+        let rt = self.inner.clone();
 
         let handler = move |msg: crate::mailbox::Message| {
             let b = behavior.clone();
+            let pid_holder = pid_holder_clone.clone();
+            let rt = rt.clone();
             async move {
                 if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                     return;
@@ -578,32 +616,43 @@ impl PyRuntime {
                         });
                     }
                     crate::mailbox::Message::User(bytes) => {
-                        Python::with_gil(|py| {
+                        let success = Python::with_gil(|py| {
                             let guard = b.read();
                             let cb = guard.as_ref(py);
                             let pybytes = PyBytes::new(py, &bytes);
+                            let mut ok = true;
                             run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
-                                    });
+                                ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                    cb.call1((pybytes,)).map(|_| ())
+                                });
+                            });
+                            ok
                         });
+                        if !success {
+                            let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                            if pid != 0 {
+                                rt.stop(pid);
+                            }
+                        }
                     }
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::Exit(_info)) => {
                     }
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::DropOld) => {}
                     crate::mailbox::Message::System(crate::mailbox::SystemMessage::Ping)
                     | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Pong)
-                    | crate::mailbox::Message::System(crate::mailbox::SystemMessage::Backpressure(_)) => {}
+                    | crate::mailbox::Message::System(
+                        crate::mailbox::SystemMessage::Backpressure(_),
+                    ) => {}
                 }
             }
         };
 
         let idle = idle_timeout_ms.map(Duration::from_millis);
-        Ok(self
+        let pid = self
             .inner
-            .spawn_virtual_handler_with_budget(handler, budget, idle))
+            .spawn_virtual_handler_with_budget(handler, budget, idle);
+        pid_holder.store(pid, Ordering::SeqCst);
+        Ok(pid)
     }
 
     /// Bounded mailbox variant of spawn_py_handler.
@@ -616,11 +665,16 @@ impl PyRuntime {
     ) -> PyResult<u64> {
         let release = release_gil.unwrap_or(false);
         let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+        let pid_holder = Arc::new(AtomicU64::new(0));
+        let pid_holder_clone = pid_holder.clone();
+        let rt = self.inner.clone();
         let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
 
         let handler = move |mut rx: crate::mailbox::MailboxReceiver| {
             let maybe_tx = maybe_tx.clone();
             let behavior = behavior.clone();
+            let pid_holder = pid_holder_clone.clone();
+            let rt = rt.clone();
             async move {
                 while let Some(msg) = rx.recv().await {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
@@ -633,6 +687,8 @@ impl PyRuntime {
                                 let task = PoolTask::Execute {
                                     behavior: behavior.clone(),
                                     bytes: bytes.clone(),
+                                    pid_holder: pid_holder.clone(),
+                                    rt: rt.clone(),
                                 };
                                 let _ = tx.send(task);
                             }
@@ -654,20 +710,31 @@ impl PyRuntime {
                                     let task = PoolTask::Execute {
                                         behavior: behavior.clone(),
                                         bytes: bytes.clone(),
+                                        pid_holder: pid_holder.clone(),
+                                        rt: rt.clone(),
                                     };
                                     let _ = pool.sender.send(task);
                                 } else {
-                                    Python::with_gil(|py| {
+                                    let success = Python::with_gil(|py| {
                                         let guard = behavior.read();
                                         let cb = guard.as_ref(py);
                                         let pybytes = PyBytes::new(py, &bytes);
+                                        let mut ok = true;
                                         run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
+                                            ok = crate::py::utils::run_python_callback_py(
+                                                py,
+                                                |_py| cb.call1((pybytes,)).map(|_| ()),
+                                            );
+                                        });
+                                        ok
+                                    });
+                                    if !success {
+                                        let pid =
+                                            pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                        if pid != 0 {
+                                            rt.stop(pid);
                                         }
-                                    });
-                                    });
+                                    }
                                 }
                             }
                             crate::mailbox::Message::System(
@@ -707,17 +774,24 @@ impl PyRuntime {
                                 });
                             }
                             crate::mailbox::Message::User(bytes) => {
-                                Python::with_gil(|py| {
+                                let success = Python::with_gil(|py| {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
+                                    let mut ok = true;
                                     run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
+                                        ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                            cb.call1((pybytes,)).map(|_| ())
+                                        });
                                     });
+                                    ok
                                 });
+                                if !success {
+                                    let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                    if pid != 0 {
+                                        rt.stop(pid);
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -726,9 +800,11 @@ impl PyRuntime {
             }
         };
 
-        Ok(self
+        let pid = self
             .inner
-            .spawn_actor_with_budget_bounded(handler, budget, capacity))
+            .spawn_actor_with_budget_bounded(handler, budget, capacity);
+        pid_holder.store(pid, Ordering::SeqCst);
+        Ok(pid)
     }
 
     /// Spawn a child actor; lifetime is tied to `parent`.
@@ -777,11 +853,16 @@ impl PyRuntime {
         // Implementation mirrors spawn_py_handler but uses parent API.
         let release = release_gil.unwrap_or(false);
         let behavior = Arc::new(parking_lot::RwLock::new(py_callable));
+        let pid_holder = Arc::new(AtomicU64::new(0));
+        let pid_holder_clone = pid_holder.clone();
+        let rt = self.inner.clone();
         let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
 
         let handler = move |msg: crate::mailbox::Message| {
             let maybe_tx = maybe_tx.clone();
             let behavior = behavior.clone();
+            let pid_holder = pid_holder_clone.clone();
+            let rt = rt.clone();
             async move {
                 if let Some(tx) = maybe_tx {
                     // blocking GIL thread path
@@ -790,6 +871,8 @@ impl PyRuntime {
                             let task = PoolTask::Execute {
                                 behavior: behavior.clone(),
                                 bytes: bytes.clone(),
+                                pid_holder: pid_holder.clone(),
+                                rt: rt.clone(),
                             };
                             let _ = tx.send(task);
                         }
@@ -811,20 +894,29 @@ impl PyRuntime {
                                 let task = PoolTask::Execute {
                                     behavior: behavior.clone(),
                                     bytes: bytes.clone(),
+                                    pid_holder: pid_holder.clone(),
+                                    rt: rt.clone(),
                                 };
                                 let _ = pool.sender.send(task);
                             } else {
-                                Python::with_gil(|py| {
+                                let success = Python::with_gil(|py| {
                                     let guard = behavior.read();
                                     let cb = guard.as_ref(py);
                                     let pybytes = PyBytes::new(py, &bytes);
+                                    let mut ok = true;
                                     run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
+                                        ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                            cb.call1((pybytes,)).map(|_| ())
+                                        });
                                     });
+                                    ok
                                 });
+                                if !success {
+                                    let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                    if pid != 0 {
+                                        rt.stop(pid);
+                                    }
+                                }
                             }
                         }
                         crate::mailbox::Message::System(
@@ -863,17 +955,24 @@ impl PyRuntime {
                             *guard = new_obj;
                         },
                         crate::mailbox::Message::User(bytes) => {
-                            Python::with_gil(|py| {
+                            let success = Python::with_gil(|py| {
                                 let guard = behavior.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
+                                let mut ok = true;
                                 run_py_rescue_blocking(|| {
-                                        if let Err(e) = cb.call1((pybytes,)) {
-                                            eprintln!("[Iris] Python actor exception: {}", e);
-                                            e.print(py);
-                                        }
+                                    ok = crate::py::utils::run_python_callback_py(py, |_py| {
+                                        cb.call1((pybytes,)).map(|_| ())
                                     });
+                                });
+                                ok
                             });
+                            if !success {
+                                let pid = pid_holder.load(std::sync::atomic::Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -881,9 +980,11 @@ impl PyRuntime {
             }
         };
 
-        Ok(self
+        let pid = self
             .inner
-            .spawn_child_handler_with_budget(parent, handler, budget))
+            .spawn_child_handler_with_budget(parent, handler, budget);
+        pid_holder.store(pid, Ordering::SeqCst);
+        Ok(pid)
     }
 
     /// Spawns a pull-based actor.
@@ -907,11 +1008,11 @@ impl PyRuntime {
                     Python::with_gil(|py| {
                         // Just call the function. It is expected to block on mailbox.recv()
                         run_py_rescue_blocking(|| {
-                                if let Err(e) = py_callable.call1(py, (mailbox,)) {
-                                    eprintln!("[Iris] Python mailbox actor exception: {}", e);
-                                    e.print(py);
-                                }
-                            });
+                            if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                                eprintln!("[Iris] Python mailbox actor exception: {}", e);
+                                e.print(py);
+                            }
+                        });
                     });
                 });
 
@@ -946,11 +1047,11 @@ impl PyRuntime {
 
                     Python::with_gil(|py| {
                         run_py_rescue_blocking(|| {
-                                if let Err(e) = py_callable.call1(py, (mailbox,)) {
-                                    eprintln!("[Iris] Python mailbox actor exception: {}", e);
-                                    e.print(py);
-                                }
-                            });
+                            if let Err(e) = py_callable.call1(py, (mailbox,)) {
+                                eprintln!("[Iris] Python mailbox actor exception: {}", e);
+                                e.print(py);
+                            }
+                        });
                     });
                 });
 

@@ -130,10 +130,7 @@ time.sleep(0.2)
         )
         .unwrap();
 
-        let result_any = locals
-            .get_item("log_result")
-            .unwrap()
-            .unwrap();
+        let result_any = locals.get_item("log_result").unwrap().unwrap();
         let result: Vec<u8> = result_any.extract().unwrap();
 
         assert_eq!(result, b"log_this_data");

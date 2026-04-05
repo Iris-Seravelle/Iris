@@ -7,8 +7,7 @@ static LOGGER_INIT: Once = Once::new();
 /// Initialize the Iris tracing subscriber once for the entire crate.
 pub fn init_logger() {
     LOGGER_INIT.call_once(|| {
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(filter)

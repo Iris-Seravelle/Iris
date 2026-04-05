@@ -1,23 +1,24 @@
 #![allow(non_local_definitions)]
 
 use crate::vortex::vortex_bytecode::{
-    decode_wordcode, encode_wordcode, instrument_with_probe, opcode_meta, probe_instructions,
-    quickening_support, evaluate_rewrite_compatibility, validate_probe_compatibility,
-    verify_cache_layout, read_exception_entries, verify_exception_table_invariants,
-    verify_exception_handler_targets, verify_stacksize_minimum,
+    decode_wordcode, encode_wordcode, evaluate_rewrite_compatibility, instrument_with_probe,
+    opcode_meta, probe_instructions, quickening_support, read_exception_entries,
+    validate_probe_compatibility, verify_cache_layout, verify_exception_handler_targets,
+    verify_exception_table_invariants, verify_stacksize_minimum,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyDict};
 use std::collections::HashSet;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 pyo3::create_exception!(iris, VortexSuspend, pyo3::exceptions::PyException);
 
 static BUDGET: AtomicUsize = AtomicUsize::new(0);
 static ISOLATION_MODE: AtomicBool = AtomicBool::new(false);
-static ISOLATION_DISALLOWED_OPS: Lazy<Mutex<HashSet<u8>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static ISOLATION_DISALLOWED_OPS: Lazy<Mutex<HashSet<u8>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 const MAX_PATCHED_CODE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -41,7 +42,8 @@ impl Default for GuardTelemetry {
     }
 }
 
-static GUARD_TELEMETRY: Lazy<Mutex<GuardTelemetry>> = Lazy::new(|| Mutex::new(GuardTelemetry::default()));
+static GUARD_TELEMETRY: Lazy<Mutex<GuardTelemetry>> =
+    Lazy::new(|| Mutex::new(GuardTelemetry::default()));
 
 fn set_guard_telemetry(mode: &str, reason: &str, py_minor: i32, attempted: bool, applied: bool) {
     if let Ok(mut g) = GUARD_TELEMETRY.lock() {
@@ -71,7 +73,9 @@ fn test_hook_enabled(py: Python, key: &str) -> bool {
 pub fn get_guard_status(py: Python) -> PyResult<PyObject> {
     let g = GUARD_TELEMETRY
         .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("vortex/guard-status: lock poisoned"))?
+        .map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/guard-status: lock poisoned")
+        })?
         .clone();
 
     let d = PyDict::new(py);
@@ -140,14 +144,16 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let original_stack_size: usize = code
         .getattr("co_stacksize")
         .and_then(|v| v.extract())
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_stacksize: {e}")))?;
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/co_stacksize: {e}"))
+        })?;
 
     let globals_any = py_func
         .getattr("__globals__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals: {e}")))?;
-    let globals = globals_any
-        .downcast::<PyDict>()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}")))?;
+    let globals = globals_any.downcast::<PyDict>().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}"))
+    })?;
     let local_mod = match py
         .import("sys")
         .and_then(|s| s.getattr("modules"))
@@ -156,21 +162,31 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         Ok(m) => m,
         Err(_) => match globals.get_item("iris") {
             Ok(m) => m,
-            Err(_) => return Err(pyo3::exceptions::PyRuntimeError::new_err("vortex/module-lookup: iris missing")),
+            Err(_) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "vortex/module-lookup: iris missing",
+                ))
+            }
         },
     };
     let check_fn = local_mod
         .getattr("_vortex_check")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/check-fn: {e}")))?;
-    globals
-        .set_item("_vortex_check", check_fn)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-inject: {e}")))?;
+    globals.set_item("_vortex_check", check_fn).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-inject: {e}"))
+    })?;
 
     // Primary RFC path: bytecode-level shadow clone with capability checks.
     let meta = match opcode_meta(py) {
         Ok(m) => m,
         Err(_) => {
-            set_guard_telemetry("fallback", "opcode_metadata_unavailable", py_minor, false, false);
+            set_guard_telemetry(
+                "fallback",
+                "opcode_metadata_unavailable",
+                py_minor,
+                false,
+                false,
+            );
             return fallback_shadow(py, py_func, "opcode metadata unavailable");
         }
     };
@@ -178,7 +194,13 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let quickening = match quickening_support(py) {
         Ok(q) => q,
         Err(_) => {
-            set_guard_telemetry("fallback", "quickening_metadata_unavailable", py_minor, false, false);
+            set_guard_telemetry(
+                "fallback",
+                "quickening_metadata_unavailable",
+                py_minor,
+                false,
+                false,
+            );
             return fallback_shadow(py, py_func, "quickening metadata unavailable");
         }
     };
@@ -189,25 +211,51 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     }
 
     if verify_stacksize_minimum(original_stack_size).is_err() {
-        set_guard_telemetry("fallback", "stack_depth_invariant_failed", py_minor, false, false);
+        set_guard_telemetry(
+            "fallback",
+            "stack_depth_invariant_failed",
+            py_minor,
+            false,
+            false,
+        );
         return fallback_shadow(py, py_func, "stack depth invariant failed");
     }
 
     let original_entries = match read_exception_entries(py, code) {
         Ok(entries) => entries,
         Err(_) => {
-            set_guard_telemetry("fallback", "exception_table_metadata_unavailable", py_minor, false, false);
+            set_guard_telemetry(
+                "fallback",
+                "exception_table_metadata_unavailable",
+                py_minor,
+                false,
+                false,
+            );
             return fallback_shadow(py, py_func, "exception table metadata unavailable");
         }
     };
-    if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size).is_err() {
-        set_guard_telemetry("fallback", "exception_table_invalid", py_minor, false, false);
+    if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size)
+        .is_err()
+    {
+        set_guard_telemetry(
+            "fallback",
+            "exception_table_invalid",
+            py_minor,
+            false,
+            false,
+        );
         return fallback_shadow(py, py_func, "exception table invalid");
     }
 
     let original = decode_wordcode(raw, meta.extended_arg);
     if verify_exception_handler_targets(&original_entries, &original, &quickening).is_err() {
-        set_guard_telemetry("fallback", "exception_table_invalid", py_minor, false, false);
+        set_guard_telemetry(
+            "fallback",
+            "exception_table_invalid",
+            py_minor,
+            false,
+            false,
+        );
         return fallback_shadow(py, py_func, "exception table invalid");
     }
 
@@ -215,7 +263,13 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let force_patched_exception_invalid =
         test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID");
     if force_patched_exception_invalid {
-        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "patched_exception_table_invalid",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_CODE_REPLACE_FAILED") {
@@ -223,22 +277,52 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         return fallback_shadow(py, py_func, "code replace failed");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_TYPES_MODULE_UNAVAILABLE") {
-        set_guard_telemetry("fallback", "types_module_unavailable", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "types_module_unavailable",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "types module unavailable");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_SHADOW_CONSTRUCTION_FAILED") {
-        set_guard_telemetry("fallback", "shadow_function_construction_failed", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "shadow_function_construction_failed",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "shadow function construction failed");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PROBE_INSTRUMENTATION_FAILED") {
-        set_guard_telemetry("fallback", "probe_instrumentation_failed", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "probe_instrumentation_failed",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "probe instrumentation failed");
     }
-    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_STACK_METADATA_UNAVAILABLE") {
-        set_guard_telemetry("fallback", "patched_stack_metadata_unavailable", py_minor, true, false);
+    if test_hook_enabled(
+        py,
+        "IRIS_VORTEX_TEST_FORCE_PATCHED_STACK_METADATA_UNAVAILABLE",
+    ) {
+        set_guard_telemetry(
+            "fallback",
+            "patched_stack_metadata_unavailable",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "patched stack metadata unavailable");
     }
-    if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_METADATA_UNAVAILABLE") {
+    if test_hook_enabled(
+        py,
+        "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_METADATA_UNAVAILABLE",
+    ) {
         set_guard_telemetry(
             "fallback",
             "patched_exception_table_metadata_unavailable",
@@ -265,28 +349,56 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     let patched = match instrument_with_probe(&original, &probe, &meta) {
         Ok(v) => v,
         Err(_) => {
-            set_guard_telemetry("fallback", "probe_instrumentation_failed", py_minor, true, false);
+            set_guard_telemetry(
+                "fallback",
+                "probe_instrumentation_failed",
+                py_minor,
+                true,
+                false,
+            );
             return fallback_shadow(py, py_func, "probe instrumentation failed");
         }
     };
 
     if verify_cache_layout(&patched, &quickening).is_err() {
-        set_guard_telemetry("fallback", "patched_cache_layout_invalid", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "patched_cache_layout_invalid",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "patched cache layout invalid");
     }
 
     let final_patched = if ISOLATION_MODE.load(Ordering::Relaxed) {
         let disallowed_ops = ISOLATION_DISALLOWED_OPS.lock().unwrap();
-        match crate::vortex::vortex_bytecode::apply_isolation_transform(&patched, py, Some(&*disallowed_ops)) {
+        match crate::vortex::vortex_bytecode::apply_isolation_transform(
+            &patched,
+            py,
+            Some(&*disallowed_ops),
+        ) {
             Ok(isolated) => {
                 if verify_cache_layout(&isolated, &quickening).is_err() {
-                    set_guard_telemetry("fallback", "isolation_cache_layout_invalid", py_minor, true, false);
+                    set_guard_telemetry(
+                        "fallback",
+                        "isolation_cache_layout_invalid",
+                        py_minor,
+                        true,
+                        false,
+                    );
                     return fallback_shadow(py, py_func, "isolation cache layout invalid");
                 }
                 isolated
             }
             Err(_) => {
-                set_guard_telemetry("fallback", "isolation_transform_failed", py_minor, true, false);
+                set_guard_telemetry(
+                    "fallback",
+                    "isolation_transform_failed",
+                    py_minor,
+                    true,
+                    false,
+                );
                 return fallback_shadow(py, py_func, "isolation transform failed");
             }
         }
@@ -309,35 +421,66 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         }
     };
 
-    let patched_stack_size: usize = match new_code.getattr("co_stacksize").and_then(|v| v.extract()) {
+    let patched_stack_size: usize = match new_code.getattr("co_stacksize").and_then(|v| v.extract())
+    {
         Ok(v) => v,
         Err(_) => {
-            set_guard_telemetry("fallback", "patched_stack_metadata_unavailable", py_minor, true, false);
+            set_guard_telemetry(
+                "fallback",
+                "patched_stack_metadata_unavailable",
+                py_minor,
+                true,
+                false,
+            );
             return fallback_shadow(py, py_func, "patched stack metadata unavailable");
         }
     };
     let patched_entries = match read_exception_entries(py, new_code) {
         Ok(v) => v,
         Err(_) => {
-            set_guard_telemetry("fallback", "patched_exception_table_metadata_unavailable", py_minor, true, false);
+            set_guard_telemetry(
+                "fallback",
+                "patched_exception_table_metadata_unavailable",
+                py_minor,
+                true,
+                false,
+            );
             return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
         }
     };
     if verify_exception_table_invariants(&patched_entries, final_raw.len() / 2, patched_stack_size)
         .is_err()
     {
-        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "patched_exception_table_invalid",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
     if verify_exception_handler_targets(&patched_entries, &final_patched, &quickening).is_err() {
-        set_guard_telemetry("fallback", "patched_exception_table_invalid", py_minor, true, false);
+        set_guard_telemetry(
+            "fallback",
+            "patched_exception_table_invalid",
+            py_minor,
+            true,
+            false,
+        );
         return fallback_shadow(py, py_func, "patched exception table invalid");
     }
 
     let types_mod = match py.import("types") {
         Ok(v) => v,
         Err(_) => {
-            set_guard_telemetry("fallback", "types_module_unavailable", py_minor, true, false);
+            set_guard_telemetry(
+                "fallback",
+                "types_module_unavailable",
+                py_minor,
+                true,
+                false,
+            );
             return fallback_shadow(py, py_func, "types module unavailable");
         }
     };
@@ -347,11 +490,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         locals2.set_item("base_globals", globals)?;
         // Isolation uses a detached globals dict so STORE_GLOBAL/STORE_NAME mutate only
         // this shadow environment, never the original module globals.
-        py.run(
-            "isolated_globals = dict(base_globals)",
-            None,
-            Some(locals2),
-        )?;
+        py.run("isolated_globals = dict(base_globals)", None, Some(locals2))?;
         locals2
             .get_item("isolated_globals")
             .unwrap()
@@ -371,7 +510,13 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     }) {
         Ok(v) => v,
         Err(_) => {
-            set_guard_telemetry("fallback", "shadow_function_construction_failed", py_minor, true, false);
+            set_guard_telemetry(
+                "fallback",
+                "shadow_function_construction_failed",
+                py_minor,
+                true,
+                false,
+            );
             return fallback_shadow(py, py_func, "shadow function construction failed");
         }
     };
@@ -387,9 +532,9 @@ fn fallback_shadow(py: Python, py_func: &PyAny, _reason: &str) -> PyResult<PyObj
     let globals_any = py_func
         .getattr("__globals__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals: {e}")))?;
-    let globals = globals_any
-        .downcast::<PyDict>()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}")))?;
+    let globals = globals_any.downcast::<PyDict>().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/globals-cast: {e}"))
+    })?;
 
     let locals = PyDict::new(py);
     locals.set_item("fn", py_func)?;
@@ -439,10 +584,12 @@ shadow = _iris_make_shadow(fn, isolation_mode)
         Some(globals),
         Some(locals),
     )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/shadow-fallback: {e}")))?;
-    let shadow = locals
-        .get_item("shadow")
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow"))?;
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/shadow-fallback: {e}"))
+    })?;
+    let shadow = locals.get_item("shadow").ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
+    })?;
 
     Ok(shadow.into())
 }

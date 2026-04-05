@@ -3,7 +3,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::time::Duration;
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_mailbox_actor_basic_recv() {
     Python::with_gil(|py| {
@@ -155,14 +154,10 @@ time.sleep(0.5)
         )
         .unwrap();
 
-        let result = locals
-            .get_item("result")
-            .unwrap()
-            .unwrap();
+        let result = locals.get_item("result").unwrap().unwrap();
         assert!(result.is_none());
     });
 }
-
 
 #[tokio::test]
 async fn test_exit_reason_on_panic() {
@@ -231,7 +226,6 @@ async fn test_exit_reason_on_panic() {
 }
 
 // tests/pyo3_release_gil.rs
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_spawn_py_handler_release_gil_toggle() {
@@ -324,7 +318,6 @@ def handler_release(msg):
 
 // tests/pyo3_selective_recv.rs
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_selective_recv_observed_py() {
     Python::with_gil(|py| {
@@ -392,7 +385,12 @@ result = loop.run_until_complete(run_selective(rt, pid))
         .unwrap();
 
         // Verify result equals b"target"
-        let result: Vec<u8> = locals.get_item("result").unwrap().unwrap().extract().unwrap();
+        let result: Vec<u8> = locals
+            .get_item("result")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         assert_eq!(result, b"target".to_vec());
 
         // Verify remaining messages are m1 and m3 in order
@@ -512,10 +510,7 @@ result = loop.run_until_complete(run_with_timeout(rt, pid))
         )
         .unwrap();
 
-        let result = locals
-            .get_item("result")
-            .unwrap()
-            .unwrap();
+        let result = locals.get_item("result").unwrap().unwrap();
         assert!(result.is_none(), "Expected None result after timeout");
     });
 }
@@ -569,7 +564,12 @@ result = loop.run_until_complete(run_with_timeout(rt, pid))
         )
         .unwrap();
 
-        let result: Vec<u8> = locals.get_item("result").unwrap().unwrap().extract().unwrap();
+        let result: Vec<u8> = locals
+            .get_item("result")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         assert_eq!(result, b"exists".to_vec());
     });
 }

@@ -63,8 +63,7 @@ impl VortexTransmuter {
 
         for (idx, instr) in code.iter().enumerate() {
             match instr {
-                VortexInstruction::JumpBackward(dest)
-                | VortexInstruction::PopJumpIfFalse(dest)
+                VortexInstruction::JumpBackward(dest) | VortexInstruction::PopJumpIfFalse(dest)
                     if *dest < code.len() && Self::is_backward_branch(idx, *dest) =>
                 {
                     check_sites.insert(*dest);

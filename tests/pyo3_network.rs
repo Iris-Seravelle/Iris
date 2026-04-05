@@ -128,7 +128,10 @@ def auth_handler(msg, results=results):
             .extract()
             .unwrap();
 
-        assert!(resolved_pid.is_some(), "Node B failed to resolve Node A's service name");
+        assert!(
+            resolved_pid.is_some(),
+            "Node B failed to resolve Node A's service name"
+        );
         let proxy = resolved_pid.unwrap();
 
         let payload = PyBytes::new(py, b"login_request");
@@ -217,6 +220,9 @@ async fn test_remote_monitoring_is_node_level_not_pid_level() {
             .unwrap()
             .extract(py)
             .unwrap();
-        assert!(alive, "proxy should remain alive while remote node is reachable");
+        assert!(
+            alive,
+            "proxy should remain alive while remote node is reachable"
+        );
     });
 }

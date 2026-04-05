@@ -300,7 +300,11 @@ pub fn verify_cache_layout(
             continue;
         }
 
-        let expected_caches = quickening.inline_cache_entries.get(op).copied().unwrap_or(0) as usize;
+        let expected_caches = quickening
+            .inline_cache_entries
+            .get(op)
+            .copied()
+            .unwrap_or(0) as usize;
         for j in 0..expected_caches {
             let next = i + 1 + j;
             if next >= code.len() || code[next].op != cache_opcode {
@@ -353,7 +357,10 @@ pub fn validate_probe_compatibility(
     Ok(())
 }
 
-pub fn read_exception_entries(py: Python, code: &PyAny) -> PyResult<Vec<(usize, usize, usize, usize)>> {
+pub fn read_exception_entries(
+    py: Python,
+    code: &PyAny,
+) -> PyResult<Vec<(usize, usize, usize, usize)>> {
     let locals = PyDict::new(py);
     locals.set_item("code_obj", code)?;
     py.run(
@@ -377,7 +384,9 @@ __iris_exc_entries = [
 
     let entries = locals
         .get_item("__iris_exc_entries")
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: missing result"))?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: missing result")
+        })?
         .downcast::<PyList>()?;
     entries.extract()
 }
@@ -494,7 +503,10 @@ __iris_probe_bytes = list(__iris_probe.__code__.co_code[start:end+2])
         Some(locals),
     )?;
 
-    let bytes = locals.get_item("__iris_probe_bytes").unwrap().downcast::<PyList>()?;
+    let bytes = locals
+        .get_item("__iris_probe_bytes")
+        .unwrap()
+        .downcast::<PyList>()?;
     let raw: Vec<u8> = bytes.extract()?;
     Ok(decode_wordcode(&raw, extended_arg))
 }
@@ -543,14 +555,21 @@ mod tests {
         ];
         let probe = vec![Instruction { op: 9, arg: 0 }];
 
-        let patched = instrument_with_probe(&original, &probe, &meta).expect("instrumentation should be valid");
+        let patched = instrument_with_probe(&original, &probe, &meta)
+            .expect("instrumentation should be valid");
         assert!(patched.len() > original.len());
     }
 
     #[test]
     fn verify_wordcode_bytes_rejects_invalid_shape() {
-        assert_eq!(verify_wordcode_bytes(&[]), Err(VerifyError::InvalidWordcodeShape));
-        assert_eq!(verify_wordcode_bytes(&[1]), Err(VerifyError::InvalidWordcodeShape));
+        assert_eq!(
+            verify_wordcode_bytes(&[]),
+            Err(VerifyError::InvalidWordcodeShape)
+        );
+        assert_eq!(
+            verify_wordcode_bytes(&[1]),
+            Err(VerifyError::InvalidWordcodeShape)
+        );
     }
 
     #[test]
@@ -563,7 +582,10 @@ mod tests {
         };
 
         let code = vec![Instruction { op: 113, arg: 99 }];
-        assert_eq!(verify_instructions(&code, &meta), Err(VerifyError::InvalidJumpTarget));
+        assert_eq!(
+            verify_instructions(&code, &meta),
+            Err(VerifyError::InvalidJumpTarget)
+        );
     }
 
     #[test]
@@ -576,7 +598,10 @@ mod tests {
         };
 
         let code = vec![Instruction { op: 200, arg: 2 }];
-        assert_eq!(verify_instructions(&code, &meta), Err(VerifyError::InvalidRelativeJump));
+        assert_eq!(
+            verify_instructions(&code, &meta),
+            Err(VerifyError::InvalidRelativeJump)
+        );
     }
 
     #[test]
@@ -590,8 +615,14 @@ mod tests {
             },
         };
 
-        let code = vec![Instruction { op: 10, arg: 0 }, Instruction { op: 0, arg: 0 }];
-        assert_eq!(verify_cache_layout(&code, &quick), Err(VerifyError::InvalidCacheLayout));
+        let code = vec![
+            Instruction { op: 10, arg: 0 },
+            Instruction { op: 0, arg: 0 },
+        ];
+        assert_eq!(
+            verify_cache_layout(&code, &quick),
+            Err(VerifyError::InvalidCacheLayout)
+        );
     }
 
     #[test]
@@ -678,7 +709,10 @@ mod tests {
             cache_opcode: None,
             inline_cache_entries: vec![],
         };
-        assert_eq!(validate_probe_compatibility(&[], &quick), Err("empty_probe"));
+        assert_eq!(
+            validate_probe_compatibility(&[], &quick),
+            Err("empty_probe")
+        );
     }
 
     #[test]
@@ -701,7 +735,10 @@ mod tests {
 
     #[test]
     fn verify_exception_table_invariants_rejects_unsorted_ranges() {
-        let entries = vec![(2usize, 3usize, 0usize, 0usize), (0usize, 1usize, 0usize, 0usize)];
+        let entries = vec![
+            (2usize, 3usize, 0usize, 0usize),
+            (0usize, 1usize, 0usize, 0usize),
+        ];
         assert_eq!(
             verify_exception_table_invariants(&entries, 4, 8),
             Err(VerifyError::InvalidExceptionTable)
@@ -710,7 +747,10 @@ mod tests {
 
     #[test]
     fn verify_exception_table_invariants_rejects_duplicate_entries() {
-        let entries = vec![(0usize, 1usize, 0usize, 2usize), (0usize, 1usize, 0usize, 2usize)];
+        let entries = vec![
+            (0usize, 1usize, 0usize, 2usize),
+            (0usize, 1usize, 0usize, 2usize),
+        ];
         assert_eq!(
             verify_exception_table_invariants(&entries, 4, 8),
             Err(VerifyError::InvalidExceptionTable)
@@ -719,7 +759,10 @@ mod tests {
 
     #[test]
     fn verify_exception_table_invariants_accepts_sorted_unique_entries() {
-        let entries = vec![(0usize, 1usize, 0usize, 2usize), (1usize, 3usize, 1usize, 3usize)];
+        let entries = vec![
+            (0usize, 1usize, 0usize, 2usize),
+            (1usize, 3usize, 1usize, 3usize),
+        ];
         assert_eq!(verify_exception_table_invariants(&entries, 4, 8), Ok(()));
     }
 
@@ -738,7 +781,10 @@ mod tests {
             cache_opcode: Some(0),
             inline_cache_entries: vec![0u16; 256],
         };
-        let code = vec![Instruction { op: 10, arg: 0 }, Instruction { op: 0, arg: 0 }];
+        let code = vec![
+            Instruction { op: 10, arg: 0 },
+            Instruction { op: 0, arg: 0 },
+        ];
         let entries = vec![(0usize, 1usize, 0usize, 1usize)];
 
         assert_eq!(
@@ -760,12 +806,18 @@ mod tests {
         ];
         let entries = vec![(0usize, 1usize, 0usize, 2usize)];
 
-        assert_eq!(verify_exception_handler_targets(&entries, &code, &quick), Ok(()));
+        assert_eq!(
+            verify_exception_handler_targets(&entries, &code, &quick),
+            Ok(())
+        );
     }
 
     #[test]
     fn verify_stacksize_minimum_rejects_tiny_stack() {
-        assert_eq!(verify_stacksize_minimum(1), Err(VerifyError::StackDepthInvariant));
+        assert_eq!(
+            verify_stacksize_minimum(1),
+            Err(VerifyError::StackDepthInvariant)
+        );
         assert_eq!(verify_stacksize_minimum(2), Ok(()));
     }
 }

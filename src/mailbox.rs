@@ -608,10 +608,14 @@ mod tests {
 
         for i in 0..5 {
             let data = vec![b'a' + (i as u8)];
-            assert!(tx.send(Message::User(Bytes::copy_from_slice(&data))).is_ok());
+            assert!(tx
+                .send(Message::User(Bytes::copy_from_slice(&data)))
+                .is_ok());
         }
 
-        assert!(tx.send(Message::User(Bytes::from_static(b"overflow"))).is_err());
+        assert!(tx
+            .send(Message::User(Bytes::from_static(b"overflow")))
+            .is_err());
     }
 
     #[tokio::test]
@@ -620,7 +624,8 @@ mod tests {
 
         for i in 0..9 {
             let payload = vec![b'a' + (i as u8)];
-            tx.send(Message::User(Bytes::copy_from_slice(&payload))).unwrap();
+            tx.send(Message::User(Bytes::copy_from_slice(&payload)))
+                .unwrap();
         }
 
         // 9/10 keeps us in critical from normal.

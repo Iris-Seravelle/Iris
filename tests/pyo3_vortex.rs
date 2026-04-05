@@ -28,7 +28,10 @@ def endless():
             .unwrap()
             .to_object(py);
 
-        m.getattr(py, "set_budget").unwrap().call1(py, (5,)).unwrap();
+        m.getattr(py, "set_budget")
+            .unwrap()
+            .call1(py, (5,))
+            .unwrap();
 
         // Shadow clone transmutation should not mutate the original function object.
         let shadow = m
@@ -59,7 +62,10 @@ def endless():
             .getattr("co_code")
             .unwrap()
             .to_object(py);
-        assert!(original_code.as_ref(py).eq(current_original_code.as_ref(py)).unwrap());
+        assert!(original_code
+            .as_ref(py)
+            .eq(current_original_code.as_ref(py))
+            .unwrap());
 
         // Run transmuted shadow function. It should suspend by budget.
         let res = shadow.call0(py);
@@ -92,10 +98,16 @@ def sample():
         // Ensure dis is present in sys.modules before monkeypatching it.
         py.import("dis").unwrap();
         let sys = py.import("sys").unwrap();
-        let modules = sys.getattr("modules").unwrap().downcast::<PyDict>().unwrap();
+        let modules = sys
+            .getattr("modules")
+            .unwrap()
+            .downcast::<PyDict>()
+            .unwrap();
         let original_dis = modules.get_item("dis").unwrap().to_object(py);
 
-        modules.set_item("dis", py.eval("object()", None, None).unwrap()).unwrap();
+        modules
+            .set_item("dis", py.eval("object()", None, None).unwrap())
+            .unwrap();
 
         let shadow = m
             .getattr(py, "transmute_function")
@@ -159,8 +171,11 @@ def sample2():
         };
 
         // Force quickening metadata extraction to fail.
-        dis.setattr("_inline_cache_entries", py.eval("object()", None, None).unwrap())
-            .unwrap();
+        dis.setattr(
+            "_inline_cache_entries",
+            py.eval("object()", None, None).unwrap(),
+        )
+        .unwrap();
 
         let shadow_res = m
             .getattr(py, "transmute_function")
@@ -588,7 +603,10 @@ def sample_patched_exc():
         let os = py.import("os").unwrap();
         let environ = os.getattr("environ").unwrap();
         environ
-            .set_item("IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID", "1")
+            .set_item(
+                "IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_INVALID",
+                "1",
+            )
             .unwrap();
 
         let shadow_res = m
@@ -684,7 +702,8 @@ dis.get_instructions = _iris_fail_get_instructions
             .unwrap()
             .call1(py, (sample,));
 
-        dis.setattr("get_instructions", original_get_instructions).unwrap();
+        dis.setattr("get_instructions", original_get_instructions)
+            .unwrap();
         if had_inline {
             dis.setattr("_inline_cache_entries", original_inline.unwrap())
                 .unwrap();
@@ -836,7 +855,10 @@ def sample_patched_stack_metadata_unavailable():
         let os = py.import("os").unwrap();
         let environ = os.getattr("environ").unwrap();
         environ
-            .set_item("IRIS_VORTEX_TEST_FORCE_PATCHED_STACK_METADATA_UNAVAILABLE", "1")
+            .set_item(
+                "IRIS_VORTEX_TEST_FORCE_PATCHED_STACK_METADATA_UNAVAILABLE",
+                "1",
+            )
             .unwrap();
 
         let shadow_res = m
@@ -927,7 +949,8 @@ def sample_patched_exception_table_metadata_unavailable():
             .unwrap()
             .call1(py, (sample,));
 
-        let _ = environ.del_item("IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_METADATA_UNAVAILABLE");
+        let _ =
+            environ.del_item("IRIS_VORTEX_TEST_FORCE_PATCHED_EXCEPTION_TABLE_METADATA_UNAVAILABLE");
         if had_inline {
             dis.setattr("_inline_cache_entries", original_inline.unwrap())
                 .unwrap();
@@ -1206,7 +1229,10 @@ async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1265,10 +1291,9 @@ async fn test_pyruntime_vortex_auto_policy_and_telemetry() {
 
     Python::with_gil(|py| {
         for _ in 0..1400u32 {
-            let _ = rt_py.as_ref(py).call_method1(
-                "send",
-                (pid, pyo3::types::PyBytes::new(py, b"tick")),
-            );
+            let _ = rt_py
+                .as_ref(py)
+                .call_method1("send", (pid, pyo3::types::PyBytes::new(py, b"tick")));
         }
     });
 
@@ -1340,7 +1365,10 @@ async fn test_pyruntime_vortex_auto_policy_rejects_invalid_value() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1361,7 +1389,10 @@ async fn test_pyruntime_vortex_genetic_budgeting_toggle() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1415,7 +1446,10 @@ async fn test_pyruntime_vortex_genetic_threshold_roundtrip() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1461,7 +1495,10 @@ async fn test_pyruntime_vortex_watchdog_toggle() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1516,7 +1553,10 @@ async fn test_pyruntime_vortex_isolation_disallow_ops() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1527,7 +1567,10 @@ async fn test_pyruntime_vortex_isolation_disallow_ops() {
 
         rt_py
             .as_ref(py)
-            .call_method1("vortex_set_isolation_disallowed_ops", (vec![store_global, store_attr],))
+            .call_method1(
+                "vortex_set_isolation_disallowed_ops",
+                (vec![store_global, store_attr],),
+            )
             .unwrap();
 
         let ops: Option<Vec<u8>> = rt_py
@@ -1559,7 +1602,10 @@ async fn test_pyruntime_vortex_isolation_mode_store_blocking() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
@@ -1619,13 +1665,23 @@ async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
             .as_ref(py)
             .getattr("PyRuntime")
             .expect("no PyRuntime type");
-        runtime_type.call0().expect("construct PyRuntime").into_py(py)
+        runtime_type
+            .call0()
+            .expect("construct PyRuntime")
+            .into_py(py)
     });
 
     Python::with_gil(|py| {
         let id: u64 = rt_py
             .as_ref(py)
-            .call_method1("spawn_py_handler", (py.eval("lambda _msg: None", None, None).unwrap(), 4usize, false))
+            .call_method1(
+                "spawn_py_handler",
+                (
+                    py.eval("lambda _msg: None", None, None).unwrap(),
+                    4usize,
+                    false,
+                ),
+            )
             .unwrap()
             .extract()
             .unwrap();
@@ -1640,10 +1696,9 @@ async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
 
         /* exercise rendezvous */
         for _ in 0..40 {
-            let _ = rt_py.as_ref(py).call_method1(
-                "send",
-                (id, pyo3::types::PyBytes::new(py, b"x")),
-            );
+            let _ = rt_py
+                .as_ref(py)
+                .call_method1("send", (id, pyo3::types::PyBytes::new(py, b"x")));
         }
 
         // Wait for some processing and possible suspends
@@ -1666,7 +1721,10 @@ async fn test_pyruntime_vortex_genetic_history_pickup_and_reset() {
             .unwrap();
         assert!(all.iter().any(|(pid, _, _)| *pid == id));
 
-        rt_py.as_ref(py).call_method0("vortex_reset_genetic_history").unwrap();
+        rt_py
+            .as_ref(py)
+            .call_method0("vortex_reset_genetic_history")
+            .unwrap();
 
         let reset_all: Vec<(u64, usize, usize)> = rt_py
             .as_ref(py)

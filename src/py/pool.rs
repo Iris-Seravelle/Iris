@@ -3,7 +3,7 @@
 #![allow(non_local_definitions)]
 
 use crossbeam_channel as cb_channel;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -21,6 +21,8 @@ pub(crate) enum PoolTask {
     Execute {
         behavior: Arc<parking_lot::RwLock<PyObject>>,
         bytes: bytes::Bytes,
+        pid_holder: Arc<AtomicU64>,
+        rt: Arc<Runtime>,
     },
     HotSwap {
         behavior: Arc<parking_lot::RwLock<PyObject>>,
@@ -48,19 +50,27 @@ impl GilPool {
                 }
                 match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(task) => match task {
-                        PoolTask::Execute { behavior, bytes } => {
+                        PoolTask::Execute {
+                            behavior,
+                            bytes,
+                            pid_holder,
+                            rt,
+                        } => {
                             if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                                 break;
                             }
-                            Python::with_gil(|py| {
+                            let success = crate::py::utils::run_python_callback(|py| {
                                 let guard = behavior.read();
                                 let cb = guard.as_ref(py);
                                 let pybytes = PyBytes::new(py, &bytes);
-                                if let Err(e) = cb.call1((pybytes,)) {
-                                    eprintln!("[Iris] Python actor exception: {}", e);
-                                    e.print(py);
-                                }
+                                cb.call1((pybytes,)).map(|_| ())
                             });
+                            if !success {
+                                let pid = pid_holder.load(Ordering::SeqCst);
+                                if pid != 0 {
+                                    rt.stop(pid);
+                                }
+                            }
                         }
                         PoolTask::HotSwap { behavior, ptr } => {
                             if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
@@ -133,19 +143,27 @@ pub(crate) fn make_release_gil_channel(
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(task) => match task {
-                PoolTask::Execute { behavior, bytes } => {
+                PoolTask::Execute {
+                    behavior,
+                    bytes,
+                    pid_holder,
+                    rt,
+                } => {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                         continue;
                     }
-                    Python::with_gil(|py| {
+                    let success = crate::py::utils::run_python_callback(|py| {
                         let guard = behavior.read();
                         let cb = guard.as_ref(py);
                         let pybytes = PyBytes::new(py, &bytes);
-                        if let Err(e) = cb.call1((pybytes,)) {
-                            eprintln!("[Iris] Python actor exception: {}", e);
-                            e.print(py);
-                        }
+                        cb.call1((pybytes,)).map(|_| ())
                     });
+                    if !success {
+                        let pid = pid_holder.load(Ordering::SeqCst);
+                        if pid != 0 {
+                            rt.stop(pid);
+                        }
+                    }
                 }
                 PoolTask::HotSwap { behavior, ptr } => {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {

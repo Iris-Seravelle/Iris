@@ -1,7 +1,10 @@
 // src/vortex/watcher.rs
 //! Simple experimental Vortex watchdog.
 
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 pub struct VortexWatcher {

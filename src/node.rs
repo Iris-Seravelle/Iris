@@ -45,12 +45,9 @@ fn message_to_js(env: &Env, msg: Message) -> Result<JsUnknown> {
                 SystemMessage::HotSwap(_) => ("HOT_SWAP", None),
                 SystemMessage::Ping => ("PING", None, None, None),
                 SystemMessage::Pong => ("PONG", None, None, None),
-                SystemMessage::Backpressure(level) => (
-                    "BACKPRESSURE",
-                    None,
-                    Some(level.as_str().to_string()),
-                    None,
-                ),
+                SystemMessage::Backpressure(level) => {
+                    ("BACKPRESSURE", None, Some(level.as_str().to_string()), None)
+                }
             };
 
             let mut obj = env.create_object()?;

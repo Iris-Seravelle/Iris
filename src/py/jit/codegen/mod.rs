@@ -4,33 +4,33 @@
 use std::time::Instant;
 
 // Internal submodules
-mod jit_types;
-mod registry;
-mod quantum;
-mod lowering;
-mod gen_expr;
-mod compiler;
-mod jit_module;
-mod math;
 mod buffer;
+mod compiler;
 mod eval;
 mod exec;
+mod gen_expr;
+mod jit_module;
+mod jit_types;
+mod lowering;
+mod math;
+mod quantum;
+mod registry;
 
 // Re-exports
-pub use jit_types::*;
-pub use registry::*;
-pub use quantum::*;
 pub use compiler::*;
+pub use jit_types::*;
+pub use quantum::*;
+pub use registry::*;
 
-pub(crate) use lowering::*;
 pub(crate) use jit_module::*;
+pub(crate) use lowering::*;
 
 // Internal helper exports for submodules
 pub(crate) use buffer::*;
-pub(crate) use math::*;
 pub(crate) use eval::*;
 pub(crate) use exec::*;
 pub(crate) use gen_expr::gen_expr;
+pub(crate) use math::*;
 
 pub const BREAK_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0b01;
 pub const CONTINUE_SENTINEL_BITS: u64 = 0x7ff8_0000_0000_0c01;
@@ -39,7 +39,7 @@ pub(crate) fn jit_dump_clif_enabled() -> bool {
     match std::env::var("IRIS_JIT_DUMP_CLIF") {
         Ok(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
-                          "1" | "true" | "yes" | "on"
+            "1" | "true" | "yes" | "on"
         ),
         Err(_) => false,
     }
@@ -60,16 +60,16 @@ pub fn execute_registered_jit(
                         (None, 0usize, Vec::new(), false, 0usize)
                     } else {
                         let speculation_threshold_ns =
-                        crate::py::jit::quantum_speculation_threshold_ns();
+                            crate::py::jit::quantum_speculation_threshold_ns();
                         let best_ewma = state
-                        .stats
-                        .iter()
-                        .enumerate()
-                        .filter(|(idx, _)| state.active.get(*idx).copied().unwrap_or(false))
-                        .map(|(_, s)| s)
-                        .filter(|s| s.runs > 0)
-                        .map(|s| s.ewma_ns)
-                        .fold(f64::MAX, |a: f64, b| a.min(b));
+                            .stats
+                            .iter()
+                            .enumerate()
+                            .filter(|(idx, _)| state.active.get(*idx).copied().unwrap_or(false))
+                            .map(|(_, s)| s)
+                            .filter(|s| s.runs > 0)
+                            .map(|s| s.ewma_ns)
+                            .fold(f64::MAX, |a: f64, b| a.min(b));
                         let best_ewma = if best_ewma == f64::MAX {
                             0.0
                         } else {
@@ -102,10 +102,10 @@ pub fn execute_registered_jit(
                                 } else {
                                     (
                                         Some(baseline_entry),
-                                     baseline_idx,
-                                     Vec::new(),
-                                     false,
-                                     active_count,
+                                        baseline_idx,
+                                        Vec::new(),
+                                        false,
+                                        active_count,
                                     )
                                 }
                             } else {
@@ -114,9 +114,9 @@ pub fn execute_registered_jit(
                                     if i != idx
                                         && state.active.get(i).copied().unwrap_or(false)
                                         && e.is_valid()
-                                        {
-                                            fallbacks.push((i, e.clone()));
-                                        }
+                                    {
+                                        fallbacks.push((i, e.clone()));
+                                    }
                                 }
                                 (Some(entry), idx, fallbacks, true, active_count)
                             }
@@ -128,10 +128,10 @@ pub fn execute_registered_jit(
                             } else {
                                 (
                                     Some(baseline_entry),
-                                 baseline_idx,
-                                 Vec::new(),
-                                 false,
-                                 active_count,
+                                    baseline_idx,
+                                    Vec::new(),
+                                    false,
+                                    active_count,
                                 )
                             }
                         }
@@ -274,7 +274,7 @@ mod tests {
         let src = "sum(((math.sin(x) * 0.5 + x * 1.2) / (1.0 + math.exp(-abs(x) * 0.001)) for x in data))";
         let args = vec!["data".to_string()];
         let entry = compile_jit_impl(src, &args, true, JitReturnType::Float)
-        .expect("compile sumover expression");
+            .expect("compile sumover expression");
         match entry.lowered_kernel {
             Some(LoweredKernel::Expr(_)) => {}
             other => panic!("expected lowered expression kernel, got {:?}", other),
@@ -313,7 +313,7 @@ mod tests {
         let src = "sum((x * math.sin(x) if x > 50.0 else x * math.cos(x) for x in data if (x % 2 == 0 or x > 75.0) and (not x < 10.0)))";
         let args = vec!["data".to_string()];
         let entry = compile_jit_impl(src, &args, true, JitReturnType::Float)
-        .expect("compile filtered ternary sumover expression");
+            .expect("compile filtered ternary sumover expression");
         match entry.lowered_kernel {
             Some(LoweredKernel::Expr(_)) => {}
             other => panic!("expected lowered expression kernel, got {:?}", other),

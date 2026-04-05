@@ -1,7 +1,10 @@
 #[cfg(feature = "vortex")]
 use iris::Runtime;
 #[cfg(feature = "vortex")]
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 #[cfg(feature = "vortex")]
 #[tokio::test]
@@ -45,8 +48,11 @@ async fn vortex_operator_dispatch_preempts_actor_loop() {
     assert!(rt.is_alive(pid));
 
     for _ in 0..5 {
-        rt.send(pid, iris::mailbox::Message::User(bytes::Bytes::from_static(b"x")))
-            .unwrap();
+        rt.send(
+            pid,
+            iris::mailbox::Message::User(bytes::Bytes::from_static(b"x")),
+        )
+        .unwrap();
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -65,13 +71,10 @@ async fn vortex_infinite_loop_preempts_without_hang() {
     let mut engine = rt.vortex_engine().expect("vortex engine should exist");
 
     engine.set_budget(1);
-    engine.load_code(vec![
-        iris::vortex::VortexInstruction::JumpBackward(0),
-    ]);
+    engine.load_code(vec![iris::vortex::VortexInstruction::JumpBackward(0)]);
 
     // must not spin forever; should suspend because of injected reduction check.
     assert_eq!(engine.run(), Err(iris::vortex::VortexSuspend));
     engine.replenish_budget(1);
     assert_eq!(engine.run(), Err(iris::vortex::VortexSuspend));
 }
-

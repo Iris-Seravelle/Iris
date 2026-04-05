@@ -51,7 +51,7 @@ thread_local! {
 /// Create/use a thread-local JIT module and invoke `f` with it.
 pub(crate) fn with_jit_module<F, R>(f: F) -> R
 where
-F: FnOnce(&mut JITModule) -> R,
+    F: FnOnce(&mut JITModule) -> R,
 {
     TLS_JIT_MODULE.with(|cell| {
         let mut opt = cell.borrow_mut();

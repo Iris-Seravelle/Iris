@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 
 use crate::vortex::rescue_pool::RescuePool;
-use crate::vortex::transmuter::{VortexExecutionContext, VortexInstruction, VortexSuspend, VortexTransmuter};
 use crate::vortex::transaction::{
     VortexGhostPolicy, VortexGhostResolution, VortexTransaction, VortexVioCall,
+};
+use crate::vortex::transmuter::{
+    VortexExecutionContext, VortexInstruction, VortexSuspend, VortexTransmuter,
 };
 
 #[derive(Debug, Clone)]
@@ -151,11 +153,7 @@ impl VortexEngine {
         self.transaction = Some(VortexTransaction::new(id));
     }
 
-    pub fn start_transaction_with_checkpoint(
-        &mut self,
-        id: u64,
-        locals: HashMap<String, Vec<u8>>,
-    ) {
+    pub fn start_transaction_with_checkpoint(&mut self, id: u64, locals: HashMap<String, Vec<u8>>) {
         let mut trx = VortexTransaction::new(id);
         trx.checkpoint_locals(locals);
         self.transaction = Some(trx);
@@ -178,7 +176,12 @@ impl VortexEngine {
         self.ghost_transactions.insert(id, trx);
     }
 
-    pub fn stage_ghost_transaction_vio(&mut self, ghost_id: u64, op: String, payload: Vec<u8>) -> bool {
+    pub fn stage_ghost_transaction_vio(
+        &mut self,
+        ghost_id: u64,
+        op: String,
+        payload: Vec<u8>,
+    ) -> bool {
         match self.ghost_transactions.get_mut(&ghost_id) {
             Some(trx) => trx.stage_vio(op, payload),
             None => false,
@@ -199,11 +202,7 @@ impl VortexEngine {
         Some(result)
     }
 
-    pub fn replay_committed_vio_calls<F>(
-        &self,
-        calls: &[VortexVioCall],
-        mut executor: F,
-    ) -> usize
+    pub fn replay_committed_vio_calls<F>(&self, calls: &[VortexVioCall], mut executor: F) -> usize
     where
         F: FnMut(&VortexVioCall) -> bool,
     {
@@ -385,7 +384,10 @@ mod tests {
         let mut engine = VortexEngine::new();
         engine.set_budget(1);
 
-        engine.load_code(vec![VortexInstruction::LoadFast(0), VortexInstruction::ReturnValue]);
+        engine.load_code(vec![
+            VortexInstruction::LoadFast(0),
+            VortexInstruction::ReturnValue,
+        ]);
         engine.stage_code_swap(vec![VortexInstruction::ReturnValue]);
 
         // First run suspends.
@@ -444,7 +446,8 @@ mod tests {
         assert_eq!(resolution.committed_vio[0].op, "io_primary");
 
         // Ghost entry is removed after race resolution.
-        let second = engine.resolve_primary_ghost_race(4000, 4000, VortexGhostPolicy::PreferPrimary);
+        let second =
+            engine.resolve_primary_ghost_race(4000, 4000, VortexGhostPolicy::PreferPrimary);
         assert!(second.is_none());
     }
 
@@ -470,4 +473,3 @@ mod tests {
         assert_eq!(applied, 1);
     }
 }
-

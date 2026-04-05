@@ -8,9 +8,9 @@
 
 #![allow(non_local_definitions)]
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
@@ -25,48 +25,29 @@ pub(crate) mod quantum;
 pub(crate) mod simd;
 
 pub(crate) use crate::py::jit::config::{
-    jit_log,
-    jit_logging_enabled,
-    quantum_compile_budget_ns,
-    quantum_compile_window_ns,
-    quantum_cooldown_base_ns,
-    quantum_cooldown_max_ns,
-    quantum_log_threshold_ns,
-    quantum_speculation_enabled,
-    quantum_speculation_threshold_ns,
-    quantum_stability_min_runs,
-    quantum_stability_min_score,
-    set_jit_logging_env_var,
-    set_jit_logging_override,
-    set_quantum_speculation_env_var,
-    set_quantum_speculation_override,
+    jit_log, jit_logging_enabled, quantum_compile_budget_ns, quantum_compile_window_ns,
+    quantum_cooldown_base_ns, quantum_cooldown_max_ns, quantum_log_threshold_ns,
+    quantum_speculation_enabled, quantum_speculation_threshold_ns, quantum_stability_min_runs,
+    quantum_stability_min_score, set_jit_logging_env_var, set_jit_logging_override,
+    set_quantum_speculation_env_var, set_quantum_speculation_override,
 };
 
 #[cfg(test)]
 pub(crate) use crate::py::jit::config::{jit_log_clear_hook, jit_log_hook};
 use crate::py::jit::config::{
-    jit_quantum_compile_budget_env_var,
-    jit_quantum_compile_window_env_var,
-    jit_quantum_cooldown_base_env_var,
-    jit_quantum_cooldown_max_env_var,
-    jit_quantum_log_env_var,
-    jit_quantum_speculation_env_var,
-    now_ns,
-    panic_payload_to_string,
-    parse_return_type,
+    jit_quantum_compile_budget_env_var, jit_quantum_compile_window_env_var,
+    jit_quantum_cooldown_base_env_var, jit_quantum_cooldown_max_env_var, jit_quantum_log_env_var,
+    jit_quantum_speculation_env_var, now_ns, panic_payload_to_string, parse_return_type,
 };
 
 pub(crate) use crate::py::jit::quantum::{
-    maybe_rearm_quantum_compile,
-    quantum_compile_may_run,
-    record_quantum_compile_attempt,
+    maybe_rearm_quantum_compile, quantum_compile_may_run, record_quantum_compile_attempt,
     register_quantum_rearm_plan,
 };
 
 #[cfg(test)]
 pub(crate) use crate::py::jit::quantum::{
-    clear_quantum_rearm_plan_for_test,
-    register_quantum_rearm_plan_for_test,
+    clear_quantum_rearm_plan_for_test, register_quantum_rearm_plan_for_test,
     reset_quantum_control_state,
 };
 
