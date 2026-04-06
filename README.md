@@ -38,8 +38,8 @@ Iris uses a **cooperative reduction-based scheduler** for fairness, providing bu
 - **JIT Acceleration:** Transparently compile Python math functions to native machine code.
     - **Quantum Speculation:** Optional multi-variant JIT selection with runtime telemetry, bounded by compile budget and cooldown controls (see [JIT Internals & Configuration](docs/jit.md)).
 
-    > [!IMPORTANT]
-    > JIT acceleration development is currently paused and may be dropped from the project, while the runtime focuses on actor and cross-language capabilities.
+> [!NOTE]
+> JIT acceleration development is currently paused and may be dropped from the project, while the runtime focuses on actor and cross-language capabilities.
 
 ---
 
