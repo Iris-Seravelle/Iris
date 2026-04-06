@@ -383,7 +383,7 @@ __iris_exc_entries = [
     )?;
 
     let entries = locals
-        .get_item("__iris_exc_entries")
+        .get_item("__iris_exc_entries")?
         .ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: missing result")
         })?
@@ -504,8 +504,10 @@ __iris_probe_bytes = list(__iris_probe.__code__.co_code[start:end+2])
     )?;
 
     let bytes = locals
-        .get_item("__iris_probe_bytes")
-        .unwrap()
+        .get_item("__iris_probe_bytes")?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-bytes: missing result")
+        })?
         .downcast::<PyList>()?;
     let raw: Vec<u8> = bytes.extract()?;
     Ok(decode_wordcode(&raw, extended_arg))
@@ -530,8 +532,10 @@ __iris_probe_bytes = list(__iris_probe.__code__.co_code[start:end+2])
     )?;
 
     let bytes = locals
-        .get_item("__iris_probe_bytes")
-        .unwrap()
+        .get_item("__iris_probe_bytes")?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-bytes: missing result")
+        })?
         .downcast::<PyList>()?;
     bytes.extract()
 }

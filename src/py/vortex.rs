@@ -160,9 +160,9 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         .and_then(|mods| mods.get_item("iris"))
     {
         Ok(m) => m,
-        Err(_) => match globals.get_item("iris") {
-            Ok(m) => m,
-            Err(_) => {
+        Err(_) => match globals.get_item("iris")? {
+            Some(m) => m,
+            None => {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
                     "vortex/module-lookup: iris missing",
                 ))
@@ -492,8 +492,12 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         // this shadow environment, never the original module globals.
         py.run("isolated_globals = dict(base_globals)", None, Some(locals2))?;
         locals2
-            .get_item("isolated_globals")
-            .unwrap()
+            .get_item("isolated_globals")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "vortex/isolated-globals: missing result",
+                )
+            })?
             .downcast::<PyDict>()?
     } else {
         globals
@@ -587,9 +591,11 @@ shadow = _iris_make_shadow(fn, isolation_mode)
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/shadow-fallback: {e}"))
     })?;
-    let shadow = locals.get_item("shadow").ok_or_else(|| {
-        pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
-    })?;
+    let shadow = locals
+        .get_item("shadow")?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
+        })?;
 
     Ok(shadow.into())
 }
