@@ -208,10 +208,10 @@ impl VortexEngine {
     {
         let mut applied = 0usize;
         for call in calls {
+            applied = applied.saturating_add(1);
             if !executor(call) {
                 break;
             }
-            applied += 1;
         }
         applied
     }

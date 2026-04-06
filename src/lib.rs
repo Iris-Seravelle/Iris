@@ -948,6 +948,8 @@ impl Runtime {
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let erased: ErasedMessageHandler =
             Arc::new(move |msg: mailbox::Message| Box::pin(handler(msg)));
@@ -1001,6 +1003,8 @@ impl Runtime {
 
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let handler = spec.handler.clone();
         let budget = spec.budget;
@@ -1191,6 +1195,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
 
@@ -1263,6 +1269,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default policy
@@ -1344,6 +1352,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default overflow policy
@@ -1417,6 +1427,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -1484,6 +1496,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let handler = std::sync::Arc::new(handler);
         let supervisor2 = self.supervisor.clone();
@@ -1530,6 +1544,16 @@ impl Runtime {
                     {
                         if let Err(_) = vortex_engine.preempt_tick() {
                             saw_suspend_in_cycle = true;
+                            let (suspend_count, total_count) = rt_vortex_clone
+                                .vortex_genetic_history(pid)
+                                .unwrap_or((0, 0));
+                            rt_vortex_clone.vortex_genetic_history.insert(
+                                pid,
+                                (
+                                    suspend_count.saturating_add(1),
+                                    total_count.saturating_add(1),
+                                ),
+                            );
                             rt_vortex_clone
                                 .vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
                             vortex_engine.detach_stalled_thread();
@@ -1597,41 +1621,42 @@ impl Runtime {
                         }
                     }
 
+                    #[cfg(feature = "vortex")]
+                    {
+                        let (suspend_count, total_count) = rt_vortex_clone
+                            .vortex_genetic_history(pid)
+                            .unwrap_or((0, 0));
+                        let total_count = total_count.saturating_add(1);
+                        let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
+                        let suspend_rate = if total_count == 0 {
+                            0.0
+                        } else {
+                            (suspend_count as f64) / (total_count as f64)
+                        };
+
+                        rt_vortex_clone
+                            .vortex_genetic_history
+                            .insert(pid, (suspend_count, total_count));
+
+                        if enable_genetic_budgeting {
+                            let (low, high) = rt_vortex_clone
+                                .vortex_genetic_thresholds()
+                                .unwrap_or((0.4, 0.7));
+
+                            dynamic_budget = next_dynamic_budget(
+                                dynamic_budget,
+                                budget,
+                                saw_suspend_in_cycle,
+                                suspend_rate,
+                                low,
+                                high,
+                            );
+                        }
+                    }
+
                     if processed >= dynamic_budget {
                         processed = 0;
                         tokio::task::yield_now().await;
-                        #[cfg(feature = "vortex")]
-                        {
-                            if enable_genetic_budgeting {
-                                let (suspend_count, total_count) = rt_vortex_clone
-                                    .vortex_genetic_history(pid)
-                                    .unwrap_or((0, 0));
-                                let total_count = total_count.saturating_add(1);
-                                let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
-                                let suspend_rate = if total_count == 0 {
-                                    0.0
-                                } else {
-                                    (suspend_count as f64) / (total_count as f64)
-                                };
-
-                                rt_vortex_clone
-                                    .vortex_genetic_history
-                                    .insert(pid, (suspend_count, total_count));
-
-                                let (low, high) = rt_vortex_clone
-                                    .vortex_genetic_thresholds()
-                                    .unwrap_or((0.4, 0.7));
-
-                                dynamic_budget = next_dynamic_budget(
-                                    dynamic_budget,
-                                    budget,
-                                    saw_suspend_in_cycle,
-                                    suspend_rate,
-                                    low,
-                                    high,
-                                );
-                            }
-                        }
                     }
                 }
             });
@@ -1713,6 +1738,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         let vec = Arc::new(Mutex::new(Vec::new()));
@@ -1979,6 +2006,10 @@ impl Runtime {
             let res = sender.send_user_bytes(bytes);
             if res.is_ok() {
                 self.update_backpressure_after_enqueue(pid, sender.value());
+                #[cfg(feature = "vortex")]
+                if let Some(mut counts) = self.vortex_genetic_history.get_mut(&pid) {
+                    counts.1 = counts.1.saturating_add(1);
+                }
             }
             res
         } else {
@@ -2108,6 +2139,8 @@ impl Runtime {
         self.backpressure_state.remove(&pid);
         self.behavior_versions.remove(&pid);
         self.behavior_history.remove(&pid);
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.remove(&pid);
         // remove the pid from its parent's child list (if any)
         if let Some((_, parent)) = self.parent_of.remove(&pid) {
             if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {

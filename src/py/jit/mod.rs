@@ -8,6 +8,7 @@
 
 #![allow(non_local_definitions)]
 
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
@@ -124,11 +125,28 @@ impl OffloadPool {
 
 // shared singleton
 static OFFLOAD_POOL: once_cell::sync::OnceCell<Arc<OffloadPool>> = once_cell::sync::OnceCell::new();
+static OFFLOAD_STRATEGY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, String>>> =
+    once_cell::sync::OnceCell::new();
 
 fn get_offload_pool() -> Arc<OffloadPool> {
     OFFLOAD_POOL
         .get_or_init(|| Arc::new(OffloadPool::new(num_cpus::get())))
         .clone()
+}
+
+fn set_offload_strategy(func_key: usize, strategy: &str) {
+    let map = OFFLOAD_STRATEGY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(func_key, strategy.to_ascii_lowercase());
+    }
+}
+
+fn get_offload_strategy(func_key: usize) -> Option<String> {
+    OFFLOAD_STRATEGY.get().and_then(|map| {
+        map.lock()
+            .ok()
+            .and_then(|guard| guard.get(&func_key).cloned())
+    })
 }
 
 // Python bindings -----------------------------------------------------------
@@ -358,12 +376,13 @@ fn register_offload(
     source_expr: Option<String>,
     arg_names: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
+    let key = func.as_ptr() as usize;
     if let Some(ref s) = strategy {
+        set_offload_strategy(key, s);
         if s == "actor" {
             let _ = get_offload_pool();
         } else if s == "jit" {
             if let (Some(expr), Some(args)) = (source_expr.clone(), arg_names.clone()) {
-                let key = func.as_ptr() as usize;
                 let func_name = Python::with_gil(|py| {
                     func.as_ref(py)
                         .getattr("__name__")
@@ -570,17 +589,20 @@ fn offload_call(
     kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(res) = execute_registered_jit_guarded(py, key, args) {
-        if let Ok(obj) = res {
-            return Ok(obj);
-        }
-        if let Err(err) = &res {
-            jit_log(|| {
-                format!(
-                    "[Iris][jit] guarded execution failed in offload_call; falling back: {}",
-                    err
-                )
-            });
+    let use_jit = !matches!(get_offload_strategy(key).as_deref(), Some("actor"));
+    if use_jit {
+        if let Some(res) = execute_registered_jit_guarded(py, key, args) {
+            if let Ok(obj) = res {
+                return Ok(obj);
+            }
+            if let Err(err) = &res {
+                jit_log(|| {
+                    format!(
+                        "[Iris][jit] guarded execution failed in offload_call; falling back: {}",
+                        err
+                    )
+                });
+            }
         }
     }
 
