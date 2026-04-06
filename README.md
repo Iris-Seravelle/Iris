@@ -6,7 +6,7 @@
 ![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
 
-**Hybrid distributed runtime fabric for actors, native compute offload, and cross-language services.**
+**Hybrid distributed runtime fabric for actors, cross-language services, and experimental native compute offload.**
 
 [Architecture](docs/architecture.md) • [Usage Guide](docs/usage.md) • [JIT & Offload](docs/jit.md) • [Distributed Mesh](docs/distributed.md) • [Vortex-Transmuter](docs/vortex.md)
 
@@ -18,7 +18,7 @@
 
 **Iris** is a hybrid distributed runtime built in Rust with first-class **Python** and **Node.js** bindings. It combines three execution styles:
 - **Actor Mesh:** Stateful, message-driven workflows with high concurrency.
-- **Native Offload/JIT:** CPU-heavy hot paths accelerated via Cranelift.
+- **Native Offload/JIT:** CPU-heavy hot paths accelerated via Cranelift. This path is experimental, currently paused, and may be dropped in future releases.
 - **Cross-Language API:** Service-oriented apps mixing Rust, Python, and Node.js.
 
 Iris uses a **cooperative reduction-based scheduler** for fairness, providing built-in supervision, hot swapping, discovery, and location-transparent messaging across nodes.
@@ -34,9 +34,12 @@ Iris uses a **cooperative reduction-based scheduler** for fairness, providing bu
 - **Atomic Hot-Swap:** Update live application logic (Python/Node) without zero downtime.
 - **Global Discovery:** Register and resolve named services locally or over the network.
 - **Self-Healing:** Path-scoped supervisors and structured `EXIT` reasons for fault tolerance.
+- **Vortex-Transmuter (Experimental):** Instruction-bound preemption, transactional ghosting primitives, and guarded bytecode transmutation with explicit fallback telemetry (see [Vortex-Transmuter Guide](docs/vortex.md)).
 - **JIT Acceleration:** Transparently compile Python math functions to native machine code.
     - **Quantum Speculation:** Optional multi-variant JIT selection with runtime telemetry, bounded by compile budget and cooldown controls (see [JIT Internals & Configuration](docs/jit.md)).
-- **Vortex-Transmuter (Experimental):** Instruction-bound preemption, transactional ghosting primitives, and guarded bytecode transmutation with explicit fallback telemetry (see [Vortex-Transmuter Guide](docs/vortex.md)).
+
+    > [!IMPORTANT]
+    > JIT acceleration development is currently paused and may be dropped from the project, while the runtime focuses on actor and cross-language capabilities.
 
 ---
 
@@ -93,7 +96,7 @@ print(fast_math(10.0))
 ## Disclaimer
 
 > [!IMPORTANT]
-> **Production Status:** Iris is currently in **Beta**. The JIT/offload APIs are experimental.
+> **Production Status:** Iris is currently in **Beta**. 
 >
 > **Performance (v0.3.0):**
 > - **Push Actors:** 100k+ concurrent actors, ~1.2M+ msgs/sec.

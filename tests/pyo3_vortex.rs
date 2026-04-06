@@ -20,7 +20,7 @@ def endless():
 "#;
         py.run(code, Some(globals), None).unwrap();
 
-        let endless_func = globals.get_item("endless").unwrap();
+        let endless_func = globals.get_item("endless").unwrap().unwrap();
         let original_code = endless_func
             .getattr("__code__")
             .unwrap()
@@ -47,9 +47,15 @@ def endless():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -93,7 +99,7 @@ def sample():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample").unwrap();
+        let sample = globals.get_item("sample").unwrap().unwrap();
 
         // Ensure dis is present in sys.modules before monkeypatching it.
         py.import("dis").unwrap();
@@ -103,7 +109,7 @@ def sample():
             .unwrap()
             .downcast::<PyDict>()
             .unwrap();
-        let original_dis = modules.get_item("dis").unwrap().to_object(py);
+        let original_dis = modules.get_item("dis").unwrap().unwrap().to_object(py);
 
         modules
             .set_item("dis", py.eval("object()", None, None).unwrap())
@@ -122,15 +128,27 @@ def sample():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -161,7 +179,7 @@ def sample2():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample2").unwrap();
+        let sample = globals.get_item("sample2").unwrap().unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -198,15 +216,27 @@ def sample2():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -235,7 +265,7 @@ def sample3():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample3").unwrap();
+        let sample = globals.get_item("sample3").unwrap().unwrap();
         let dis = py.import("dis").unwrap();
         let locals = PyDict::new(py);
         locals.set_item("dis", dis).unwrap();
@@ -284,15 +314,27 @@ def sample3():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -321,7 +363,7 @@ def sample_small_stack():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_small_stack").unwrap();
+        let sample = globals.get_item("sample_small_stack").unwrap().unwrap();
         let original_code = sample.getattr("__code__").unwrap().to_object(py);
         let locals = PyDict::new(py);
         locals.set_item("fn", sample).unwrap();
@@ -366,15 +408,27 @@ fn.__code__ = fn.__code__.replace(co_stacksize=1)
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -405,7 +459,7 @@ def sample_exc():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_exc").unwrap();
+        let sample = globals.get_item("sample_exc").unwrap().unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -462,15 +516,27 @@ dis.Bytecode = _IrisBadBytecode
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -501,7 +567,10 @@ def sample_exc_meta_unavailable():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_exc_meta_unavailable").unwrap();
+        let sample = globals
+            .get_item("sample_exc_meta_unavailable")
+            .unwrap()
+            .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -550,15 +619,27 @@ dis.Bytecode = _IrisFailBytecode
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -589,7 +670,7 @@ def sample_patched_exc():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_patched_exc").unwrap();
+        let sample = globals.get_item("sample_patched_exc").unwrap().unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -631,15 +712,27 @@ def sample_patched_exc():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -670,7 +763,7 @@ def sample_probe_fail():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_probe_fail").unwrap();
+        let sample = globals.get_item("sample_probe_fail").unwrap().unwrap();
         let dis = py.import("dis").unwrap();
 
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
@@ -720,15 +813,27 @@ dis.get_instructions = _iris_fail_get_instructions
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -761,6 +866,7 @@ def sample_probe_instrumentation_fail():
 
         let sample = globals
             .get_item("sample_probe_instrumentation_fail")
+            .unwrap()
             .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
@@ -800,15 +906,27 @@ def sample_probe_instrumentation_fail():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -841,6 +959,7 @@ def sample_patched_stack_metadata_unavailable():
 
         let sample = globals
             .get_item("sample_patched_stack_metadata_unavailable")
+            .unwrap()
             .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
@@ -883,15 +1002,27 @@ def sample_patched_stack_metadata_unavailable():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -924,6 +1055,7 @@ def sample_patched_exception_table_metadata_unavailable():
 
         let sample = globals
             .get_item("sample_patched_exception_table_metadata_unavailable")
+            .unwrap()
             .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
@@ -967,15 +1099,27 @@ def sample_patched_exception_table_metadata_unavailable():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -1006,7 +1150,10 @@ def sample_code_replace_fail():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_code_replace_fail").unwrap();
+        let sample = globals
+            .get_item("sample_code_replace_fail")
+            .unwrap()
+            .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -1045,15 +1192,27 @@ def sample_code_replace_fail():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -1084,7 +1243,10 @@ def sample_types_unavailable():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_types_unavailable").unwrap();
+        let sample = globals
+            .get_item("sample_types_unavailable")
+            .unwrap()
+            .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -1123,15 +1285,27 @@ def sample_types_unavailable():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -1162,7 +1336,10 @@ def sample_shadow_construction_fail():
         )
         .unwrap();
 
-        let sample = globals.get_item("sample_shadow_construction_fail").unwrap();
+        let sample = globals
+            .get_item("sample_shadow_construction_fail")
+            .unwrap()
+            .unwrap();
         let dis = py.import("dis").unwrap();
         let had_inline = dis.hasattr("_inline_cache_entries").unwrap();
         let original_inline = if had_inline {
@@ -1201,15 +1378,27 @@ def sample_shadow_construction_fail():
             .call0(py)
             .unwrap();
         let guard_dict = guard.downcast::<PyDict>(py).unwrap();
-        let mode: String = guard_dict.get_item("mode").unwrap().extract().unwrap();
-        let reason: String = guard_dict.get_item("reason").unwrap().extract().unwrap();
+        let mode: String = guard_dict
+            .get_item("mode")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let reason: String = guard_dict
+            .get_item("reason")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
         let rewrite_attempted: bool = guard_dict
             .get_item("rewrite_attempted")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
         let rewrite_applied: bool = guard_dict
             .get_item("rewrite_applied")
+            .unwrap()
             .unwrap()
             .extract()
             .unwrap();
@@ -1628,7 +1817,7 @@ async fn test_pyruntime_vortex_isolation_mode_store_blocking() {
             None,
         )
         .unwrap();
-        let fn_obj = globals.get_item("isolated_write_read").unwrap();
+        let fn_obj = globals.get_item("isolated_write_read").unwrap().unwrap();
 
         let transmuted = module
             .as_ref(py)

@@ -494,9 +494,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         locals2
             .get_item("isolated_globals")?
             .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "vortex/isolated-globals: missing result",
-                )
+                pyo3::exceptions::PyRuntimeError::new_err("vortex/isolated-globals: missing result")
             })?
             .downcast::<PyDict>()?
     } else {
@@ -591,11 +589,9 @@ shadow = _iris_make_shadow(fn, isolation_mode)
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/shadow-fallback: {e}"))
     })?;
-    let shadow = locals
-        .get_item("shadow")?
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
-        })?;
+    let shadow = locals.get_item("shadow")?.ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("vortex/shadow-fallback: missing shadow")
+    })?;
 
     Ok(shadow.into())
 }
