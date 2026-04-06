@@ -86,6 +86,7 @@
 ---
 
 ## ⚫ Safety & Correctness (Functional Runtimes)
+> Delayed for v0.7+
 
 * [ ] **Pure Actor Mode (Optional)**
   Forbid shared mutable state across actors.

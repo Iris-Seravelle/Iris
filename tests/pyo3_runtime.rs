@@ -1,6 +1,110 @@
 #![cfg(feature = "pyo3")]
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_send_after_delivers_message() {
+    // create runtime, spawn actor and schedule timer while holding the GIL
+    let (rt_obj, pid): (PyObject, u64) = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).unwrap();
+        let rt = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .unwrap()
+            .call0()
+            .unwrap();
+
+        // Spawn an observed handler to collect messages
+        let pid: u64 = rt
+            .call_method1("spawn_observed_handler", (10usize,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // Schedule a message after 50ms
+        let _timer_id: u64 = rt
+            .call_method1("send_after", (pid, 50u64, PyBytes::new(py, b"delayed")))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        (rt.into_py(py), pid)
+    });
+
+    // allow the runtime to process (non-blocking)
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // now check messages with GIL again
+    Python::with_gil(|py| {
+        let rt = rt_obj.as_ref(py);
+        let msgs: Vec<pyo3::PyObject> = rt
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert!(msgs.len() >= 1, "expected at least one delivered message");
+    });
+}
+
+#[tokio::test]
+async fn py_zero_copy_send() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    // spawn observed handler
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_observed_handler", (1usize,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    // allocate a Rust-owned buffer and write into it from Python
+    Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let rv = module
+            .as_ref(py)
+            .call_method1("allocate_buffer", (5usize,))
+            .unwrap();
+        let (id, mem, cap): (u64, pyo3::PyObject, pyo3::PyObject) = rv.extract().unwrap();
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("mem", mem.as_ref(py)).unwrap();
+        locals.set_item("cap", cap.as_ref(py)).unwrap();
+        py.run("mem[:5] = b'hello'", None, Some(locals)).unwrap();
+        // send the buffer without copying
+        rt_py
+            .as_ref(py)
+            .call_method1("send_buffer", (pid, id))
+            .unwrap();
+    });
+
+    // allow the tokio tasks to run
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let msgs: Vec<Vec<u8>> = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(&msgs[0], b"hello");
+}
 
 #[tokio::test]
 async fn py_runtime_spawn_and_send() {
@@ -71,7 +175,7 @@ async fn py_runtime_spawn_and_send() {
             Some(locals),
         )
         .unwrap();
-        let make_cb = locals.get_item("make_cb").unwrap();
+        let make_cb = locals.get_item("make_cb").unwrap().unwrap();
         let cb: pyo3::PyObject = make_cb.call1((lst_obj.as_ref(py),)).unwrap().into();
 
         // spawn a Python handler and send a message
@@ -126,7 +230,7 @@ async fn py_runtime_spawn_and_send() {
             Some(locals),
         )
         .unwrap();
-        let factory: pyo3::PyObject = locals.get_item("factory").unwrap().into();
+        let factory: pyo3::PyObject = locals.get_item("factory").unwrap().unwrap().into();
 
         rt_obj
             .call_method1("supervise_with_factory", (pid, factory, "RestartOne"))
@@ -175,7 +279,7 @@ def cb(msg, msgs=msgs):
             Some(locals),
         )
         .unwrap();
-        locals.get_item("cb").unwrap().to_object(py)
+        locals.get_item("cb").unwrap().unwrap().to_object(py)
     });
 
     let pid: u64 = Python::with_gil(|py| {
@@ -269,12 +373,8 @@ async fn py_structured_concurrency_normal_and_crash() {
         )
         .unwrap();
         let lst = pyo3::types::PyList::empty(py);
-        let cb = locals
-            .get_item("make_cb")
-            .unwrap()
-            .call1((lst,))
-            .unwrap()
-            .into_py(py);
+        let make_cb = locals.get_item("make_cb").unwrap().unwrap();
+        let cb = make_cb.call1((lst,)).unwrap().into_py(py);
         (lst.into_py(py), cb)
     };
 
@@ -345,7 +445,7 @@ async fn py_structured_concurrency_normal_and_crash() {
         let src = "def cb(_):\n    raise Exception('crash')\n";
         let locals = pyo3::types::PyDict::new(py);
         py.run(src, None, Some(locals)).unwrap();
-        locals.get_item("cb").unwrap().into_py(py)
+        locals.get_item("cb").unwrap().unwrap().into_py(py)
     });
     let parent_crash: u64 = Python::with_gil(|py| {
         rt_py
@@ -426,7 +526,7 @@ async fn py_spawn_child_pool_reuses_workers_under_parent() {
                 Some(locals),
             )
             .unwrap();
-            let cb: pyo3::PyObject = locals.get_item("cb").unwrap().into();
+            let cb: pyo3::PyObject = locals.get_item("cb").unwrap().unwrap().into();
 
             let worker_pids: Vec<u64> = rt
                 .call_method1("spawn_child_pool", (parent_pid, cb, 4usize, 64usize, false))
@@ -568,4 +668,207 @@ async fn py_virtual_actor_idle_timeout() {
             .unwrap()
     });
     assert!(!alive, "virtual actor should stop after idle timeout");
+}
+
+#[tokio::test]
+async fn py_handler_resilient_to_all_exit_types() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    let (pid_ok, pid_sys_exit, pid_exception) = Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        // A regular actor that survives
+        let cb_ok = py.eval("lambda m: None", None, None).unwrap();
+        let pid_ok: u64 = rt
+            .call_method1("spawn_py_handler", (cb_ok, 1usize))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // An actor that does sys.exit(1)
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "import sys\ndef sys_ext(m):\n    sys.exit(1)\n",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+        let cb_sys = locals.get_item("sys_ext").unwrap().unwrap();
+        let pid_sys_exit: u64 = rt
+            .call_method1("spawn_py_handler", (cb_sys, 1usize))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // An actor that raises an exception
+        let locals2 = pyo3::types::PyDict::new(py);
+        py.run(
+            "def exc(m):\n    raise ValueError('boom')\n",
+            None,
+            Some(locals2),
+        )
+        .unwrap();
+        let cb_exc = locals2.get_item("exc").unwrap().unwrap();
+        let pid_exception: u64 = rt
+            .call_method1("spawn_py_handler", (cb_exc, 1usize))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        (pid_ok, pid_sys_exit, pid_exception)
+    });
+
+    // Send messages to trigger them
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        let msg = pyo3::types::PyBytes::new(py, b"trigger");
+        rt.call_method1("send", (pid_ok, msg)).unwrap();
+        rt.call_method1("send", (pid_sys_exit, msg)).unwrap();
+        rt.call_method1("send", (pid_exception, msg)).unwrap();
+    });
+
+    // Let the Tokio runtime churn and execute the actors
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Verify properties
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        let is_ok_alive: bool = rt
+            .call_method1("is_alive", (pid_ok,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(is_ok_alive, "Normal actor should still be alive");
+
+        let is_sys_alive: bool = rt
+            .call_method1("is_alive", (pid_sys_exit,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(!is_sys_alive, "Actor that called sys.exit() should be dead");
+
+        let is_exc_alive: bool = rt
+            .call_method1("is_alive", (pid_exception,))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(
+            !is_exc_alive,
+            "Actor that raised an exception should be dead"
+        );
+    });
+}
+
+#[tokio::test]
+async fn test_py_handler_robust_exit_supervision() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    let pids: Vec<u64> = Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        // A monitor actor to capture EXIT messages
+        let monitor_pid: u64 = rt
+            .call_method1("spawn_observed_handler", (20usize,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // 1. sys.exit(2)
+        // 2. KeyboardInterrupt
+        // 3. BaseException directly
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(
+            "def cb_sys(m):\n    import sys\n    sys.exit(2)\n\
+             def cb_kbd(m):\n    raise KeyboardInterrupt()\n\
+             def cb_base(m):\n    raise BaseException('base')\n",
+            None,
+            Some(locals),
+        )
+        .unwrap();
+
+        let mut workers = Vec::new();
+        for cb_name in &["cb_sys", "cb_kbd", "cb_base"] {
+            let cb = locals.get_item(cb_name).unwrap().unwrap();
+            let pid: u64 = rt
+                .call_method1("spawn_py_handler", (cb, 10usize))
+                .unwrap()
+                .extract()
+                .unwrap();
+
+            // Link to monitor so it receives EXIT messages
+            rt.call_method1("link", (monitor_pid, pid)).unwrap();
+            workers.push(pid);
+
+            // Trigger failure
+            let bytes = pyo3::types::PyBytes::new(py, b"die");
+            rt.call_method1("send", (pid, bytes)).unwrap();
+        }
+
+        workers.push(monitor_pid);
+        workers
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+
+        let monitor_pid = pids.last().unwrap();
+        for pid in pids.iter().take(pids.len() - 1) {
+            let alive: bool = rt
+                .call_method1("is_alive", (*pid,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(!alive, "Failing actor {} should be dead", pid);
+        }
+
+        // Grab messages from the monitor (which is a raw Rust observer returning py objects of `EXIT`)
+        let msgs: Vec<pyo3::PyObject> = rt
+            .call_method1("get_messages", (*monitor_pid,))
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        // We expect ONE EXIT message per failing worker
+        assert_eq!(
+            msgs.len(),
+            3,
+            "Monitor should have received exactly 3 exit messages"
+        );
+
+        let mut exit_pids = Vec::new();
+        for msg in &msgs {
+            // The PySystemMessage returned by the monitor should look like an object with type_name == 'EXIT'
+            let type_name: String = msg.getattr(py, "type_name").unwrap().extract(py).unwrap();
+            assert_eq!(type_name, "EXIT");
+            let target_pid: u64 = msg.getattr(py, "target_pid").unwrap().extract(py).unwrap();
+            exit_pids.push(target_pid);
+
+            // Check that the reason string indicates a panic
+            let reason: String = msg.getattr(py, "reason").unwrap().extract(py).unwrap();
+            assert_eq!(
+                reason, "normal",
+                "Exit reason to supervisor should be 'panic'"
+            );
+        }
+        assert_eq!(exit_pids.len(), 3);
+    });
 }

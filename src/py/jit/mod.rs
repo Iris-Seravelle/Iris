@@ -8,16 +8,15 @@
 
 #![allow(non_local_definitions)]
 
+use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 #[cfg(feature = "pyo3")]
 use pyo3::types::{PyDict, PyTuple};
-
-use pyo3::AsPyPointer;
 
 pub(crate) mod codegen;
 pub(crate) mod config;
@@ -27,48 +26,29 @@ pub(crate) mod quantum;
 pub(crate) mod simd;
 
 pub(crate) use crate::py::jit::config::{
-    jit_log,
-    jit_logging_enabled,
-    quantum_compile_budget_ns,
-    quantum_compile_window_ns,
-    quantum_cooldown_base_ns,
-    quantum_cooldown_max_ns,
-    quantum_log_threshold_ns,
-    quantum_speculation_enabled,
-    quantum_speculation_threshold_ns,
-    quantum_stability_min_runs,
-    quantum_stability_min_score,
-    set_jit_logging_env_var,
-    set_jit_logging_override,
-    set_quantum_speculation_env_var,
-    set_quantum_speculation_override,
+    jit_log, jit_logging_enabled, quantum_compile_budget_ns, quantum_compile_window_ns,
+    quantum_cooldown_base_ns, quantum_cooldown_max_ns, quantum_log_threshold_ns,
+    quantum_speculation_enabled, quantum_speculation_threshold_ns, quantum_stability_min_runs,
+    quantum_stability_min_score, set_jit_logging_env_var, set_jit_logging_override,
+    set_quantum_speculation_env_var, set_quantum_speculation_override,
 };
 
 #[cfg(test)]
 pub(crate) use crate::py::jit::config::{jit_log_clear_hook, jit_log_hook};
 use crate::py::jit::config::{
-    jit_quantum_compile_budget_env_var,
-    jit_quantum_compile_window_env_var,
-    jit_quantum_cooldown_base_env_var,
-    jit_quantum_cooldown_max_env_var,
-    jit_quantum_log_env_var,
-    jit_quantum_speculation_env_var,
-    now_ns,
-    panic_payload_to_string,
-    parse_return_type,
+    jit_quantum_compile_budget_env_var, jit_quantum_compile_window_env_var,
+    jit_quantum_cooldown_base_env_var, jit_quantum_cooldown_max_env_var, jit_quantum_log_env_var,
+    jit_quantum_speculation_env_var, now_ns, panic_payload_to_string, parse_return_type,
 };
 
 pub(crate) use crate::py::jit::quantum::{
-    maybe_rearm_quantum_compile,
-    quantum_compile_may_run,
-    record_quantum_compile_attempt,
+    maybe_rearm_quantum_compile, quantum_compile_may_run, record_quantum_compile_attempt,
     register_quantum_rearm_plan,
 };
 
 #[cfg(test)]
 pub(crate) use crate::py::jit::quantum::{
-    clear_quantum_rearm_plan_for_test,
-    register_quantum_rearm_plan_for_test,
+    clear_quantum_rearm_plan_for_test, register_quantum_rearm_plan_for_test,
     reset_quantum_control_state,
 };
 
@@ -145,11 +125,28 @@ impl OffloadPool {
 
 // shared singleton
 static OFFLOAD_POOL: once_cell::sync::OnceCell<Arc<OffloadPool>> = once_cell::sync::OnceCell::new();
+static OFFLOAD_STRATEGY: once_cell::sync::OnceCell<std::sync::Mutex<HashMap<usize, String>>> =
+    once_cell::sync::OnceCell::new();
 
 fn get_offload_pool() -> Arc<OffloadPool> {
     OFFLOAD_POOL
         .get_or_init(|| Arc::new(OffloadPool::new(num_cpus::get())))
         .clone()
+}
+
+fn set_offload_strategy(func_key: usize, strategy: &str) {
+    let map = OFFLOAD_STRATEGY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(func_key, strategy.to_ascii_lowercase());
+    }
+}
+
+fn get_offload_strategy(func_key: usize) -> Option<String> {
+    OFFLOAD_STRATEGY.get().and_then(|map| {
+        map.lock()
+            .ok()
+            .and_then(|guard| guard.get(&func_key).cloned())
+    })
 }
 
 // Python bindings -----------------------------------------------------------
@@ -379,12 +376,13 @@ fn register_offload(
     source_expr: Option<String>,
     arg_names: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
+    let key = func.as_ptr() as usize;
     if let Some(ref s) = strategy {
+        set_offload_strategy(key, s);
         if s == "actor" {
             let _ = get_offload_pool();
         } else if s == "jit" {
             if let (Some(expr), Some(args)) = (source_expr.clone(), arg_names.clone()) {
-                let key = func.as_ptr() as usize;
                 let func_name = Python::with_gil(|py| {
                     func.as_ref(py)
                         .getattr("__name__")
@@ -591,17 +589,20 @@ fn offload_call(
     kwargs: Option<&PyDict>,
 ) -> PyResult<PyObject> {
     let key = func.as_ptr() as usize;
-    if let Some(res) = execute_registered_jit_guarded(py, key, args) {
-        if let Ok(obj) = res {
-            return Ok(obj);
-        }
-        if let Err(err) = &res {
-            jit_log(|| {
-                format!(
-                    "[Iris][jit] guarded execution failed in offload_call; falling back: {}",
-                    err
-                )
-            });
+    let use_jit = !matches!(get_offload_strategy(key).as_deref(), Some("actor"));
+    if use_jit {
+        if let Some(res) = execute_registered_jit_guarded(py, key, args) {
+            if let Ok(obj) = res {
+                return Ok(obj);
+            }
+            if let Err(err) = &res {
+                jit_log(|| {
+                    format!(
+                        "[Iris][jit] guarded execution failed in offload_call; falling back: {}",
+                        err
+                    )
+                });
+            }
         }
     }
 

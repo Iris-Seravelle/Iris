@@ -39,7 +39,8 @@ pub(crate) fn detect_lowered_kernel(expr: &Expr, arg_names: &[String]) -> Option
             if args.len() == 1 {
                 if let Expr::Var(var_name) = &args[0] {
                     if let Some(input) = arg_index_of_var(arg_names, var_name) {
-                        let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str() {
+                        let op = match normalize_intrinsic_name(name).to_ascii_lowercase().as_str()
+                        {
                             "abs" | "fabs" => Some(LoweredUnaryKernel::Abs),
                             "sin" => Some(LoweredUnaryKernel::Sin),
                             "cos" => Some(LoweredUnaryKernel::Cos),

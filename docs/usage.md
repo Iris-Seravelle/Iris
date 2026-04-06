@@ -214,6 +214,32 @@ rt.set_release_gil_strict(True)
 
 ---
 
+## Vortex controls (Python Runtime, experimental)
+
+When Iris is built with the `vortex` feature, `PyRuntime` exposes automatic ghost-arbitration controls and telemetry.
+
+- `vortex_set_auto_ghost_policy(policy: str) -> bool`
+  - Accepted values: `FirstSafePointWins`, `PreferPrimary`.
+- `vortex_get_auto_ghost_policy() -> Optional[str]`
+- `vortex_get_auto_resolution_counts() -> Tuple[int, int]`
+  - Returns `(primary_wins, ghost_wins)`.
+- `vortex_get_auto_replay_count() -> int`
+- `vortex_reset_auto_telemetry() -> None`
+
+Example:
+
+```python
+rt = Runtime()
+rt.vortex_reset_auto_telemetry()
+rt.vortex_set_auto_ghost_policy("PreferPrimary")
+
+primary_wins, ghost_wins = rt.vortex_get_auto_resolution_counts()
+replayed = rt.vortex_get_auto_replay_count()
+print(primary_wins, ghost_wins, replayed)
+```
+
+---
+
 ## Lifecycle helpers
 
 - `stop(pid: int)` — stop an actor and close mailbox.

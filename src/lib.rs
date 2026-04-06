@@ -12,13 +12,20 @@ pub mod pid;
 pub mod registry;
 pub mod supervisor;
 
+#[cfg(feature = "vortex")]
+pub mod vortex;
+
 #[cfg(feature = "pyo3")]
 pub mod py;
+
+pub mod logging;
 
 #[cfg(feature = "node")]
 pub mod node;
 
 use crate::pid::Pid;
+#[cfg(feature = "vortex")]
+use crate::vortex::{VortexEngine, VortexGhostPolicy, VortexGhostResolution, VortexVioCall};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -32,6 +39,32 @@ use tokio::time::Duration;
 type BoxFutureUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ErasedMessageHandler = Arc<dyn Fn(mailbox::Message) -> BoxFutureUnit + Send + Sync>;
 const MAX_BEHAVIOR_HISTORY: usize = 16;
+
+#[cfg(feature = "vortex")]
+fn next_dynamic_budget(
+    current: usize,
+    base: usize,
+    saw_suspend: bool,
+    suspend_rate: f64,
+    low_thresh: f64,
+    high_thresh: f64,
+) -> usize {
+    let base = base.max(1);
+    let min_budget = (base / 4).max(1);
+    let max_budget = base.saturating_mul(4).max(base);
+
+    let adjusted = if suspend_rate > high_thresh {
+        (current * 60 / 100).max(min_budget)
+    } else if suspend_rate > low_thresh {
+        (current * 80 / 100).max(min_budget)
+    } else if saw_suspend {
+        (current / 2).max(min_budget)
+    } else {
+        (current.saturating_add(1)).min(max_budget)
+    };
+
+    adjusted.clamp(min_budget, max_budget)
+}
 
 #[derive(Clone)]
 struct VirtualActorSpec {
@@ -63,6 +96,10 @@ pub struct Runtime {
     monitor_backoff_factor: Arc<Mutex<f64>>,
     monitor_backoff_max: Arc<Mutex<Duration>>,
     monitor_failure_threshold: Arc<Mutex<usize>>,
+    #[cfg(feature = "vortex")]
+    vortex_engine: Option<Arc<Mutex<VortexEngine>>>,
+    #[cfg(feature = "vortex")]
+    vortex_watcher: Option<Arc<vortex::VortexWatcher>>,
     registry: Arc<registry::NameRegistry>,
     /// Mapping for locally‑spawned proxies that forward to remote actors.
     /// Key is the local proxy PID; value is (remote address, remote PID).
@@ -96,11 +133,31 @@ pub struct Runtime {
     // Timers: map from timer id -> cancellation sender
     timers: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
     timer_counter: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_ghost_counter: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_replay_count: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_primary_wins: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_ghost_wins: Arc<AtomicU64>,
+    #[cfg(feature = "vortex")]
+    vortex_auto_policy: Arc<Mutex<VortexGhostPolicy>>,
+    #[cfg(feature = "vortex")]
+    vortex_genetic_budgeting_enabled: Arc<Mutex<bool>>,
+    #[cfg(feature = "vortex")]
+    vortex_genetic_thresholds: Arc<Mutex<(f64, f64)>>,
+    #[cfg(feature = "vortex")]
+    vortex_isolation_disallowed_ops: Arc<Mutex<std::collections::HashSet<u8>>>,
+    #[cfg(feature = "vortex")]
+    vortex_genetic_history: Arc<DashMap<Pid, (usize, usize)>>,
 }
 
 impl Runtime {
     /// Create a new runtime instance and initialize the networking and registry sub-systems.
     pub fn new() -> Self {
+        crate::logging::init_logger();
+
         #[cfg(feature = "pyo3")]
         {
             pyo3::prepare_freethreaded_python();
@@ -126,6 +183,24 @@ impl Runtime {
             release_gil_strict: Arc::new(Mutex::new(false)),
             timers: Arc::new(Mutex::new(HashMap::new())),
             timer_counter: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_ghost_counter: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_replay_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_primary_wins: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_ghost_wins: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "vortex")]
+            vortex_auto_policy: Arc::new(Mutex::new(VortexGhostPolicy::FirstSafePointWins)),
+            #[cfg(feature = "vortex")]
+            vortex_genetic_budgeting_enabled: Arc::new(Mutex::new(false)),
+            #[cfg(feature = "vortex")]
+            vortex_genetic_thresholds: Arc::new(Mutex::new((0.4, 0.7))),
+            #[cfg(feature = "vortex")]
+            vortex_isolation_disallowed_ops: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            #[cfg(feature = "vortex")]
+            vortex_genetic_history: Arc::new(DashMap::new()),
             network_io_timeout: Arc::new(Mutex::new(Duration::from_secs(5))),
             network_max_payload: Arc::new(Mutex::new(1024 * 1024)),
             network_max_name_len: Arc::new(Mutex::new(1024)),
@@ -136,6 +211,10 @@ impl Runtime {
             proxy_by_remote: Arc::new(DashMap::new()),
             behavior_versions: Arc::new(DashMap::new()),
             behavior_history: Arc::new(DashMap::new()),
+            #[cfg(feature = "vortex")]
+            vortex_engine: Some(Arc::new(Mutex::new(VortexEngine::new()))),
+            #[cfg(feature = "vortex")]
+            vortex_watcher: Some(Arc::new(vortex::VortexWatcher::new())),
         };
 
         let net_manager = network::NetworkManager::new(Arc::new(rt.clone()));
@@ -216,6 +295,329 @@ impl Runtime {
     /// `release_gil=true` will return an error if the dedicated-thread limit is exceeded.
     pub fn set_release_gil_strict(&self, strict: bool) {
         *self.release_gil_strict.lock().unwrap() = strict;
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_engine(&self) -> Option<VortexEngine> {
+        self.vortex_engine
+            .as_ref()
+            .and_then(|engine| engine.lock().ok().map(|guard| guard.clone()))
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_start_transaction_with_checkpoint(
+        &self,
+        id: u64,
+        locals: HashMap<String, Vec<u8>>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => {
+                guard.start_transaction_with_checkpoint(id, locals);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_stage_transaction_vio(&self, op: String, payload: Vec<u8>) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.stage_transaction_vio(op, payload),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_commit_transaction(&self) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.commit_transaction(),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_take_committed_transaction_vio(&self) -> Option<Vec<VortexVioCall>> {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(mut guard) => Some(guard.take_committed_transaction_vio()),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_start_ghost_transaction_with_checkpoint(
+        &self,
+        id: u64,
+        locals: HashMap<String, Vec<u8>>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => {
+                guard.start_ghost_transaction_with_checkpoint(id, locals);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_stage_ghost_transaction_vio(
+        &self,
+        ghost_id: u64,
+        op: String,
+        payload: Vec<u8>,
+    ) -> bool {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return false;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.stage_ghost_transaction_vio(ghost_id, op, payload),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_resolve_primary_ghost_race(
+        &self,
+        ghost_id: u64,
+        winner_id: u64,
+        policy: VortexGhostPolicy,
+    ) -> Option<VortexGhostResolution> {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(mut guard) => guard.resolve_primary_ghost_race(ghost_id, winner_id, policy),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_replay_committed_vio_calls<F>(
+        &self,
+        calls: &[VortexVioCall],
+        executor: F,
+    ) -> Option<usize>
+    where
+        F: FnMut(&VortexVioCall) -> bool,
+    {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return None;
+        };
+        match engine.lock() {
+            Ok(guard) => Some(guard.replay_committed_vio_calls(calls, executor)),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_replay_count(&self) -> u64 {
+        self.vortex_auto_replay_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_auto_ghost_policy(&self, policy: VortexGhostPolicy) -> bool {
+        match self.vortex_auto_policy.lock() {
+            Ok(mut guard) => {
+                *guard = policy;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_ghost_policy(&self) -> Option<VortexGhostPolicy> {
+        self.vortex_auto_policy.lock().ok().map(|guard| *guard)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_auto_resolution_counts(&self) -> (u64, u64) {
+        (
+            self.vortex_auto_primary_wins.load(Ordering::Relaxed),
+            self.vortex_auto_ghost_wins.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_reset_auto_telemetry(&self) {
+        self.vortex_auto_replay_count.store(0, Ordering::Relaxed);
+        self.vortex_auto_primary_wins.store(0, Ordering::Relaxed);
+        self.vortex_auto_ghost_wins.store(0, Ordering::Relaxed);
+        self.vortex_ghost_counter.store(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_genetic_budgeting(&self, enabled: bool) -> bool {
+        match self.vortex_genetic_budgeting_enabled.lock() {
+            Ok(mut guard) => {
+                *guard = enabled;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_genetic_budgeting_enabled(&self) -> Option<bool> {
+        self.vortex_genetic_budgeting_enabled
+            .lock()
+            .ok()
+            .map(|guard| *guard)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_genetic_thresholds(&self, low: f64, high: f64) -> bool {
+        if low < 0.0 || high < 0.0 || low >= high || high > 1.0 {
+            return false;
+        }
+        match self.vortex_genetic_thresholds.lock() {
+            Ok(mut guard) => {
+                *guard = (low, high);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_genetic_thresholds(&self) -> Option<(f64, f64)> {
+        self.vortex_genetic_thresholds
+            .lock()
+            .ok()
+            .map(|guard| *guard)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_set_isolation_disallowed_ops(&self, ops: Vec<u8>) -> bool {
+        match self.vortex_isolation_disallowed_ops.lock() {
+            Ok(mut guard) => {
+                guard.clear();
+                for op in ops {
+                    guard.insert(op);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_get_isolation_disallowed_ops(&self) -> Option<Vec<u8>> {
+        self.vortex_isolation_disallowed_ops
+            .lock()
+            .ok()
+            .map(|guard| guard.iter().copied().collect())
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_enable(&self) -> bool {
+        if let Some(watcher) = self.vortex_watcher.as_ref() {
+            watcher.enable();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_disable(&self) -> bool {
+        if let Some(watcher) = self.vortex_watcher.as_ref() {
+            watcher.disable();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_watchdog_enabled(&self) -> Option<bool> {
+        self.vortex_watcher.as_ref().map(|w| w.is_enabled())
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_genetic_history(&self, pid: Pid) -> Option<(usize, usize)> {
+        self.vortex_genetic_history.get(&pid).map(|r| *r)
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_get_all_genetic_history(&self) -> Vec<(Pid, usize, usize)> {
+        self.vortex_genetic_history
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().0, entry.value().1))
+            .collect()
+    }
+
+    #[cfg(feature = "vortex")]
+    pub fn vortex_reset_genetic_history(&self) {
+        self.vortex_genetic_history.clear();
+    }
+
+    #[cfg(feature = "vortex")]
+    fn vortex_auto_checkpoint_and_replay_on_suspend(&self, pid: Pid, budget: usize) {
+        let Some(engine) = self.vortex_engine.as_ref() else {
+            return;
+        };
+
+        let primary_id = self.vortex_ghost_counter.fetch_add(1, Ordering::Relaxed);
+        let ghost_id = self.vortex_ghost_counter.fetch_add(1, Ordering::Relaxed);
+
+        let mut primary_locals = HashMap::new();
+        primary_locals.insert("pid".to_string(), pid.to_le_bytes().to_vec());
+        primary_locals.insert("budget".to_string(), (budget as u64).to_le_bytes().to_vec());
+
+        let mut ghost_locals = HashMap::new();
+        ghost_locals.insert("pid".to_string(), pid.to_le_bytes().to_vec());
+        ghost_locals.insert("budget".to_string(), (budget as u64).to_le_bytes().to_vec());
+
+        let Ok(mut guard) = engine.lock() else {
+            return;
+        };
+
+        guard.start_transaction_with_checkpoint(primary_id, primary_locals);
+        let _ =
+            guard.stage_transaction_vio("suspend_primary".to_string(), pid.to_le_bytes().to_vec());
+
+        guard.start_ghost_transaction_with_checkpoint(ghost_id, ghost_locals);
+        let _ = guard.stage_ghost_transaction_vio(
+            ghost_id,
+            "suspend_ghost".to_string(),
+            pid.to_le_bytes().to_vec(),
+        );
+
+        let policy = self
+            .vortex_auto_policy
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(VortexGhostPolicy::FirstSafePointWins);
+
+        if let Some(resolution) = guard.resolve_primary_ghost_race(ghost_id, ghost_id, policy) {
+            if resolution.winner_id == primary_id {
+                self.vortex_auto_primary_wins
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if resolution.winner_id == ghost_id {
+                self.vortex_auto_ghost_wins.fetch_add(1, Ordering::Relaxed);
+            }
+
+            let applied = guard.replay_committed_vio_calls(&resolution.committed_vio, |_| true);
+            if applied > 0 {
+                self.vortex_auto_replay_count
+                    .fetch_add(applied as u64, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Get the current release_gil limits (max_threads, pool_size).
@@ -546,6 +948,8 @@ impl Runtime {
     {
         let mut slab = self.slab.lock().unwrap();
         let pid = slab.allocate();
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let erased: ErasedMessageHandler =
             Arc::new(move |msg: mailbox::Message| Box::pin(handler(msg)));
@@ -599,6 +1003,8 @@ impl Runtime {
 
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let handler = spec.handler.clone();
         let budget = spec.budget;
@@ -789,6 +1195,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
 
@@ -861,6 +1269,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default policy
@@ -942,6 +1352,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::bounded_channel(capacity);
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         // track capacity and default overflow policy
@@ -1015,6 +1427,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let mailboxes2 = self.mailboxes.clone();
         let supervisor2 = self.supervisor.clone();
@@ -1082,6 +1496,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
 
         let handler = std::sync::Arc::new(handler);
         let supervisor2 = self.supervisor.clone();
@@ -1092,16 +1508,111 @@ impl Runtime {
 
         RUNTIME.spawn(async move {
             let h_loop = handler.clone();
+            #[cfg(feature = "vortex")]
+            let rt_vortex_clone = rt_exit_clone.clone();
+
+            #[cfg(feature = "vortex")]
+            let mut vortex_engine = rt_exit_clone
+                .vortex_engine()
+                .unwrap_or_else(|| crate::vortex::VortexEngine::new());
+
             let actor_handle = tokio::spawn(async move {
                 let mut processed = 0usize;
+                #[cfg(feature = "vortex")]
+                let mut dynamic_budget = budget.max(1);
+                #[cfg(not(feature = "vortex"))]
+                let dynamic_budget = budget.max(1);
                 while let Some(first_msg) = rx.recv().await {
+                    #[cfg(feature = "vortex")]
+                    if rt_vortex_clone.vortex_watchdog_enabled().unwrap_or(false) {
+                        tokio::task::yield_now().await;
+                    }
+
+                    #[cfg(feature = "vortex")]
+                    let mut saw_suspend_in_cycle = false;
+                    #[cfg(not(feature = "vortex"))]
+                    let _saw_suspend_in_cycle = false;
+
+                    #[cfg(feature = "vortex")]
+                    let enable_genetic_budgeting = rt_vortex_clone
+                        .vortex_genetic_budgeting_enabled()
+                        .unwrap_or(false);
+                    #[cfg(not(feature = "vortex"))]
+                    let _enable_genetic_budgeting = false;
+
+                    #[cfg(feature = "vortex")]
+                    {
+                        if let Err(_) = vortex_engine.preempt_tick() {
+                            saw_suspend_in_cycle = true;
+                            let (suspend_count, total_count) = rt_vortex_clone
+                                .vortex_genetic_history(pid)
+                                .unwrap_or((0, 0));
+                            rt_vortex_clone.vortex_genetic_history.insert(
+                                pid,
+                                (
+                                    suspend_count.saturating_add(1),
+                                    total_count.saturating_add(1),
+                                ),
+                            );
+                            rt_vortex_clone
+                                .vortex_auto_checkpoint_and_replay_on_suspend(pid, budget);
+                            vortex_engine.detach_stalled_thread();
+                            vortex_engine.replenish_budget(budget);
+                            tokio::task::yield_now().await;
+                            vortex_engine.reclaim_thread();
+                            if enable_genetic_budgeting {
+                                let (low, high) = rt_vortex_clone
+                                    .vortex_genetic_thresholds()
+                                    .unwrap_or((0.4, 0.7));
+                                dynamic_budget = next_dynamic_budget(
+                                    dynamic_budget,
+                                    budget,
+                                    saw_suspend_in_cycle,
+                                    0.0,
+                                    low,
+                                    high,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+
                     let h = h_loop.clone();
                     (h)(first_msg).await;
                     processed += 1;
 
-                    while processed < budget {
+                    while processed < dynamic_budget {
                         match rx.try_recv() {
                             Some(next_msg) => {
+                                #[cfg(feature = "vortex")]
+                                {
+                                    if let Err(_) = vortex_engine.preempt_tick() {
+                                        saw_suspend_in_cycle = true;
+                                        rt_vortex_clone
+                                            .vortex_auto_checkpoint_and_replay_on_suspend(
+                                                pid, budget,
+                                            );
+                                        vortex_engine.detach_stalled_thread();
+                                        vortex_engine.replenish_budget(budget);
+                                        tokio::task::yield_now().await;
+                                        vortex_engine.reclaim_thread();
+                                        if enable_genetic_budgeting {
+                                            let (low, high) = rt_vortex_clone
+                                                .vortex_genetic_thresholds()
+                                                .unwrap_or((0.4, 0.7));
+                                            dynamic_budget = next_dynamic_budget(
+                                                dynamic_budget,
+                                                budget,
+                                                saw_suspend_in_cycle,
+                                                0.0,
+                                                low,
+                                                high,
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+
                                 let h = h_loop.clone();
                                 (h)(next_msg).await;
                                 processed += 1;
@@ -1110,7 +1621,40 @@ impl Runtime {
                         }
                     }
 
-                    if processed >= budget {
+                    #[cfg(feature = "vortex")]
+                    {
+                        let (suspend_count, total_count) = rt_vortex_clone
+                            .vortex_genetic_history(pid)
+                            .unwrap_or((0, 0));
+                        let total_count = total_count.saturating_add(1);
+                        let suspend_count = suspend_count + (saw_suspend_in_cycle as usize);
+                        let suspend_rate = if total_count == 0 {
+                            0.0
+                        } else {
+                            (suspend_count as f64) / (total_count as f64)
+                        };
+
+                        rt_vortex_clone
+                            .vortex_genetic_history
+                            .insert(pid, (suspend_count, total_count));
+
+                        if enable_genetic_budgeting {
+                            let (low, high) = rt_vortex_clone
+                                .vortex_genetic_thresholds()
+                                .unwrap_or((0.4, 0.7));
+
+                            dynamic_budget = next_dynamic_budget(
+                                dynamic_budget,
+                                budget,
+                                saw_suspend_in_cycle,
+                                suspend_rate,
+                                low,
+                                high,
+                            );
+                        }
+                    }
+
+                    if processed >= dynamic_budget {
                         processed = 0;
                         tokio::task::yield_now().await;
                     }
@@ -1194,6 +1738,8 @@ impl Runtime {
         let pid = slab.allocate();
         let (tx, mut rx) = mailbox::channel();
         self.mailboxes.insert(pid, tx.clone());
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.insert(pid, (0, 0));
         self.backpressure_state
             .insert(pid, mailbox::BackpressureLevel::Normal);
         let vec = Arc::new(Mutex::new(Vec::new()));
@@ -1460,6 +2006,10 @@ impl Runtime {
             let res = sender.send_user_bytes(bytes);
             if res.is_ok() {
                 self.update_backpressure_after_enqueue(pid, sender.value());
+                #[cfg(feature = "vortex")]
+                if let Some(mut counts) = self.vortex_genetic_history.get_mut(&pid) {
+                    counts.1 = counts.1.saturating_add(1);
+                }
             }
             res
         } else {
@@ -1589,6 +2139,8 @@ impl Runtime {
         self.backpressure_state.remove(&pid);
         self.behavior_versions.remove(&pid);
         self.behavior_history.remove(&pid);
+        #[cfg(feature = "vortex")]
+        self.vortex_genetic_history.remove(&pid);
         // remove the pid from its parent's child list (if any)
         if let Some((_, parent)) = self.parent_of.remove(&pid) {
             if let Some(mut entry) = self.children_by_parent.get_mut(&parent) {
@@ -1863,12 +2415,19 @@ mod tests {
             }
         }
 
-        assert!(sent >= 4, "expected at least 4 messages to be accepted, got {}", sent);
+        assert!(
+            sent >= 4,
+            "expected at least 4 messages to be accepted, got {}",
+            sent
+        );
 
         let level = rt
             .mailbox_backpressure(pid)
             .expect("backpressure should be available");
-        assert!(matches!(level, mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical));
+        assert!(matches!(
+            level,
+            mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical
+        ));
 
         if sent >= 5 {
             assert_eq!(level, mailbox::BackpressureLevel::Critical);
@@ -1899,10 +2458,16 @@ mod tests {
             let payload = bytes::Bytes::from(format!("u{}", i));
             assert!(rt.send_user(pid, payload).is_ok());
         }
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::High));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::High)
+        );
 
         assert!(rt.send_user(pid, bytes::Bytes::from_static(b"u3")).is_ok());
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Critical)
+        );
 
         let _ = start_tx.send(());
     }
@@ -1932,7 +2497,10 @@ mod tests {
         assert!(rt
             .send(pid, mailbox::Message::User(b"d3".to_vec().into()))
             .is_ok());
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Critical));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Critical)
+        );
 
         let _ = start_tx.send(());
 
@@ -1947,7 +2515,10 @@ mod tests {
         .await
         .expect("mailbox should drain");
 
-        assert_eq!(rt.mailbox_backpressure(pid), Some(mailbox::BackpressureLevel::Normal));
+        assert_eq!(
+            rt.mailbox_backpressure(pid),
+            Some(mailbox::BackpressureLevel::Normal)
+        );
     }
 
     #[tokio::test]
@@ -2146,5 +2717,320 @@ mod tests {
             .rollback_behavior(pid, 1)
             .expect_err("rollback should fail");
         assert!(err.contains("history"));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_ghost_lifecycle_wrappers_work() {
+        let rt = Runtime::new();
+
+        assert!(rt.vortex_start_transaction_with_checkpoint(10, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("io_primary".to_string(), b"p".to_vec()));
+
+        assert!(
+            rt.vortex_start_ghost_transaction_with_checkpoint(20, std::collections::HashMap::new())
+        );
+        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_a".to_string(), b"a".to_vec()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_b".to_string(), b"b".to_vec()));
+
+        let resolution = rt
+            .vortex_resolve_primary_ghost_race(
+                20,
+                20,
+                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+            )
+            .expect("resolution should exist");
+        assert_eq!(resolution.winner_id, 20);
+        assert_eq!(resolution.committed_vio.len(), 2);
+
+        let mut seen = Vec::new();
+        let applied = rt
+            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |call| {
+                seen.push(call.op.clone());
+                true
+            })
+            .expect("replay should be available");
+        assert_eq!(applied, 2);
+        assert_eq!(
+            seen,
+            vec!["io_ghost_a".to_string(), "io_ghost_b".to_string()]
+        );
+
+        let second = rt.vortex_resolve_primary_ghost_race(
+            20,
+            20,
+            crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+        );
+        assert!(second.is_none());
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_commit_and_take_committed_vio() {
+        let rt = Runtime::new();
+        assert!(rt.vortex_start_transaction_with_checkpoint(30, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("io_commit".to_string(), b"x".to_vec()));
+        assert!(rt.vortex_commit_transaction());
+
+        let committed = rt
+            .vortex_take_committed_transaction_vio()
+            .expect("engine should exist");
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].op, "io_commit");
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_ghost_wrappers_during_actor_execution() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_observed_handler(8);
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"before".to_vec().into()))
+            .is_ok());
+
+        assert!(rt.vortex_start_transaction_with_checkpoint(101, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_transaction_vio("primary_call".to_string(), b"p".to_vec()));
+        assert!(rt
+            .vortex_start_ghost_transaction_with_checkpoint(202, std::collections::HashMap::new()));
+        assert!(rt.vortex_stage_ghost_transaction_vio(
+            202,
+            "ghost_call".to_string(),
+            b"g".to_vec()
+        ));
+
+        let resolution = rt
+            .vortex_resolve_primary_ghost_race(
+                202,
+                202,
+                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
+            )
+            .expect("resolution should succeed");
+        assert_eq!(resolution.winner_id, 202);
+        assert_eq!(resolution.committed_vio.len(), 1);
+
+        let applied = rt
+            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |_call| true)
+            .expect("replay should be available");
+        assert_eq!(applied, 1);
+
+        assert!(rt
+            .send(pid, mailbox::Message::User(b"after".to_vec().into()))
+            .is_ok());
+
+        let observed = timeout(Duration::from_secs(1), async {
+            loop {
+                let msgs = rt
+                    .get_observed_messages(pid)
+                    .expect("observed actor should exist");
+
+                let user_msgs: Vec<Vec<u8>> = msgs
+                    .into_iter()
+                    .filter_map(|m| match m {
+                        mailbox::Message::User(b) => Some(b.to_vec()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if user_msgs.len() >= 2 {
+                    break user_msgs;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for observed messages");
+
+        assert!(observed.iter().any(|m| m.as_slice() == b"before"));
+        assert!(observed.iter().any(|m| m.as_slice() == b"after"));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_ghost_hook_triggers_on_preempt_suspend() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+
+        // Drive enough preemption checks to force suspend-path execution.
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if rt.vortex_auto_replay_count() > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto replay hook to run on preempt suspend");
+
+        assert!(rt.vortex_auto_replay_count() > 0);
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(primary_wins + ghost_wins > 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_policy_prefer_primary_updates_counters() {
+        let rt = Runtime::new();
+        assert!(rt.vortex_set_auto_ghost_policy(crate::vortex::VortexGhostPolicy::PreferPrimary));
+        assert_eq!(
+            rt.vortex_auto_ghost_policy(),
+            Some(crate::vortex::VortexGhostPolicy::PreferPrimary)
+        );
+
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+                if primary_wins > 0 || ghost_wins > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto policy counters to update");
+
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(primary_wins > 0);
+        assert_eq!(ghost_wins, 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_auto_telemetry_can_reset() {
+        let rt = Runtime::new();
+        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
+
+        for _ in 0..1400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if rt.vortex_auto_replay_count() > 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected auto telemetry to increase");
+
+        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
+        assert!(rt.vortex_auto_replay_count() > 0);
+        assert!(primary_wins + ghost_wins > 0);
+
+        rt.vortex_reset_auto_telemetry();
+        let (primary_wins_after, ghost_wins_after) = rt.vortex_auto_resolution_counts();
+        assert_eq!(rt.vortex_auto_replay_count(), 0);
+        assert_eq!(primary_wins_after, 0);
+        assert_eq!(ghost_wins_after, 0);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_genetic_budgeting_toggle_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
+        assert!(rt.vortex_set_genetic_budgeting(true));
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(true));
+        assert!(rt.vortex_set_genetic_budgeting(false));
+        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[tokio::test]
+    async fn runtime_vortex_genetic_budgeting_effects_during_actor_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let rt = Runtime::new();
+
+        // Start with dynamic budgeting disabled.
+        assert!(rt.vortex_set_genetic_budgeting(false));
+
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let pid = rt.spawn_handler_with_budget(
+            move |_msg| {
+                let counter_clone = counter_clone.clone();
+                async move {
+                    counter_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+            8,
+        );
+
+        for _ in 0..400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"x".to_vec().into()));
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Enable genetic budgeting while actor is still running.
+        assert!(rt.vortex_set_genetic_budgeting(true));
+
+        for _ in 0..400 {
+            let _ = rt.send(pid, mailbox::Message::User(b"x".to_vec().into()));
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if counter.load(Ordering::Relaxed) >= 800 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("all messages should be processed");
+
+        rt.stop(pid);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_genetic_budget_policy_math() {
+        // base=8 => min=2, max=32
+        assert_eq!(next_dynamic_budget(8, 8, false, 0.0, 0.4, 0.7), 9);
+        assert_eq!(next_dynamic_budget(32, 8, false, 0.0, 0.4, 0.7), 32);
+        assert_eq!(next_dynamic_budget(8, 8, true, 0.0, 0.4, 0.7), 4);
+        assert_eq!(next_dynamic_budget(3, 8, true, 0.0, 0.4, 0.7), 2);
+        assert_eq!(next_dynamic_budget(1, 8, true, 0.0, 0.4, 0.7), 2);
+
+        // high suspend rate should force stronger penalty.
+        assert_eq!(next_dynamic_budget(16, 8, false, 0.8, 0.4, 0.7), 9);
+        assert_eq!(next_dynamic_budget(20, 8, false, 0.5, 0.4, 0.7), 16);
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_genetic_threshold_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.vortex_genetic_thresholds(), Some((0.4, 0.7)));
+        assert!(rt.vortex_set_genetic_thresholds(0.2, 0.5));
+        assert_eq!(rt.vortex_genetic_thresholds(), Some((0.2, 0.5)));
+        assert!(!rt.vortex_set_genetic_thresholds(0.7, 0.2));
+        assert!(!rt.vortex_set_genetic_thresholds(-0.1, 0.5));
+        assert!(!rt.vortex_set_genetic_thresholds(0.1, 1.2));
+    }
+
+    #[cfg(feature = "vortex")]
+    #[test]
+    fn runtime_vortex_isolation_disallow_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.vortex_get_isolation_disallowed_ops(), Some(vec![]));
+        assert!(rt.vortex_set_isolation_disallowed_ops(vec![90, 91]));
+        let mut got = rt.vortex_get_isolation_disallowed_ops().unwrap();
+        got.sort();
+        assert_eq!(got, vec![90, 91]);
     }
 }

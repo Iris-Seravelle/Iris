@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::info;
 
+use crate::logging;
 use crate::py::jit::codegen::JitReturnType;
 
 static JIT_LOG_OVERRIDE: AtomicI8 = AtomicI8::new(-1); // -1 env, 0 off, 1 on
@@ -190,7 +191,7 @@ where
         }
     }
 
-    // Use `tracing` when available; falls back to stderr if no subscriber is set.
+    logging::init_logger();
     info!(target: "iris::jit", "{}", msg());
 }
 

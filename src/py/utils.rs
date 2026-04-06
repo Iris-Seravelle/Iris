@@ -5,6 +5,45 @@
 use crate::mailbox;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// Execute a Python callback while safely catching Rust panics and
+/// Python exceptions. Returns `true` if the callback completed normally.
+pub(crate) fn run_python_callback_py<F>(py: Python, f: F) -> bool
+where
+    F: FnOnce(Python) -> PyResult<()>,
+{
+    let result = catch_unwind(AssertUnwindSafe(|| match f(py) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            eprintln!("[Iris] Python actor exception: {}", err);
+            // PyErr::print() calls CPython's PyErr_Print, which terminates the process
+            // if the error is SystemExit. We must completely avoid it for SystemExit.
+            if !err.is_instance_of::<pyo3::exceptions::PySystemExit>(py) {
+                err.print(py);
+            }
+            Err(())
+        }
+    }));
+
+    match result {
+        Ok(Ok(())) => true,
+        Ok(Err(())) => false,
+        Err(payload) => {
+            eprintln!("[Iris] Python actor unwind: {:?}", payload);
+            false
+        }
+    }
+}
+
+/// Execute a Python callback while safely catching Rust panics and
+/// Python exceptions. Returns `true` if the callback completed normally.
+pub(crate) fn run_python_callback<F>(f: F) -> bool
+where
+    F: FnOnce(Python) -> PyResult<()>,
+{
+    Python::with_gil(|py| run_python_callback_py(py, f))
+}
 
 /// Python-friendly structured system message used during conversions.
 #[pyclass]

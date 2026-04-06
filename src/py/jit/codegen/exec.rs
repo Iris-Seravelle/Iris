@@ -10,18 +10,18 @@ use crate::py::jit::simd;
 
 use super::{
     lowered_binary_eval, lowered_expr_eval, lowered_expr_eval_pair, lowered_unary_eval,
-    lowered_unary_eval_pair, open_typed_buffer, read_buffer_f64, BREAK_SENTINEL_BITS,
-    CONTINUE_SENTINEL_BITS, BufferElemType, BufferView, JitEntry, JitExecProfile,
-    JitReturnType, LoweredBinaryKernel, LoweredKernel, LoweredUnaryKernel, ReductionMode,
+    lowered_unary_eval_pair, open_typed_buffer, read_buffer_f64, BufferElemType, BufferView,
+    JitEntry, JitExecProfile, JitReturnType, LoweredBinaryKernel, LoweredKernel,
+    LoweredUnaryKernel, ReductionMode, BREAK_SENTINEL_BITS, CONTINUE_SENTINEL_BITS,
     TLS_JIT_TYPE_PROFILE,
 };
 
 static LOWERED_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
-once_cell::sync::OnceCell::new();
+    once_cell::sync::OnceCell::new();
 static UNROLL_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
-once_cell::sync::OnceCell::new();
+    once_cell::sync::OnceCell::new();
 static SIMD_MATH_EXEC_LOGGED: once_cell::sync::OnceCell<std::sync::Mutex<HashSet<usize>>> =
-once_cell::sync::OnceCell::new();
+    once_cell::sync::OnceCell::new();
 
 fn log_lowered_exec_once(entry: &JitEntry, len: usize) {
     let Some(kernel) = entry.lowered_kernel.as_ref() else {
@@ -99,11 +99,11 @@ fn try_execute_lowered_vector_kernel(
         lowered_unary_eval(op, x, mode)
     };
     let eval_binary =
-    |op: LoweredBinaryKernel, lhs_view: &BufferView, rhs_view: &BufferView, idx: usize| {
-        let l = unsafe { read_buffer_f64(lhs_view, idx) };
-        let r = unsafe { read_buffer_f64(rhs_view, idx) };
-        lowered_binary_eval(op, l, r)
-    };
+        |op: LoweredBinaryKernel, lhs_view: &BufferView, rhs_view: &BufferView, idx: usize| {
+            let l = unsafe { read_buffer_f64(lhs_view, idx) };
+            let r = unsafe { read_buffer_f64(rhs_view, idx) };
+            lowered_binary_eval(op, l, r)
+        };
 
     if entry.reduction != ReductionMode::None {
         let lanes = unroll.clamp(1, 4);
@@ -122,13 +122,13 @@ fn try_execute_lowered_vector_kernel(
                                     let x1 = unsafe { read_buffer_f64(input_view, i + lane + 1) };
                                     if let Some((y0, y1)) =
                                         lowered_unary_eval_pair(op, x0, x1, mode)
-                                        {
-                                            log_simd_math_exec_once(entry, op);
-                                            lane_acc[lane] += y0;
-                                            lane_acc[lane + 1] += y1;
-                                            lane += 2;
-                                            continue;
-                                        }
+                                    {
+                                        log_simd_math_exec_once(entry, op);
+                                        lane_acc[lane] += y0;
+                                        lane_acc[lane + 1] += y1;
+                                        lane += 2;
+                                        continue;
+                                    }
                                 }
                                 lane_acc[lane] += eval_unary(op, input_view, i + lane);
                                 lane += 1;
@@ -211,7 +211,7 @@ fn try_execute_lowered_vector_kernel(
                         while i + lanes <= len {
                             for lane in 0..lanes {
                                 lane_any[lane] |=
-                                eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_any[..lanes].iter().any(|v| *v) {
                                 return Some(LoweredVectorResult::Reduced(1.0));
@@ -232,7 +232,7 @@ fn try_execute_lowered_vector_kernel(
                         while i + lanes <= len {
                             for lane in 0..lanes {
                                 lane_all[lane] &=
-                                eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
+                                    eval_binary(op, lhs_view, rhs_view, i + lane) != 0.0;
                             }
                             if lane_all[..lanes].iter().any(|v| !*v) {
                                 return Some(LoweredVectorResult::Reduced(0.0));
@@ -261,7 +261,7 @@ fn try_execute_lowered_vector_kernel(
                                 let idx0 = i + lane;
                                 let idx1 = i + lane + 1;
                                 let (v0, v1) =
-                                lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
+                                    lowered_expr_eval_pair(&expr, views, idx0, idx1, mode)?;
                                 lane_acc[lane] += v0;
                                 lane_acc[lane + 1] += v1;
                                 lane += 2;
@@ -285,7 +285,7 @@ fn try_execute_lowered_vector_kernel(
                     while i + lanes <= len {
                         for lane in 0..lanes {
                             lane_any[lane] |=
-                            lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
                         }
                         if lane_any[..lanes].iter().any(|v| *v) {
                             return Some(LoweredVectorResult::Reduced(1.0));
@@ -306,7 +306,7 @@ fn try_execute_lowered_vector_kernel(
                     while i + lanes <= len {
                         for lane in 0..lanes {
                             lane_all[lane] &=
-                            lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
+                                lowered_expr_eval(&expr, views, i + lane, mode)? != 0.0;
                         }
                         if lane_all[..lanes].iter().any(|v| !*v) {
                             return Some(LoweredVectorResult::Reduced(0.0));
@@ -498,16 +498,16 @@ fn vec_f64_to_py(py: pyo3::Python, values: &[f64], return_type: JitReturnType) -
             let byte_slice = unsafe {
                 std::slice::from_raw_parts(
                     values.as_ptr() as *const u8,
-                                           values.len() * std::mem::size_of::<f64>(),
+                    values.len() * std::mem::size_of::<f64>(),
                 )
             };
             let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
             let array_mod = py.import("array").unwrap();
             let array_obj = array_mod
-            .getattr("array")
-            .unwrap()
-            .call1(("d", py_bytes))
-            .unwrap();
+                .getattr("array")
+                .unwrap()
+                .call1(("d", py_bytes))
+                .unwrap();
             array_obj.into_py(py)
         }
         JitReturnType::Int => {
@@ -527,11 +527,11 @@ fn execute_views(
     py: pyo3::Python,
     entry: &JitEntry,
     f: extern "C" fn(*const f64) -> f64,
-                 loop_unroll: usize,
-                 views: &[BufferView],
-                 len: usize,
-                 arg_count: usize,
-                 log_path: &'static str,
+    loop_unroll: usize,
+    views: &[BufferView],
+    len: usize,
+    arg_count: usize,
+    log_path: &'static str,
 ) -> pyo3::PyResult<pyo3::PyObject> {
     log_unroll_exec_once(entry, len, loop_unroll, log_path);
     if let Some(lowered) = try_execute_lowered_vector_kernel(entry, views, len, loop_unroll) {
@@ -671,8 +671,8 @@ fn try_exec_trailing_count(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                           loop_unroll: usize,
-                           arg_count: usize,
+    loop_unroll: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     if arg_count != entry.arg_count + 1 {
         return Ok(None);
@@ -700,11 +700,7 @@ fn try_exec_trailing_count(
     if entry.arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
         for i in 0..entry.arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             stack_args[i] = val;
         }
         let mut produced = 0;
@@ -721,11 +717,7 @@ fn try_exec_trailing_count(
     } else {
         let mut heap_args = Vec::with_capacity(entry.arg_count);
         for i in 0..entry.arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             heap_args.push(val);
         }
         let mut produced = 0;
@@ -744,7 +736,7 @@ fn try_exec_trailing_count(
     let byte_slice = unsafe {
         std::slice::from_raw_parts(
             results.as_ptr() as *const u8,
-                                   results.len() * std::mem::size_of::<f64>(),
+            results.len() * std::mem::size_of::<f64>(),
         )
     };
     let py_bytes = pyo3::types::PyBytes::new(py, byte_slice);
@@ -759,15 +751,18 @@ fn try_exec_profiled(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                     loop_unroll: usize,
-                     arg_count: usize,
+    loop_unroll: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     let Some(profile) = lookup_exec_profile(entry.func_ptr) else {
         return Ok(None);
     };
 
     match profile {
-        JitExecProfile::PackedBuffer { arg_count: expected, elem } => {
+        JitExecProfile::PackedBuffer {
+            arg_count: expected,
+            elem,
+        } => {
             if arg_count == 1 && entry.arg_count == expected {
                 if let Ok(item) = args.get_item(0) {
                     if let Some(view) = unsafe { open_typed_buffer(item) } {
@@ -789,7 +784,10 @@ fn try_exec_profiled(
                 }
             }
         }
-        JitExecProfile::VectorizedBuffers { arg_count: expected, elem_types } => {
+        JitExecProfile::VectorizedBuffers {
+            arg_count: expected,
+            elem_types,
+        } => {
             if arg_count == expected && expected == elem_types.len() {
                 let mut views = Vec::with_capacity(expected);
                 let mut common_len: Option<usize> = None;
@@ -820,7 +818,16 @@ fn try_exec_profiled(
 
                 if matched {
                     let len = common_len.unwrap_or(0);
-                    let result = execute_views(py, entry, f, loop_unroll, &views, len, expected, "profiled-vector-buffers")?;
+                    let result = execute_views(
+                        py,
+                        entry,
+                        f,
+                        loop_unroll,
+                        &views,
+                        len,
+                        expected,
+                        "profiled-vector-buffers",
+                    )?;
                     return Ok(Some(result));
                 }
             }
@@ -832,7 +839,7 @@ fn try_exec_profiled(
                     let mut stack_args = [0.0_f64; MAX_FAST_ARGS];
                     let mut scalar_mismatch = false;
                     for i in 0..arg_count {
-                        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
+                        let item = unsafe { pyo3::ffi::PyTuple_GetItem(args.as_ptr(), i as isize) };
                         let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
                         if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
                             unsafe { pyo3::ffi::PyErr_Clear() };
@@ -858,7 +865,7 @@ fn try_exec_single_packed_buffer(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                                 arg_count: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     if arg_count == 1 && entry.arg_count > 1 {
         if let Ok(item) = args.get_item(0) {
@@ -903,8 +910,8 @@ fn try_exec_vectorized_buffers(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                               loop_unroll: usize,
-                               arg_count: usize,
+    loop_unroll: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     if arg_count == entry.arg_count && arg_count > 0 {
         let mut views = Vec::with_capacity(arg_count);
@@ -945,7 +952,16 @@ fn try_exec_vectorized_buffers(
                     },
                 );
 
-                let result = execute_views(py, entry, f, loop_unroll, &views, len, arg_count, "generic-vector-buffers")?;
+                let result = execute_views(
+                    py,
+                    entry,
+                    f,
+                    loop_unroll,
+                    &views,
+                    len,
+                    arg_count,
+                    "generic-vector-buffers",
+                )?;
                 return Ok(Some(result));
             }
         }
@@ -959,14 +975,14 @@ fn try_exec_sequence_fallback(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                              loop_unroll: usize,
-                              arg_count: usize,
+    loop_unroll: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     if arg_count == 1 && entry.arg_count == 1 {
         if let Ok(item) = args.get_item(0) {
             let is_text_like = item.is_instance_of::<pyo3::types::PyString>()
-            || item.is_instance_of::<pyo3::types::PyBytes>()
-            || item.is_instance_of::<pyo3::types::PyByteArray>();
+                || item.is_instance_of::<pyo3::types::PyBytes>()
+                || item.is_instance_of::<pyo3::types::PyByteArray>();
 
             if !is_text_like {
                 if let Ok(len) = item.len() {
@@ -1033,7 +1049,7 @@ fn try_exec_reduction_iterator(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                               arg_count: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<Option<pyo3::PyObject>> {
     if arg_count == 1 && entry.arg_count == 1 && entry.reduction != ReductionMode::None {
         if let Ok(item) = args.get_item(0) {
@@ -1062,7 +1078,7 @@ fn exec_scalar_args(
     entry: &JitEntry,
     args: &pyo3::types::PyTuple,
     f: extern "C" fn(*const f64) -> f64,
-                    arg_count: usize,
+    arg_count: usize,
 ) -> pyo3::PyResult<pyo3::PyObject> {
     if arg_count != entry.arg_count {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1074,11 +1090,7 @@ fn exec_scalar_args(
     if arg_count <= MAX_FAST_ARGS {
         let mut stack_args: [f64; MAX_FAST_ARGS] = [0.0; MAX_FAST_ARGS];
         for i in 0..arg_count {
-            let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-            let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-            if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-                return Err(pyo3::PyErr::fetch(py));
-            }
+            let val = args.get_item(i)?.extract::<f64>()?;
             stack_args[i] = val;
         }
         store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);
@@ -1088,11 +1100,7 @@ fn exec_scalar_args(
 
     let mut heap_args = Vec::with_capacity(arg_count);
     for i in 0..arg_count {
-        let item = unsafe { pyo3::ffi::PyTuple_GET_ITEM(args.as_ptr(), i as isize) };
-        let val = unsafe { pyo3::ffi::PyFloat_AsDouble(item) };
-        if val == -1.0 && !unsafe { pyo3::ffi::PyErr_Occurred() }.is_null() {
-            return Err(pyo3::PyErr::fetch(py));
-        }
+        let val = args.get_item(i)?.extract::<f64>()?;
         heap_args.push(val);
     }
     store_exec_profile(entry.func_ptr, JitExecProfile::ScalarArgs);

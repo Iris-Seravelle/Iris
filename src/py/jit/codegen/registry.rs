@@ -10,11 +10,9 @@ use super::JitEntry;
 
 static JIT_FUNC_COUNTER: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 
-static JIT_REGISTRY: OnceCell<std::sync::Mutex<HashMap<usize, JitEntry>>> =
-    OnceCell::new();
+static JIT_REGISTRY: OnceCell<std::sync::Mutex<HashMap<usize, JitEntry>>> = OnceCell::new();
 
-static NAMED_JIT_REGISTRY: OnceCell<std::sync::Mutex<HashMap<String, JitEntry>>> =
-    OnceCell::new();
+static NAMED_JIT_REGISTRY: OnceCell<std::sync::Mutex<HashMap<String, JitEntry>>> = OnceCell::new();
 
 pub fn next_jit_func_id() -> usize {
     JIT_FUNC_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -76,19 +74,7 @@ make_invoke!(iris_jit_invoke_6, a0, a1, a2, a3, a4, a5);
 make_invoke!(iris_jit_invoke_7, a0, a1, a2, a3, a4, a5, a6);
 make_invoke!(iris_jit_invoke_8, a0, a1, a2, a3, a4, a5, a6, a7);
 make_invoke!(iris_jit_invoke_9, a0, a1, a2, a3, a4, a5, a6, a7, a8);
-make_invoke!(
-    iris_jit_invoke_10,
-    a0,
-    a1,
-    a2,
-    a3,
-    a4,
-    a5,
-    a6,
-    a7,
-    a8,
-    a9
-);
+make_invoke!(iris_jit_invoke_10, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
 make_invoke!(
     iris_jit_invoke_11,
     a0,

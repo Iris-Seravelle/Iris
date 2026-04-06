@@ -77,14 +77,12 @@ pub(crate) fn gen_expr(
     match expr {
         Expr::Const(n) => fb.ins().f64const(*n),
         Expr::Var(name) => gen_var(name, fb, ptr, arg_names, locals),
-        Expr::BinOp(lhs, op, rhs) => {
-            gen_binop(lhs, op, rhs, fb, ptr, arg_names, module, locals)
-        }
+        Expr::BinOp(lhs, op, rhs) => gen_binop(lhs, op, rhs, fb, ptr, arg_names, module, locals),
         Expr::UnaryOp(op, sub) => gen_unaryop(*op, sub, fb, ptr, arg_names, module, locals),
         Expr::Call(name, args) => gen_call(name, args, fb, ptr, arg_names, module, locals),
-        Expr::Ternary(cond, then_expr, else_expr) => {
-            gen_ternary(cond, then_expr, else_expr, fb, ptr, arg_names, module, locals)
-        }
+        Expr::Ternary(cond, then_expr, else_expr) => gen_ternary(
+            cond, then_expr, else_expr, fb, ptr, arg_names, module, locals,
+        ),
         Expr::SumOver { .. } => panic!("SumOver should have been transformed before codegen"),
         Expr::AnyOver { .. } => panic!("AnyOver should have been transformed before codegen"),
         Expr::AllOver { .. } => panic!("AllOver should have been transformed before codegen"),
@@ -173,8 +171,8 @@ fn gen_binop(
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::F64));
             let fid = module
-            .declare_function("fmod", Linkage::Import, &sig)
-            .expect("failed to declare fmod");
+                .declare_function("fmod", Linkage::Import, &sig)
+                .expect("failed to declare fmod");
             let local = module.declare_func_in_func(fid, &mut fb.func);
             let call = fb.ins().call(local, &[l, r]);
             fb.inst_results(call)[0]
@@ -193,8 +191,8 @@ fn gen_binop(
                     sig.params.push(AbiParam::new(types::F64));
                     sig.returns.push(AbiParam::new(types::F64));
                     let fid = module
-                    .declare_function("sqrt", Linkage::Import, &sig)
-                    .expect("failed to declare sqrt");
+                        .declare_function("sqrt", Linkage::Import, &sig)
+                        .expect("failed to declare sqrt");
                     let local = module.declare_func_in_func(fid, &mut fb.func);
                     let call = fb.ins().call(local, &[l]);
                     return fb.inst_results(call)[0];
@@ -225,8 +223,8 @@ fn gen_binop(
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::F64));
             let fid = module
-            .declare_function("pow", Linkage::Import, &sig)
-            .expect("failed to declare pow");
+                .declare_function("pow", Linkage::Import, &sig)
+                .expect("failed to declare pow");
             let local = module.declare_func_in_func(fid, &mut fb.func);
             let call = fb.ins().call(local, &[l, r]);
             fb.inst_results(call)[0]
@@ -291,11 +289,11 @@ fn gen_ternary(
     cond: &Expr,
     then_expr: &Expr,
     else_expr: &Expr,
-        fb: &mut FunctionBuilder,
-        ptr: Value,
-        arg_names: &[String],
-        module: &mut JITModule,
-        locals: &HashMap<String, Value>,
+    fb: &mut FunctionBuilder,
+    ptr: Value,
+    arg_names: &[String],
+    module: &mut JITModule,
+    locals: &HashMap<String, Value>,
 ) -> Value {
     let cond_val = gen_expr(cond, fb, ptr, arg_names, module, locals);
     let zero = fb.ins().f64const(0.0);
@@ -329,179 +327,179 @@ fn gen_call(
         || symbol == "continue_on_nan"
         || symbol == "loop_continue_on_nan")
         && args.len() == 1
-        {
-            let value_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-            let is_nan = fb.ins().fcmp(FloatCC::Unordered, value_val, value_val);
-            let sentinel = if symbol == "break_on_nan" || symbol == "loop_break_on_nan" {
-                fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
-            } else {
-                fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
-            };
-            return fb.ins().select(is_nan, sentinel, value_val);
-        }
+    {
+        let value_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+        let is_nan = fb.ins().fcmp(FloatCC::Unordered, value_val, value_val);
+        let sentinel = if symbol == "break_on_nan" || symbol == "loop_break_on_nan" {
+            fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
+        } else {
+            fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
+        };
+        return fb.ins().select(is_nan, sentinel, value_val);
+    }
 
-        if symbol == "let_bind" && args.len() == 3 {
-            if let Expr::Var(var_name) = &args[0] {
-                let v = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
-                let mut new_locals = locals.clone();
-                new_locals.insert(var_name.clone(), v);
-                return gen_expr(&args[2], fb, ptr, arg_names, module, &new_locals);
+    if symbol == "let_bind" && args.len() == 3 {
+        if let Expr::Var(var_name) = &args[0] {
+            let v = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+            let mut new_locals = locals.clone();
+            new_locals.insert(var_name.clone(), v);
+            return gen_expr(&args[2], fb, ptr, arg_names, module, &new_locals);
+        }
+    }
+
+    if symbol == "if_else" && args.len() == 3 {
+        let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+        let then_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+        let else_val = gen_expr(&args[2], fb, ptr, arg_names, module, locals);
+        let zero = fb.ins().f64const(0.0);
+        let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+        return fb.ins().select(cond_true, then_val, else_val);
+    }
+
+    if let Some(alias) = resolve_symbol_alias(&symbol, args.len()) {
+        match alias {
+            SymbolAlias::Identity => {
+                return gen_expr(&args[0], fb, ptr, arg_names, module, locals);
             }
-        }
-
-        if symbol == "if_else" && args.len() == 3 {
-            let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-            let then_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
-            let else_val = gen_expr(&args[2], fb, ptr, arg_names, module, locals);
-            let zero = fb.ins().f64const(0.0);
-            let cond_true = fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
-            return fb.ins().select(cond_true, then_val, else_val);
-        }
-
-        if let Some(alias) = resolve_symbol_alias(&symbol, args.len()) {
-            match alias {
-                SymbolAlias::Identity => {
-                    return gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+            SymbolAlias::Rename(target) => {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
                 }
-                SymbolAlias::Rename(target) => {
-                    let mut arg_vals = Vec::with_capacity(args.len());
-                    for a in args {
-                        arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
-                    }
-                    let mut sig = module.make_signature();
-                    for _ in 0..arg_vals.len() {
-                        sig.params.push(AbiParam::new(types::F64));
-                    }
-                    sig.returns.push(AbiParam::new(types::F64));
-                    let func_id = module
+                let mut sig = module.make_signature();
+                for _ in 0..arg_vals.len() {
+                    sig.params.push(AbiParam::new(types::F64));
+                }
+                sig.returns.push(AbiParam::new(types::F64));
+                let func_id = module
                     .declare_function(target, Linkage::Import, &sig)
                     .expect("failed to declare external function");
-                    let local = module.declare_func_in_func(func_id, &mut fb.func);
-                    let call = fb.ins().call(local, &arg_vals);
-                    return fb.inst_results(call)[0];
-                }
+                let local = module.declare_func_in_func(func_id, &mut fb.func);
+                let call = fb.ins().call(local, &arg_vals);
+                return fb.inst_results(call)[0];
             }
         }
+    }
 
-        if symbol == "min" && args.len() == 2 {
-            let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-            let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
-            let cond = fb.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
-            return fb.ins().select(cond, a, b);
-        }
+    if symbol == "min" && args.len() == 2 {
+        let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+        let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+        let cond = fb.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
+        return fb.ins().select(cond, a, b);
+    }
 
-        if symbol == "max" && args.len() == 2 {
-            let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-            let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
-            let cond = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
-            return fb.ins().select(cond, a, b);
-        }
+    if symbol == "max" && args.len() == 2 {
+        let a = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+        let b = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+        let cond = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
+        return fb.ins().select(cond, a, b);
+    }
 
-        if let Some(named) = lookup_named_jit(&symbol) {
-            if named.arg_count == args.len() {
-                let helper_name = match args.len() {
-                    0 => Some("iris_jit_invoke_0"),
-                    1 => Some("iris_jit_invoke_1"),
-                    2 => Some("iris_jit_invoke_2"),
-                    3 => Some("iris_jit_invoke_3"),
-                    4 => Some("iris_jit_invoke_4"),
-                    5 => Some("iris_jit_invoke_5"),
-                    6 => Some("iris_jit_invoke_6"),
-                    7 => Some("iris_jit_invoke_7"),
-                    8 => Some("iris_jit_invoke_8"),
-                    9 => Some("iris_jit_invoke_9"),
-                    10 => Some("iris_jit_invoke_10"),
-                    11 => Some("iris_jit_invoke_11"),
-                    12 => Some("iris_jit_invoke_12"),
-                    13 => Some("iris_jit_invoke_13"),
-                    14 => Some("iris_jit_invoke_14"),
-                    15 => Some("iris_jit_invoke_15"),
-                    16 => Some("iris_jit_invoke_16"),
-                    _ => None,
-                };
+    if let Some(named) = lookup_named_jit(&symbol) {
+        if named.arg_count == args.len() {
+            let helper_name = match args.len() {
+                0 => Some("iris_jit_invoke_0"),
+                1 => Some("iris_jit_invoke_1"),
+                2 => Some("iris_jit_invoke_2"),
+                3 => Some("iris_jit_invoke_3"),
+                4 => Some("iris_jit_invoke_4"),
+                5 => Some("iris_jit_invoke_5"),
+                6 => Some("iris_jit_invoke_6"),
+                7 => Some("iris_jit_invoke_7"),
+                8 => Some("iris_jit_invoke_8"),
+                9 => Some("iris_jit_invoke_9"),
+                10 => Some("iris_jit_invoke_10"),
+                11 => Some("iris_jit_invoke_11"),
+                12 => Some("iris_jit_invoke_12"),
+                13 => Some("iris_jit_invoke_13"),
+                14 => Some("iris_jit_invoke_14"),
+                15 => Some("iris_jit_invoke_15"),
+                16 => Some("iris_jit_invoke_16"),
+                _ => None,
+            };
 
-                if let Some(helper_name) = helper_name {
-                    let mut arg_vals = Vec::with_capacity(args.len() + 1);
-                    arg_vals.push(fb.ins().iconst(types::I64, named.func_ptr as i64));
-                    for a in args {
-                        arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
-                    }
+            if let Some(helper_name) = helper_name {
+                let mut arg_vals = Vec::with_capacity(args.len() + 1);
+                arg_vals.push(fb.ins().iconst(types::I64, named.func_ptr as i64));
+                for a in args {
+                    arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
+                }
 
-                    let mut sig = module.make_signature();
-                    sig.params.push(AbiParam::new(types::I64));
-                    for _ in 0..args.len() {
-                        sig.params.push(AbiParam::new(types::F64));
-                    }
-                    sig.returns.push(AbiParam::new(types::F64));
-                    let func_id = module
+                let mut sig = module.make_signature();
+                sig.params.push(AbiParam::new(types::I64));
+                for _ in 0..args.len() {
+                    sig.params.push(AbiParam::new(types::F64));
+                }
+                sig.returns.push(AbiParam::new(types::F64));
+                let func_id = module
                     .declare_function(helper_name, Linkage::Import, &sig)
                     .expect("failed to declare named jit invoke helper");
-                    let local = module.declare_func_in_func(func_id, &mut fb.func);
-                    let call = fb.ins().call(local, &arg_vals);
-                    return fb.inst_results(call)[0];
-                }
+                let local = module.declare_func_in_func(func_id, &mut fb.func);
+                let call = fb.ins().call(local, &arg_vals);
+                return fb.inst_results(call)[0];
             }
         }
+    }
 
-        if (symbol == "break_if"
+    if (symbol == "break_if"
+        || symbol == "loop_break_if"
+        || symbol == "break_when"
+        || symbol == "loop_break_when"
+        || symbol == "break_unless"
+        || symbol == "loop_break_unless"
+        || symbol == "continue_if"
+        || symbol == "loop_continue_if"
+        || symbol == "continue_when"
+        || symbol == "loop_continue_when"
+        || symbol == "continue_unless"
+        || symbol == "loop_continue_unless")
+        && args.len() == 2
+    {
+        let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
+        let value_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
+        let zero = fb.ins().f64const(0.0);
+        let cond_true = if symbol == "break_unless"
+            || symbol == "loop_break_unless"
+            || symbol == "continue_unless"
+            || symbol == "loop_continue_unless"
+        {
+            fb.ins().fcmp(FloatCC::Equal, cond_val, zero)
+        } else {
+            fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+        };
+        let sentinel = if symbol == "break_if"
             || symbol == "loop_break_if"
             || symbol == "break_when"
             || symbol == "loop_break_when"
             || symbol == "break_unless"
             || symbol == "loop_break_unless"
-            || symbol == "continue_if"
-            || symbol == "loop_continue_if"
-            || symbol == "continue_when"
-            || symbol == "loop_continue_when"
-            || symbol == "continue_unless"
-            || symbol == "loop_continue_unless")
-            && args.len() == 2
-            {
-                let cond_val = gen_expr(&args[0], fb, ptr, arg_names, module, locals);
-                let value_val = gen_expr(&args[1], fb, ptr, arg_names, module, locals);
-                let zero = fb.ins().f64const(0.0);
-                let cond_true = if symbol == "break_unless"
-                || symbol == "loop_break_unless"
-                || symbol == "continue_unless"
-                || symbol == "loop_continue_unless"
-                {
-                    fb.ins().fcmp(FloatCC::Equal, cond_val, zero)
-                } else {
-                    fb.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
-                };
-                let sentinel = if symbol == "break_if"
-                || symbol == "loop_break_if"
-                || symbol == "break_when"
-                || symbol == "loop_break_when"
-                || symbol == "break_unless"
-                || symbol == "loop_break_unless"
-                {
-                    fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
-                } else {
-                    fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
-                };
-                return fb.ins().select(cond_true, sentinel, value_val);
-            }
+        {
+            fb.ins().f64const(f64::from_bits(BREAK_SENTINEL_BITS))
+        } else {
+            fb.ins().f64const(f64::from_bits(CONTINUE_SENTINEL_BITS))
+        };
+        return fb.ins().select(cond_true, sentinel, value_val);
+    }
 
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for a in args {
-                arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
-            }
-            let mut symbol = symbol;
-            if symbol == "abs" {
-                symbol = "fabs".to_string();
-            }
-            let mut sig = module.make_signature();
-            for _ in 0..arg_vals.len() {
-                sig.params.push(AbiParam::new(types::F64));
-            }
-            sig.returns.push(AbiParam::new(types::F64));
-            let func_id = module
-            .declare_function(&symbol, Linkage::Import, &sig)
-            .expect("failed to declare external function");
-            let local = module.declare_func_in_func(func_id, &mut fb.func);
-            let call = fb.ins().call(local, &arg_vals);
-            fb.inst_results(call)[0]
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for a in args {
+        arg_vals.push(gen_expr(a, fb, ptr, arg_names, module, locals));
+    }
+    let mut symbol = symbol;
+    if symbol == "abs" {
+        symbol = "fabs".to_string();
+    }
+    let mut sig = module.make_signature();
+    for _ in 0..arg_vals.len() {
+        sig.params.push(AbiParam::new(types::F64));
+    }
+    sig.returns.push(AbiParam::new(types::F64));
+    let func_id = module
+        .declare_function(&symbol, Linkage::Import, &sig)
+        .expect("failed to declare external function");
+    let local = module.declare_func_in_func(func_id, &mut fb.func);
+    let call = fb.ins().call(local, &arg_vals);
+    fb.inst_results(call)[0]
 }
 
 fn gen_any_all_while(
@@ -605,11 +603,11 @@ fn gen_any_all_while(
         let budget_next = fb.ins().iadd_imm(budget_val, -1);
         let body_bits = fb.ins().bitcast(types::I64, body_val);
         let is_break_sentinel =
-        fb.ins()
-        .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
+            fb.ins()
+                .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
         let is_continue_sentinel =
-        fb.ins()
-        .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
+            fb.ins()
+                .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
         let stop_now = fb.ins().bor(break_true, is_break_sentinel);
         let skip_body = fb.ins().bor(continue_true, is_continue_sentinel);
 
@@ -622,7 +620,7 @@ fn gen_any_all_while(
             let any_exit_block = fb.create_block();
             fb.ins().brnz(stop_any, any_exit_block, &[]);
             fb.ins()
-            .jump(continue_block, &[step_val, zero, budget_next]);
+                .jump(continue_block, &[step_val, zero, budget_next]);
 
             fb.switch_to_block(any_exit_block);
             let exit_val = fb.ins().select(stop_now, acc_val, one);
@@ -649,7 +647,7 @@ fn gen_any_all_while(
         let next_acc = fb.block_params(continue_block)[1];
         let next_budget = fb.block_params(continue_block)[2];
         fb.ins()
-        .jump(loop_block, &[next_iter, next_acc, next_budget]);
+            .jump(loop_block, &[next_iter, next_acc, next_budget]);
         fb.seal_block(body_block);
         fb.seal_block(budget_exit_block);
         fb.seal_block(budget_ok_block);
@@ -761,11 +759,11 @@ fn gen_sum_while(
         let budget_next = fb.ins().iadd_imm(budget_val, -1);
         let body_bits = fb.ins().bitcast(types::I64, body_val);
         let is_break_sentinel =
-        fb.ins()
-        .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
+            fb.ins()
+                .icmp_imm(IntCC::Equal, body_bits, BREAK_SENTINEL_BITS as i64);
         let is_continue_sentinel =
-        fb.ins()
-        .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
+            fb.ins()
+                .icmp_imm(IntCC::Equal, body_bits, CONTINUE_SENTINEL_BITS as i64);
         let stop_now = fb.ins().bor(break_true, is_break_sentinel);
         let skip_body = fb.ins().bor(continue_true, is_continue_sentinel);
 
@@ -774,7 +772,7 @@ fn gen_sum_while(
         let sum_break_block = fb.create_block();
         fb.ins().brnz(stop_now, sum_break_block, &[]);
         fb.ins()
-        .jump(continue_block, &[step_val, next_acc, budget_next]);
+            .jump(continue_block, &[step_val, next_acc, budget_next]);
         fb.switch_to_block(sum_break_block);
         fb.ins().jump(exit_block, &[acc_val]);
         fb.seal_block(sum_break_block);
@@ -784,7 +782,7 @@ fn gen_sum_while(
         let next_acc = fb.block_params(continue_block)[1];
         let next_budget = fb.block_params(continue_block)[2];
         fb.ins()
-        .jump(loop_block, &[next_iter, next_acc, next_budget]);
+            .jump(loop_block, &[next_iter, next_acc, next_budget]);
 
         fb.seal_block(body_block);
         fb.seal_block(budget_exit_block);

@@ -1,10 +1,7 @@
 // src/py/jit/codegen/buffer.rs
 
-use std::ffi::CStr;
 use crate::py::jit::codegen::BufferElemType;
-
-#[cfg(feature = "pyo3")]
-use pyo3::AsPyPointer;
+use std::ffi::CStr;
 
 // helper for zero-copy buffer access used by the JIT runner
 pub(crate) struct BufferView {
@@ -108,9 +105,9 @@ pub(crate) unsafe fn parse_buffer_elem_type(view: &pyo3::ffi::Py_buffer) -> Opti
 
     let fmt = CStr::from_ptr(view.format).to_str().ok()?;
     let code = fmt
-    .chars()
-    .rev()
-    .find(|ch| ch.is_ascii_alphabetic() || *ch == '?')?;
+        .chars()
+        .rev()
+        .find(|ch| ch.is_ascii_alphabetic() || *ch == '?')?;
     to_elem_type(code, itemsize)
 }
 
@@ -146,8 +143,8 @@ pub(crate) unsafe fn open_typed_buffer(obj: &pyo3::PyAny) -> Option<BufferView> 
     let len = total_bytes / itemsize;
     Some(BufferView {
         view,
-         elem_type,
-         len,
+        elem_type,
+        len,
     })
 }
 
