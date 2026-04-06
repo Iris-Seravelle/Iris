@@ -67,3 +67,6 @@ panic = "abort"
 incremental = true
 lto = false
 codegen-units = 256
+
+[profile.test]
+panic = "unwind"
