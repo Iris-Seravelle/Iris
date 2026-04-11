@@ -1080,9 +1080,11 @@ impl PyRuntime {
     }
 
     fn send(&self, py: Python, pid: u64, data: &PyAny) -> PyResult<bool> {
+        let _ = py;
         let msg = py_any_to_bytes(data)?;
-        let rt = self.inner.clone();
-        Ok(py.allow_threads(move || rt.send_user(pid, msg).is_ok()))
+        // Keep GIL for single-message sends so hot push-actor loops do not
+        // interleave callback execution on every call.
+        Ok(self.inner.send_user(pid, msg).is_ok())
     }
 
     /// Batch-send bytes-like payloads to a PID.

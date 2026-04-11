@@ -212,7 +212,7 @@ mod tests {
                 Arc::new(AtomicU64::new(0)),
                 Arc::new(rt.clone()),
             )
-                .expect("max_threads=0 should force shared pool mode without strict error");
+            .expect("max_threads=0 should force shared pool mode without strict error");
             assert!(ch.is_none());
         });
     }

@@ -216,6 +216,82 @@ async fn py_send_many_accepts_bytes_like_objects() {
 }
 
 #[tokio::test]
+async fn py_send_push_loop_does_not_yield_gil_mid_burst_regression() {
+    let (rt_py, pid, list_obj, old_switch): (PyObject, u64, PyObject, f64) = Python::with_gil(
+        |py| {
+            let module = iris::py::make_module(py).expect("make_module");
+            let runtime_type = module
+                .as_ref(py)
+                .getattr("PyRuntime")
+                .expect("no PyRuntime type");
+            let rt = runtime_type.call0().expect("construct PyRuntime");
+
+            let locals = pyo3::types::PyDict::new(py);
+            py.run(
+                "import sys\nold = sys.getswitchinterval()\nsys.setswitchinterval(1.0)\nitems = []\ndef cb(b):\n    items.append(b)\n",
+                Some(locals),
+                Some(locals),
+            )
+            .unwrap();
+
+            let cb = locals.get_item("cb").unwrap().unwrap();
+            let list_obj: PyObject = locals.get_item("items").unwrap().unwrap().into_py(py);
+            let old_switch: f64 = locals.get_item("old").unwrap().unwrap().extract().unwrap();
+
+            let pid: u64 = rt
+                .call_method1("spawn_py_handler", (cb, 100usize, false))
+                .unwrap()
+                .extract()
+                .unwrap();
+
+            for _ in 0..2000usize {
+                let ok: bool = rt
+                    .call_method1("send", (pid, PyBytes::new(py, b"x")))
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert!(ok);
+            }
+
+            let len_during_burst: usize = list_obj
+                .as_ref(py)
+                .downcast::<pyo3::types::PyList>()
+                .unwrap()
+                .len();
+            assert_eq!(
+                len_during_burst, 0,
+                "callbacks ran during send burst (send likely yielded GIL)"
+            );
+
+            (rt.into_py(py), pid, list_obj, old_switch)
+        },
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    Python::with_gil(|py| {
+        let rt = rt_py.as_ref(py);
+        let _ = rt; // Keep runtime alive while assertions run.
+
+        let items = list_obj
+            .as_ref(py)
+            .downcast::<pyo3::types::PyList>()
+            .unwrap();
+        assert!(
+            items.len() > 0,
+            "expected messages to be eventually processed after burst"
+        );
+
+        let sys = py.import("sys").unwrap();
+        sys.call_method1("setswitchinterval", (old_switch,))
+            .unwrap();
+
+        // Cleanup spawned actor.
+        let _ = rt.call_method1("stop", (pid,));
+    });
+}
+
+#[tokio::test]
 async fn py_runtime_spawn_and_send() {
     // create a single PyRuntime instance and keep it alive across await points
     let rt_py = Python::with_gil(|py| {
