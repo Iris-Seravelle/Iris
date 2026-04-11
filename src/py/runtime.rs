@@ -4,6 +4,7 @@
 
 use bytes;
 use pyo3::prelude::*;
+use pyo3::types::PyByteArray;
 use pyo3::types::PyBytes;
 use pyo3_asyncio::tokio::future_into_py;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +40,24 @@ use crate::vortex::VortexGhostPolicy;
 #[pyclass]
 pub struct PyRuntime {
     pub(crate) inner: std::sync::Arc<Runtime>,
+}
+
+fn py_any_to_bytes(data: &PyAny) -> PyResult<bytes::Bytes> {
+    if let Ok(py_bytes) = data.downcast::<PyBytes>() {
+        return Ok(bytes::Bytes::copy_from_slice(py_bytes.as_bytes()));
+    }
+
+    if let Ok(py_bytearray) = data.downcast::<PyByteArray>() {
+        let raw = unsafe { py_bytearray.as_bytes() };
+        return Ok(bytes::Bytes::copy_from_slice(raw));
+    }
+
+    let v: Vec<u8> = data.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "expected a bytes-like object (bytes, bytearray, memoryview)",
+        )
+    })?;
+    Ok(bytes::Bytes::from(v))
 }
 
 #[pymethods]
@@ -329,8 +348,8 @@ impl PyRuntime {
     }
 
     /// Phase 5: Send a binary payload to a PID on a remote node.
-    fn send_remote(&self, addr: String, pid: u64, data: &PyBytes) -> PyResult<()> {
-        let bytes = bytes::Bytes::copy_from_slice(data.as_bytes());
+    fn send_remote(&self, addr: String, pid: u64, data: &PyAny) -> PyResult<()> {
+        let bytes = py_any_to_bytes(data)?;
         self.inner.send_remote(addr, pid, bytes);
         Ok(())
     }
@@ -455,7 +474,7 @@ impl PyRuntime {
                         crate::mailbox::Message::User(bytes) => {
                             let task = PoolTask::Execute {
                                 behavior: b.clone(),
-                                bytes: bytes.clone(),
+                                bytes,
                                 pid_holder: pid_holder.clone(),
                                 rt: rt.clone(),
                             };
@@ -479,7 +498,7 @@ impl PyRuntime {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::Execute {
                                     behavior: b.clone(),
-                                    bytes: bytes.clone(),
+                                    bytes,
                                     pid_holder: pid_holder.clone(),
                                     rt: rt.clone(),
                                 };
@@ -686,7 +705,7 @@ impl PyRuntime {
                             crate::mailbox::Message::User(bytes) => {
                                 let task = PoolTask::Execute {
                                     behavior: behavior.clone(),
-                                    bytes: bytes.clone(),
+                                    bytes,
                                     pid_holder: pid_holder.clone(),
                                     rt: rt.clone(),
                                 };
@@ -709,7 +728,7 @@ impl PyRuntime {
                                 if let Some(pool) = GIL_WORKER_POOL.get() {
                                     let task = PoolTask::Execute {
                                         behavior: behavior.clone(),
-                                        bytes: bytes.clone(),
+                                        bytes,
                                         pid_holder: pid_holder.clone(),
                                         rt: rt.clone(),
                                     };
@@ -870,7 +889,7 @@ impl PyRuntime {
                         crate::mailbox::Message::User(bytes) => {
                             let task = PoolTask::Execute {
                                 behavior: behavior.clone(),
-                                bytes: bytes.clone(),
+                                bytes,
                                 pid_holder: pid_holder.clone(),
                                 rt: rt.clone(),
                             };
@@ -893,7 +912,7 @@ impl PyRuntime {
                             if let Some(pool) = GIL_WORKER_POOL.get() {
                                 let task = PoolTask::Execute {
                                     behavior: behavior.clone(),
-                                    bytes: bytes.clone(),
+                                    bytes,
                                     pid_holder: pid_holder.clone(),
                                     rt: rt.clone(),
                                 };
@@ -1063,14 +1082,14 @@ impl PyRuntime {
         Ok(pid)
     }
 
-    fn send(&self, pid: u64, data: &PyBytes) -> PyResult<bool> {
-        let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
+    fn send(&self, pid: u64, data: &PyAny) -> PyResult<bool> {
+        let msg = py_any_to_bytes(data)?;
         Ok(self.inner.send_user(pid, msg).is_ok())
     }
 
     /// Schedule a one-shot send from Python. Returns a numeric timer id.
-    fn send_after(&self, pid: u64, delay_ms: u64, data: &PyBytes) -> PyResult<u64> {
-        let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
+    fn send_after(&self, pid: u64, delay_ms: u64, data: &PyAny) -> PyResult<u64> {
+        let msg = py_any_to_bytes(data)?;
         let id = self
             .inner
             .send_after(pid, delay_ms, crate::mailbox::Message::User(msg));
@@ -1078,8 +1097,8 @@ impl PyRuntime {
     }
 
     /// Schedule a repeating interval send from Python. Returns a numeric timer id.
-    fn send_interval(&self, pid: u64, interval_ms: u64, data: &PyBytes) -> PyResult<u64> {
-        let msg = bytes::Bytes::copy_from_slice(data.as_bytes());
+    fn send_interval(&self, pid: u64, interval_ms: u64, data: &PyAny) -> PyResult<u64> {
+        let msg = py_any_to_bytes(data)?;
         let id = self
             .inner
             .send_interval(pid, interval_ms, crate::mailbox::Message::User(msg));

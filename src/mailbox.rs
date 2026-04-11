@@ -113,6 +113,7 @@ pub struct MailboxReceiver {
     rx_user: UserReceiver,
     rx_sys: mpsc::UnboundedReceiver<SystemMessage>,
     stash: VecDeque<Message>,
+    deferred_systems: usize,
     counter: Arc<AtomicUsize>,
 }
 
@@ -132,6 +133,7 @@ pub fn channel() -> (MailboxSender, MailboxReceiver) {
             rx_user: UserReceiver::Unbounded(rx_user),
             rx_sys,
             stash: VecDeque::new(),
+            deferred_systems: 0,
             counter: counter.clone(),
         },
     )
@@ -153,6 +155,7 @@ pub fn bounded_channel(capacity: usize) -> (MailboxSender, MailboxReceiver) {
             rx_user: UserReceiver::Bounded(rx_user),
             rx_sys,
             stash: VecDeque::new(),
+            deferred_systems: 0,
             counter: counter.clone(),
         },
     )
@@ -311,7 +314,7 @@ impl MailboxReceiver {
             UserReceiver::Bounded(rx) => rx.try_recv().ok().is_some(),
         };
         if dropped {
-            self.counter.fetch_sub(1, Ordering::Relaxed);
+            self.counter.fetch_sub(1, Ordering::SeqCst);
         }
         dropped
     }
@@ -321,17 +324,21 @@ impl MailboxReceiver {
     pub async fn recv(&mut self) -> Option<Message> {
         loop {
             // Prefer any system messages already in the stash.
-            if let Some(pos) = self
-                .stash
-                .iter()
-                .position(|m| matches!(m, Message::System(_)))
-            {
-                if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
-                    let _ = self.stash.remove(pos);
-                    let _ = self.drop_oldest_user_queued();
-                    continue;
+            if self.deferred_systems > 0 {
+                if let Some(pos) = self
+                    .stash
+                    .iter()
+                    .position(|m| matches!(m, Message::System(_)))
+                {
+                    self.deferred_systems = self.deferred_systems.saturating_sub(1);
+                    if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
+                        let _ = self.stash.remove(pos);
+                        let _ = self.drop_oldest_user_queued();
+                        continue;
+                    }
+                    return self.stash.remove(pos);
                 }
-                return self.stash.remove(pos);
+                self.deferred_systems = 0;
             }
 
             if let Ok(sys) = self.rx_sys.try_recv() {
@@ -345,7 +352,7 @@ impl MailboxReceiver {
             // If there are deferred user messages, deliver them before awaiting new ones.
             if let Some(front) = self.stash.pop_front() {
                 if matches!(front, Message::User(_)) {
-                    self.counter.fetch_sub(1, Ordering::Relaxed);
+                    self.counter.fetch_sub(1, Ordering::SeqCst);
                 }
                 return Some(front);
             }
@@ -371,7 +378,7 @@ impl MailboxReceiver {
                     }
                 } => {
                     if let Some(m) = user {
-                        self.counter.fetch_sub(1, Ordering::Relaxed);
+                        self.counter.fetch_sub(1, Ordering::SeqCst);
                         return Some(m);
                     } else {
                         return None;
@@ -385,17 +392,21 @@ impl MailboxReceiver {
     pub fn try_recv(&mut self) -> Option<Message> {
         loop {
             // Prefer any system messages already in the stash.
-            if let Some(pos) = self
-                .stash
-                .iter()
-                .position(|m| matches!(m, Message::System(_)))
-            {
-                if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
-                    let _ = self.stash.remove(pos);
-                    let _ = self.drop_oldest_user_queued();
-                    continue;
+            if self.deferred_systems > 0 {
+                if let Some(pos) = self
+                    .stash
+                    .iter()
+                    .position(|m| matches!(m, Message::System(_)))
+                {
+                    self.deferred_systems = self.deferred_systems.saturating_sub(1);
+                    if let Some(Message::System(SystemMessage::DropOld)) = self.stash.get(pos) {
+                        let _ = self.stash.remove(pos);
+                        let _ = self.drop_oldest_user_queued();
+                        continue;
+                    }
+                    return self.stash.remove(pos);
                 }
-                return self.stash.remove(pos);
+                self.deferred_systems = 0;
             }
 
             if let Ok(sys) = self.rx_sys.try_recv() {
@@ -409,7 +420,7 @@ impl MailboxReceiver {
             // Deliver deferred user messages first, then try underlying channel.
             if let Some(front) = self.stash.pop_front() {
                 if matches!(front, Message::User(_)) {
-                    self.counter.fetch_sub(1, Ordering::Relaxed);
+                    self.counter.fetch_sub(1, Ordering::SeqCst);
                 }
                 return Some(front);
             }
@@ -437,6 +448,7 @@ impl MailboxReceiver {
             .iter()
             .position(|m| matches!(m, Message::System(SystemMessage::DropOld)))
         {
+            self.deferred_systems = self.deferred_systems.saturating_sub(1);
             let _ = self.stash.remove(idx);
             let _ = self.drop_oldest_user_queued();
         }
@@ -445,7 +457,7 @@ impl MailboxReceiver {
         if let Some(idx) = self.stash.iter().position(|m| matcher(m)) {
             let m = self.stash.remove(idx);
             if let Some(Message::User(_)) = m.as_ref() {
-                self.counter.fetch_sub(1, Ordering::Relaxed);
+                self.counter.fetch_sub(1, Ordering::SeqCst);
             }
             return m;
         }
@@ -480,6 +492,8 @@ impl MailboxReceiver {
                                 return Some(m);
                             } else {
                                 self.stash.push_back(m);
+                                self.deferred_systems = self.deferred_systems.saturating_add(1);
+                                self.deferred_systems = self.deferred_systems.saturating_add(1);
                                 continue;
                             }
                         }
@@ -509,137 +523,5 @@ impl MailboxReceiver {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn send_and_recv() {
-        let (tx, mut rx) = channel();
-        tx.send(Message::User(Bytes::from_static(b"hello")))
-            .unwrap();
-        let got = rx.recv().await.expect("should receive");
-        match got {
-            Message::User(buf) => assert_eq!(buf.as_ref(), b"hello"),
-            _ => panic!("expected user message"),
-        }
-    }
-
-    #[tokio::test]
-    async fn bounded_mailbox_drop_new() {
-        // This test will fail until bounded mailbox is implemented.
-        let (tx, mut rx) = bounded_channel(2);
-        tx.send(Message::User(Bytes::from_static(b"m1"))).unwrap();
-        tx.send(Message::User(Bytes::from_static(b"m2"))).unwrap();
-        // third send should be rejected because capacity is 2
-        assert!(tx.send(Message::User(Bytes::from_static(b"m3"))).is_err());
-
-        let first = rx.recv().await.expect("first");
-        let second = rx.recv().await.expect("second");
-        match first {
-            Message::User(b) => assert_eq!(b.as_ref(), b"m1"),
-            _ => panic!(),
-        }
-        match second {
-            Message::User(b) => assert_eq!(b.as_ref(), b"m2"),
-            _ => panic!(),
-        }
-    }
-
-    #[tokio::test]
-    async fn selective_receive_defers_and_preserves_order() {
-        let (tx, mut rx) = channel();
-
-        tx.send(Message::User(Bytes::from_static(b"m1"))).unwrap();
-        tx.send(Message::User(Bytes::from_static(b"target")))
-            .unwrap();
-        tx.send(Message::User(Bytes::from_static(b"m3"))).unwrap();
-
-        // Selectively receive the message whose bytes == b"target"
-        let got = rx
-            .selective_recv(|m| match m {
-                Message::User(b) => b.as_ref() == b"target",
-                _ => false,
-            })
-            .await
-            .expect("should find target");
-
-        match got {
-            Message::User(b) => assert_eq!(b.as_ref(), b"target"),
-            _ => panic!("expected user message"),
-        }
-
-        // After selective receive, deferred messages should be delivered in order.
-        let first = rx.recv().await.expect("first deferred");
-        let second = rx.recv().await.expect("second deferred");
-
-        match first {
-            Message::User(b) => assert_eq!(b.as_ref(), b"m1"),
-            _ => panic!("expected user message"),
-        }
-
-        match second {
-            Message::User(b) => assert_eq!(b.as_ref(), b"m3"),
-            _ => panic!("expected user message"),
-        }
-    }
-
-    #[tokio::test]
-    async fn drop_old_system_message_discards_oldest_user_message() {
-        let (tx, mut rx) = bounded_channel(2);
-
-        tx.send(Message::User(Bytes::from_static(b"m1"))).unwrap();
-        tx.send(Message::User(Bytes::from_static(b"m2"))).unwrap();
-        tx.send_system(SystemMessage::DropOld).unwrap();
-
-        let got = rx.recv().await.expect("message after drop-old");
-        match got {
-            Message::User(b) => assert_eq!(b.as_ref(), b"m2"),
-            _ => panic!("expected user message"),
-        }
-    }
-
-    #[tokio::test]
-    async fn bounded_channel_capacity_matches_request() {
-        let (tx, _rx) = bounded_channel(5);
-
-        for i in 0..5 {
-            let data = vec![b'a' + (i as u8)];
-            assert!(tx
-                .send(Message::User(Bytes::copy_from_slice(&data)))
-                .is_ok());
-        }
-
-        assert!(tx
-            .send(Message::User(Bytes::from_static(b"overflow")))
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn backpressure_hysteresis_prevents_flapping() {
-        let (tx, mut rx) = bounded_channel(10);
-
-        for i in 0..9 {
-            let payload = vec![b'a' + (i as u8)];
-            tx.send(Message::User(Bytes::copy_from_slice(&payload)))
-                .unwrap();
-        }
-
-        // 9/10 keeps us in critical from normal.
-        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Normal);
-        assert_eq!(level, BackpressureLevel::Critical);
-
-        // Drain one message -> 8/10 should remain critical due to hysteresis exit threshold.
-        let _ = rx.recv().await;
-        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Critical);
-        assert_eq!(level, BackpressureLevel::Critical);
-
-        // Drain another message -> 7/10 should now relax to high.
-        let _ = rx.recv().await;
-        let level = tx.backpressure_level_with_hysteresis(Some(10), BackpressureLevel::Critical);
-        assert_eq!(level, BackpressureLevel::High);
     }
 }

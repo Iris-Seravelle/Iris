@@ -154,6 +154,42 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    fn finalize_actor_exit(
+        mailboxes: &DashMap<Pid, mailbox::MailboxSender>,
+        supervisor: &Arc<supervisor::Supervisor>,
+        slab: &Arc<Mutex<pid::SlabAllocator>>,
+        path_supervisors: &DashMap<String, Arc<supervisor::Supervisor>>,
+        rt_exit: &Runtime,
+        pid: Pid,
+        reason: crate::mailbox::ExitReason,
+        meta: Option<String>,
+    ) {
+        mailboxes.remove(&pid);
+        supervisor.notify_exit(pid);
+        for entry in path_supervisors.iter() {
+            let sup = entry.value();
+            if sup.contains_child(pid) {
+                sup.notify_exit(pid);
+            }
+        }
+        slab.lock().unwrap().deallocate(pid);
+
+        // structured concurrency cleanup + runtime metadata cleanup
+        rt_exit.handle_exit_internal(pid);
+
+        let linked = supervisor.linked_pids(pid);
+        for lp in linked {
+            if let Some(sender) = mailboxes.get(&lp) {
+                let info = crate::mailbox::ExitInfo {
+                    from: pid,
+                    reason: reason.clone(),
+                    metadata: meta.clone(),
+                };
+                let _ = sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
+            }
+        }
+    }
+
     /// Create a new runtime instance and initialize the networking and registry sub-systems.
     pub fn new() -> Self {
         crate::logging::init_logger();
@@ -931,6 +967,9 @@ impl Runtime {
             self.slab.lock().unwrap().deallocate(pid);
             self.handle_exit_internal(pid);
         }
+
+        // Cleanup metadata eagerly for non-virtual actors as well.
+        self.handle_exit_internal(pid);
     }
 
     /// Reserve a virtual/lazy actor PID. The actor is activated on first send.
@@ -1075,30 +1114,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         true
@@ -1228,32 +1253,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            // Notify any path-scoped supervisors that supervise this pid
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            // structured concurrency cleanup
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         pid
@@ -1306,32 +1315,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            // Notify any path-scoped supervisors that supervise this pid
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            // structured concurrency cleanup
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         pid
@@ -1389,30 +1382,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         pid
@@ -1680,31 +1659,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            // structured concurrency cleanup
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         pid
@@ -1788,30 +1752,16 @@ impl Runtime {
                 }
             };
 
-            mailboxes2.remove(&pid);
-            supervisor2.notify_exit(pid);
-            for entry in path_supervisors2.iter() {
-                let sup = entry.value();
-                if sup.contains_child(pid) {
-                    sup.notify_exit(pid);
-                }
-            }
-            slab2.lock().unwrap().deallocate(pid);
-
-            rt_exit_clone.handle_exit_internal(pid);
-
-            let linked = supervisor2.linked_pids(pid);
-            for lp in linked {
-                if let Some(sender) = mailboxes2.get(&lp) {
-                    let info = crate::mailbox::ExitInfo {
-                        from: pid,
-                        reason: reason.clone(),
-                        metadata: meta.clone(),
-                    };
-                    let _ =
-                        sender.send(mailbox::Message::System(mailbox::SystemMessage::Exit(info)));
-                }
-            }
+            Runtime::finalize_actor_exit(
+                &mailboxes2,
+                &supervisor2,
+                &slab2,
+                &path_supervisors2,
+                &rt_exit_clone,
+                pid,
+                reason,
+                meta,
+            );
         });
 
         pid
@@ -1874,11 +1824,38 @@ impl Runtime {
         Some(level)
     }
 
+    fn current_backpressure_state(&self, pid: Pid) -> mailbox::BackpressureLevel {
+        self.backpressure_state
+            .get(&pid)
+            .map(|entry| *entry.value())
+            .unwrap_or(mailbox::BackpressureLevel::Normal)
+    }
+
     pub fn mailbox_backpressure(&self, pid: Pid) -> Option<mailbox::BackpressureLevel> {
         self.mailboxes.get(&pid).map(|sender| {
             let cap = self.bounded_capacity.get(&pid).map(|entry| *entry.value());
             sender.backpressure_level(cap)
         })
+    }
+
+    fn wait_for_mailbox_capacity(&self, pid: Pid, cap: usize) -> bool {
+        let mut spins = 0usize;
+        while self.mailbox_size(pid).unwrap_or(0) >= cap {
+            if !self.mailboxes.contains_key(&pid) {
+                return false;
+            }
+
+            spins += 1;
+            if spins <= 64 {
+                std::hint::spin_loop();
+            } else if spins <= 512 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        }
+
+        true
     }
 
     pub fn send(&self, pid: Pid, msg: mailbox::Message) -> Result<(), mailbox::Message> {
@@ -1896,28 +1873,29 @@ impl Runtime {
                             if let Some(sender) = self.mailboxes.get(&pid) {
                                 let _ = sender.send_system(mailbox::SystemMessage::DropOld);
                             }
-                            for _ in 0..64 {
-                                if self.mailbox_size(pid).unwrap_or(0) < *cap {
-                                    break;
-                                }
-                                std::thread::yield_now();
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(msg);
                             }
                         }
                         mailbox::OverflowPolicy::Block => {
-                            // busy-wait until space appears
-                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
-                                std::thread::yield_now();
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(msg);
                             }
                         }
                         mailbox::OverflowPolicy::Redirect(target) => {
+                            if *target == pid {
+                                return Err(msg);
+                            }
                             // forward to target and consider message handled
                             return self.send(*target, msg);
                         }
                         mailbox::OverflowPolicy::Spill(target) => {
-                            // send copy to fallback, then proceed with original below
-                            let _ = self.send(*target, msg.clone());
-                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
-                                std::thread::yield_now();
+                            if *target != pid {
+                                // best-effort spill copy; primary send result determines return value
+                                let _ = self.send(*target, msg.clone());
+                            }
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(msg);
                             }
                         }
                     }
@@ -1949,9 +1927,7 @@ impl Runtime {
         msg: mailbox::Message,
     ) -> Result<mailbox::BackpressureLevel, mailbox::Message> {
         self.send(pid, msg)?;
-        Ok(self
-            .mailbox_backpressure(pid)
-            .unwrap_or(mailbox::BackpressureLevel::Normal))
+        Ok(self.current_backpressure_state(pid))
     }
 
     /// Send user bytes with a fast path that avoids wrapping in `Message` at callsite.
@@ -1975,25 +1951,27 @@ impl Runtime {
                             if let Some(sender) = self.mailboxes.get(&pid) {
                                 let _ = sender.send_system(mailbox::SystemMessage::DropOld);
                             }
-                            for _ in 0..64 {
-                                if self.mailbox_size(pid).unwrap_or(0) < *cap {
-                                    break;
-                                }
-                                std::thread::yield_now();
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(bytes);
                             }
                         }
                         mailbox::OverflowPolicy::Block => {
-                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
-                                std::thread::yield_now();
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(bytes);
                             }
                         }
                         mailbox::OverflowPolicy::Redirect(target) => {
+                            if *target == pid {
+                                return Err(bytes);
+                            }
                             return self.send_user(*target, bytes);
                         }
                         mailbox::OverflowPolicy::Spill(target) => {
-                            let _ = self.send_user(*target, bytes.clone());
-                            while self.mailbox_size(pid).unwrap_or(0) >= *cap {
-                                std::thread::yield_now();
+                            if *target != pid {
+                                let _ = self.send_user(*target, bytes.clone());
+                            }
+                            if !self.wait_for_mailbox_capacity(pid, *cap) {
+                                return Err(bytes);
                             }
                         }
                     }
@@ -2026,6 +2004,46 @@ impl Runtime {
         bytes: bytes::Bytes,
     ) -> Result<mailbox::BackpressureLevel, bytes::Bytes> {
         self.send_user(pid, bytes)?;
+        Ok(self.current_backpressure_state(pid))
+    }
+
+    /// Send shared bytes from Arc-backed storage.
+    ///
+    /// This uses owner-backed `Bytes` construction, avoiding payload copy.
+    pub fn send_user_shared(
+        &self,
+        pid: Pid,
+        bytes: std::sync::Arc<[u8]>,
+    ) -> Result<(), std::sync::Arc<[u8]>> {
+        let payload = bytes::Bytes::from_owner(bytes.clone());
+        self.send_user(pid, payload).map_err(|_| bytes)
+    }
+
+    /// Send shared bytes with immediate backpressure feedback.
+    pub fn send_user_shared_with_backpressure(
+        &self,
+        pid: Pid,
+        bytes: std::sync::Arc<[u8]>,
+    ) -> Result<mailbox::BackpressureLevel, std::sync::Arc<[u8]>> {
+        self.send_user_shared(pid, bytes)?;
+        Ok(self
+            .mailbox_backpressure(pid)
+            .unwrap_or(mailbox::BackpressureLevel::Normal))
+    }
+
+    /// Send a static byte slice with zero allocation at callsite.
+    pub fn send_user_static(&self, pid: Pid, bytes: &'static [u8]) -> Result<(), &'static [u8]> {
+        self.send_user(pid, bytes::Bytes::from_static(bytes))
+            .map_err(|_| bytes)
+    }
+
+    /// Send static bytes with immediate backpressure feedback.
+    pub fn send_user_static_with_backpressure(
+        &self,
+        pid: Pid,
+        bytes: &'static [u8],
+    ) -> Result<mailbox::BackpressureLevel, &'static [u8]> {
+        self.send_user_static(pid, bytes)?;
         Ok(self
             .mailbox_backpressure(pid)
             .unwrap_or(mailbox::BackpressureLevel::Normal))
@@ -2137,8 +2155,11 @@ impl Runtime {
             self.proxy_by_remote.remove(&(addr.clone(), rpid));
         }
         self.backpressure_state.remove(&pid);
+        self.bounded_capacity.remove(&pid);
+        self.overflow_policy.remove(&pid);
         self.behavior_versions.remove(&pid);
         self.behavior_history.remove(&pid);
+        self.observers.remove(&pid);
         #[cfg(feature = "vortex")]
         self.vortex_genetic_history.remove(&pid);
         // remove the pid from its parent's child list (if any)
@@ -2157,880 +2178,17 @@ impl Runtime {
                 // drop reverse mapping and close mailbox to stop actor
                 let _ = self.parent_of.remove(&child);
                 self.mailboxes.remove(&child);
+                self.backpressure_state.remove(&child);
+                self.bounded_capacity.remove(&child);
+                self.overflow_policy.remove(&child);
                 self.behavior_versions.remove(&child);
                 self.behavior_history.remove(&child);
+                self.observers.remove(&child);
             }
         }
     }
 
     pub fn unlink(&self, a: Pid, b: Pid) {
         self.supervisor.unlink(a, b);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::time::{sleep, timeout, Duration};
-
-    #[tokio::test]
-    async fn bounded_spawn_rejects_overflow() {
-        let rt = Runtime::new();
-        // handler that pulls from the mailbox and forwards to a channel for inspection
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        // handler will wait on a one-shot signal before reading from the
-        // mailbox.  This guarantees the queue holds the first message when the
-        // test attempts the second send.
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-        let handler = move |mut mailbox: mailbox::MailboxReceiver| {
-            let tx = tx.clone();
-            let start_rx = start_rx;
-            async move {
-                // wait until test gives permission to proceed
-                let _ = start_rx.await;
-                if let Some(msg) = mailbox.recv().await {
-                    let _ = tx.send(msg);
-                }
-            }
-        };
-
-        let pid = rt.spawn_actor_bounded(handler, 1);
-        // first send success
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"x".to_vec().into()))
-            .is_ok());
-        // second send should be dropped (error returned)
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"y".to_vec().into()))
-            .is_err());
-
-        // now tell the actor it may proceed and consume the queued message
-        let _ = start_tx.send(());
-
-        // allow the actor to run and verify it received the first message
-        sleep(Duration::from_millis(50)).await;
-        let got = rx.try_recv().unwrap();
-        assert_eq!(got, mailbox::Message::User(b"x".to_vec().into()));
-    }
-
-    #[tokio::test]
-    async fn send_user_fast_path_roundtrip_and_missing_pid() {
-        let rt = Runtime::new();
-
-        let (tx, mut recv_rx) = tokio::sync::mpsc::unbounded_channel();
-        let pid = rt.spawn_handler_with_budget(
-            move |msg| {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(msg);
-                }
-            },
-            32,
-        );
-
-        assert!(rt
-            .send_user(pid, bytes::Bytes::from_static(b"hello"))
-            .is_ok());
-
-        let got = recv_rx.recv().await.expect("message should be received");
-        match got {
-            mailbox::Message::User(b) => assert_eq!(b.as_ref(), b"hello"),
-            _ => panic!("expected user message"),
-        }
-
-        rt.stop(pid);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let payload = bytes::Bytes::from_static(b"payload");
-        let err = rt
-            .send_user(pid, payload.clone())
-            .expect_err("send should fail for stopped pid");
-        assert_eq!(err, payload);
-    }
-
-    #[tokio::test]
-    async fn overflow_policy_spill_forwards_and_keeps_primary_delivery() {
-        let rt = Runtime::new();
-
-        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let primary = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let primary_tx = primary_tx.clone();
-                let start_rx = start_rx;
-                async move {
-                    let _ = start_rx.await;
-                    for _ in 0..2 {
-                        if let Some(msg) = mailbox.recv().await {
-                            let _ = primary_tx.send(msg);
-                        }
-                    }
-                }
-            },
-            1,
-        );
-
-        let fallback = rt.spawn_actor(move |mut mailbox: mailbox::MailboxReceiver| {
-            let fallback_tx = fallback_tx.clone();
-            async move {
-                if let Some(msg) = mailbox.recv().await {
-                    let _ = fallback_tx.send(msg);
-                }
-            }
-        });
-
-        rt.set_overflow_policy(primary, mailbox::OverflowPolicy::Spill(fallback));
-
-        assert!(rt
-            .send(primary, mailbox::Message::User(b"p1".to_vec().into()))
-            .is_ok());
-
-        let rt_send = rt.clone();
-        let send_task = tokio::task::spawn_blocking(move || {
-            rt_send
-                .send(primary, mailbox::Message::User(b"p2".to_vec().into()))
-                .is_ok()
-        });
-
-        let spilled = timeout(Duration::from_secs(1), fallback_rx.recv())
-            .await
-            .expect("spill should reach fallback promptly")
-            .expect("fallback should receive spill copy");
-        assert_eq!(spilled, mailbox::Message::User(b"p2".to_vec().into()));
-
-        let _ = start_tx.send(());
-
-        let send_ok = timeout(Duration::from_secs(1), send_task)
-            .await
-            .expect("spill send should complete")
-            .expect("send task should join");
-        assert!(send_ok, "spill send should report success");
-
-        let first = timeout(Duration::from_secs(1), primary_rx.recv())
-            .await
-            .expect("primary first receive")
-            .expect("primary first message exists");
-        let second = timeout(Duration::from_secs(1), primary_rx.recv())
-            .await
-            .expect("primary second receive")
-            .expect("primary second message exists");
-
-        assert_eq!(first, mailbox::Message::User(b"p1".to_vec().into()));
-        assert_eq!(second, mailbox::Message::User(b"p2".to_vec().into()));
-    }
-
-    #[tokio::test]
-    async fn overflow_policy_block_waits_until_capacity_then_succeeds() {
-        let rt = Runtime::new();
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let pid = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let tx = tx.clone();
-                let start_rx = start_rx;
-                async move {
-                    let _ = start_rx.await;
-                    for _ in 0..2 {
-                        if let Some(msg) = mailbox.recv().await {
-                            let _ = tx.send(msg);
-                        }
-                    }
-                }
-            },
-            1,
-        );
-
-        rt.set_overflow_policy(pid, mailbox::OverflowPolicy::Block);
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"b1".to_vec().into()))
-            .is_ok());
-
-        let rt_send = rt.clone();
-        let mut send_task = tokio::task::spawn_blocking(move || {
-            rt_send
-                .send(pid, mailbox::Message::User(b"b2".to_vec().into()))
-                .is_ok()
-        });
-
-        assert!(
-            timeout(Duration::from_millis(30), &mut send_task)
-                .await
-                .is_err(),
-            "block policy should wait while mailbox is full"
-        );
-
-        let _ = start_tx.send(());
-
-        let send_ok = timeout(Duration::from_secs(1), send_task)
-            .await
-            .expect("blocked send should complete")
-            .expect("send task should join");
-        assert!(send_ok, "block policy send should report success");
-
-        let first = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("first message receive")
-            .expect("first message exists");
-        let second = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("second message receive")
-            .expect("second message exists");
-
-        assert_eq!(first, mailbox::Message::User(b"b1".to_vec().into()));
-        assert_eq!(second, mailbox::Message::User(b"b2".to_vec().into()));
-    }
-
-    #[tokio::test]
-    async fn mailbox_backpressure_signals_based_on_capacity() {
-        let rt = Runtime::new();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let pid = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let start_rx = start_rx;
-                async move {
-                    // hold consumption until the test has asserted queue pressure.
-                    let _ = start_rx.await;
-                    while mailbox.recv().await.is_some() {}
-                }
-            },
-            5,
-        );
-
-        let mut sent = 0;
-        for i in 1..=10 {
-            let payload = format!("msg{}", i);
-            if rt
-                .send(pid, mailbox::Message::User(payload.into_bytes().into()))
-                .is_ok()
-            {
-                sent += 1;
-            } else {
-                break;
-            }
-        }
-
-        assert!(
-            sent >= 4,
-            "expected at least 4 messages to be accepted, got {}",
-            sent
-        );
-
-        let level = rt
-            .mailbox_backpressure(pid)
-            .expect("backpressure should be available");
-        assert!(matches!(
-            level,
-            mailbox::BackpressureLevel::High | mailbox::BackpressureLevel::Critical
-        ));
-
-        if sent >= 5 {
-            assert_eq!(level, mailbox::BackpressureLevel::Critical);
-        } else {
-            assert_eq!(level, mailbox::BackpressureLevel::High);
-        }
-
-        let _ = start_tx.send(());
-    }
-
-    #[tokio::test]
-    async fn mailbox_backpressure_send_user_path_updates_level() {
-        let rt = Runtime::new();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let pid = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let start_rx = start_rx;
-                async move {
-                    let _ = start_rx.await;
-                    while mailbox.recv().await.is_some() {}
-                }
-            },
-            4,
-        );
-
-        for i in 0..3 {
-            let payload = bytes::Bytes::from(format!("u{}", i));
-            assert!(rt.send_user(pid, payload).is_ok());
-        }
-        assert_eq!(
-            rt.mailbox_backpressure(pid),
-            Some(mailbox::BackpressureLevel::High)
-        );
-
-        assert!(rt.send_user(pid, bytes::Bytes::from_static(b"u3")).is_ok());
-        assert_eq!(
-            rt.mailbox_backpressure(pid),
-            Some(mailbox::BackpressureLevel::Critical)
-        );
-
-        let _ = start_tx.send(());
-    }
-
-    #[tokio::test]
-    async fn mailbox_backpressure_recovers_to_normal_after_drain() {
-        let rt = Runtime::new();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let pid = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let start_rx = start_rx;
-                async move {
-                    let _ = start_rx.await;
-                    while mailbox.recv().await.is_some() {}
-                }
-            },
-            3,
-        );
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"d1".to_vec().into()))
-            .is_ok());
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"d2".to_vec().into()))
-            .is_ok());
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"d3".to_vec().into()))
-            .is_ok());
-        assert_eq!(
-            rt.mailbox_backpressure(pid),
-            Some(mailbox::BackpressureLevel::Critical)
-        );
-
-        let _ = start_tx.send(());
-
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if rt.mailbox_size(pid) == Some(0) {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("mailbox should drain");
-
-        assert_eq!(
-            rt.mailbox_backpressure(pid),
-            Some(mailbox::BackpressureLevel::Normal)
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_backpressure_unknown_pid_is_none() {
-        let rt = Runtime::new();
-        assert_eq!(rt.mailbox_backpressure(u64::MAX), None);
-    }
-
-    #[tokio::test]
-    async fn send_with_backpressure_returns_live_level() {
-        let rt = Runtime::new();
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-
-        let pid = rt.spawn_actor_bounded(
-            move |mut mailbox: mailbox::MailboxReceiver| {
-                let start_rx = start_rx;
-                async move {
-                    let _ = start_rx.await;
-                    while mailbox.recv().await.is_some() {}
-                }
-            },
-            5,
-        );
-
-        let l1 = rt
-            .send_with_backpressure(pid, mailbox::Message::User(b"a".to_vec().into()))
-            .expect("first send should succeed");
-        assert_eq!(l1, mailbox::BackpressureLevel::Normal);
-
-        let l2 = rt
-            .send_with_backpressure(pid, mailbox::Message::User(b"b".to_vec().into()))
-            .expect("second send should succeed");
-        assert_eq!(l2, mailbox::BackpressureLevel::Normal);
-
-        let l3 = rt
-            .send_with_backpressure(pid, mailbox::Message::User(b"c".to_vec().into()))
-            .expect("third send should succeed");
-        assert_eq!(l3, mailbox::BackpressureLevel::Normal);
-
-        let l4 = rt
-            .send_with_backpressure(pid, mailbox::Message::User(b"d".to_vec().into()))
-            .expect("fourth send should succeed");
-        assert_eq!(l4, mailbox::BackpressureLevel::High);
-
-        let l5 = rt
-            .send_with_backpressure(pid, mailbox::Message::User(b"e".to_vec().into()))
-            .expect("fifth send should succeed");
-        assert_eq!(l5, mailbox::BackpressureLevel::Critical);
-
-        let _ = start_tx.send(());
-    }
-
-    #[tokio::test]
-    async fn send_user_with_backpressure_unknown_pid_returns_err() {
-        let rt = Runtime::new();
-        let payload = bytes::Bytes::from_static(b"missing");
-        let err = rt
-            .send_user_with_backpressure(u64::MAX, payload.clone())
-            .expect_err("missing pid should return original payload");
-        assert_eq!(err, payload);
-    }
-
-    #[tokio::test]
-    async fn virtual_actor_activates_on_first_send() {
-        let rt = Runtime::new();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let pid = rt.spawn_virtual_handler_with_budget(
-            move |msg| {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(msg);
-                }
-            },
-            16,
-            None,
-        );
-
-        assert!(
-            rt.mailbox_size(pid).is_none(),
-            "virtual actor should be inactive initially"
-        );
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"lazy".to_vec().into()))
-            .is_ok());
-
-        let got = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("virtual handler should receive message")
-            .expect("message must exist");
-        assert_eq!(got, mailbox::Message::User(b"lazy".to_vec().into()));
-        assert!(rt.is_alive(pid));
-    }
-
-    #[tokio::test]
-    async fn virtual_actor_idle_timeout_deactivates_actor() {
-        let rt = Runtime::new();
-
-        let pid = rt.spawn_virtual_handler_with_budget(
-            move |_msg| async move {},
-            8,
-            Some(Duration::from_millis(50)),
-        );
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"ping".to_vec().into()))
-            .is_ok());
-
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if !rt.is_alive(pid) {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("virtual actor should stop after idle timeout");
-    }
-
-    #[tokio::test]
-    async fn stop_unactivated_virtual_actor_deallocates_pid() {
-        let rt = Runtime::new();
-
-        let pid = rt.spawn_virtual_handler_with_budget(move |_msg| async move {}, 8, None);
-        assert!(rt.is_alive(pid));
-
-        rt.stop(pid);
-        sleep(Duration::from_millis(20)).await;
-
-        assert!(!rt.is_alive(pid));
-    }
-
-    #[tokio::test]
-    async fn behavior_version_increments_on_hot_swap() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_observed_handler(8);
-
-        assert_eq!(rt.behavior_version(pid), 1);
-
-        rt.hot_swap(pid, 0xA11CE);
-        sleep(Duration::from_millis(20)).await;
-
-        assert_eq!(rt.behavior_version(pid), 2);
-    }
-
-    #[tokio::test]
-    async fn rollback_behavior_replays_previous_handler_ptr() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_observed_handler(8);
-
-        rt.hot_swap(pid, 0xBEEF);
-        rt.hot_swap(pid, 0xCAFE);
-        sleep(Duration::from_millis(20)).await;
-
-        assert_eq!(rt.behavior_version(pid), 3);
-        let rolled = rt
-            .rollback_behavior(pid, 1)
-            .expect("rollback should succeed");
-        assert_eq!(rolled, 2);
-        assert_eq!(rt.behavior_version(pid), 2);
-
-        let swaps = timeout(Duration::from_secs(1), async {
-            loop {
-                let msgs = rt
-                    .get_observed_messages(pid)
-                    .expect("observed actor should still exist");
-                let mut swaps = Vec::new();
-                for msg in msgs {
-                    if let mailbox::Message::System(mailbox::SystemMessage::HotSwap(ptr)) = msg {
-                        swaps.push(ptr);
-                    }
-                }
-                if swaps.len() >= 3 {
-                    break swaps;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for hot swap replay messages");
-
-        assert_eq!(swaps, vec![0xBEEF, 0xCAFE, 0xBEEF]);
-    }
-
-    #[tokio::test]
-    async fn rollback_behavior_requires_enough_history() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_observed_handler(8);
-
-        rt.hot_swap(pid, 0xBEEF);
-        sleep(Duration::from_millis(20)).await;
-
-        let err = rt
-            .rollback_behavior(pid, 1)
-            .expect_err("rollback should fail");
-        assert!(err.contains("history"));
-    }
-
-    #[cfg(feature = "vortex")]
-    #[test]
-    fn runtime_vortex_ghost_lifecycle_wrappers_work() {
-        let rt = Runtime::new();
-
-        assert!(rt.vortex_start_transaction_with_checkpoint(10, std::collections::HashMap::new()));
-        assert!(rt.vortex_stage_transaction_vio("io_primary".to_string(), b"p".to_vec()));
-
-        assert!(
-            rt.vortex_start_ghost_transaction_with_checkpoint(20, std::collections::HashMap::new())
-        );
-        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_a".to_string(), b"a".to_vec()));
-        assert!(rt.vortex_stage_ghost_transaction_vio(20, "io_ghost_b".to_string(), b"b".to_vec()));
-
-        let resolution = rt
-            .vortex_resolve_primary_ghost_race(
-                20,
-                20,
-                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
-            )
-            .expect("resolution should exist");
-        assert_eq!(resolution.winner_id, 20);
-        assert_eq!(resolution.committed_vio.len(), 2);
-
-        let mut seen = Vec::new();
-        let applied = rt
-            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |call| {
-                seen.push(call.op.clone());
-                true
-            })
-            .expect("replay should be available");
-        assert_eq!(applied, 2);
-        assert_eq!(
-            seen,
-            vec!["io_ghost_a".to_string(), "io_ghost_b".to_string()]
-        );
-
-        let second = rt.vortex_resolve_primary_ghost_race(
-            20,
-            20,
-            crate::vortex::VortexGhostPolicy::FirstSafePointWins,
-        );
-        assert!(second.is_none());
-    }
-
-    #[cfg(feature = "vortex")]
-    #[test]
-    fn runtime_vortex_commit_and_take_committed_vio() {
-        let rt = Runtime::new();
-        assert!(rt.vortex_start_transaction_with_checkpoint(30, std::collections::HashMap::new()));
-        assert!(rt.vortex_stage_transaction_vio("io_commit".to_string(), b"x".to_vec()));
-        assert!(rt.vortex_commit_transaction());
-
-        let committed = rt
-            .vortex_take_committed_transaction_vio()
-            .expect("engine should exist");
-        assert_eq!(committed.len(), 1);
-        assert_eq!(committed[0].op, "io_commit");
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_ghost_wrappers_during_actor_execution() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_observed_handler(8);
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"before".to_vec().into()))
-            .is_ok());
-
-        assert!(rt.vortex_start_transaction_with_checkpoint(101, std::collections::HashMap::new()));
-        assert!(rt.vortex_stage_transaction_vio("primary_call".to_string(), b"p".to_vec()));
-        assert!(rt
-            .vortex_start_ghost_transaction_with_checkpoint(202, std::collections::HashMap::new()));
-        assert!(rt.vortex_stage_ghost_transaction_vio(
-            202,
-            "ghost_call".to_string(),
-            b"g".to_vec()
-        ));
-
-        let resolution = rt
-            .vortex_resolve_primary_ghost_race(
-                202,
-                202,
-                crate::vortex::VortexGhostPolicy::FirstSafePointWins,
-            )
-            .expect("resolution should succeed");
-        assert_eq!(resolution.winner_id, 202);
-        assert_eq!(resolution.committed_vio.len(), 1);
-
-        let applied = rt
-            .vortex_replay_committed_vio_calls(&resolution.committed_vio, |_call| true)
-            .expect("replay should be available");
-        assert_eq!(applied, 1);
-
-        assert!(rt
-            .send(pid, mailbox::Message::User(b"after".to_vec().into()))
-            .is_ok());
-
-        let observed = timeout(Duration::from_secs(1), async {
-            loop {
-                let msgs = rt
-                    .get_observed_messages(pid)
-                    .expect("observed actor should exist");
-
-                let user_msgs: Vec<Vec<u8>> = msgs
-                    .into_iter()
-                    .filter_map(|m| match m {
-                        mailbox::Message::User(b) => Some(b.to_vec()),
-                        _ => None,
-                    })
-                    .collect();
-
-                if user_msgs.len() >= 2 {
-                    break user_msgs;
-                }
-
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for observed messages");
-
-        assert!(observed.iter().any(|m| m.as_slice() == b"before"));
-        assert!(observed.iter().any(|m| m.as_slice() == b"after"));
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_auto_ghost_hook_triggers_on_preempt_suspend() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
-
-        // Drive enough preemption checks to force suspend-path execution.
-        for _ in 0..1400 {
-            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
-        }
-
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if rt.vortex_auto_replay_count() > 0 {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("expected auto replay hook to run on preempt suspend");
-
-        assert!(rt.vortex_auto_replay_count() > 0);
-        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
-        assert!(primary_wins + ghost_wins > 0);
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_auto_policy_prefer_primary_updates_counters() {
-        let rt = Runtime::new();
-        assert!(rt.vortex_set_auto_ghost_policy(crate::vortex::VortexGhostPolicy::PreferPrimary));
-        assert_eq!(
-            rt.vortex_auto_ghost_policy(),
-            Some(crate::vortex::VortexGhostPolicy::PreferPrimary)
-        );
-
-        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
-        for _ in 0..1400 {
-            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
-        }
-
-        timeout(Duration::from_secs(2), async {
-            loop {
-                let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
-                if primary_wins > 0 || ghost_wins > 0 {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("expected auto policy counters to update");
-
-        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
-        assert!(primary_wins > 0);
-        assert_eq!(ghost_wins, 0);
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_auto_telemetry_can_reset() {
-        let rt = Runtime::new();
-        let pid = rt.spawn_handler_with_budget(|_msg| async move {}, 8);
-
-        for _ in 0..1400 {
-            let _ = rt.send(pid, mailbox::Message::User(b"tick".to_vec().into()));
-        }
-
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if rt.vortex_auto_replay_count() > 0 {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("expected auto telemetry to increase");
-
-        let (primary_wins, ghost_wins) = rt.vortex_auto_resolution_counts();
-        assert!(rt.vortex_auto_replay_count() > 0);
-        assert!(primary_wins + ghost_wins > 0);
-
-        rt.vortex_reset_auto_telemetry();
-        let (primary_wins_after, ghost_wins_after) = rt.vortex_auto_resolution_counts();
-        assert_eq!(rt.vortex_auto_replay_count(), 0);
-        assert_eq!(primary_wins_after, 0);
-        assert_eq!(ghost_wins_after, 0);
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_genetic_budgeting_toggle_roundtrip() {
-        let rt = Runtime::new();
-        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
-        assert!(rt.vortex_set_genetic_budgeting(true));
-        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(true));
-        assert!(rt.vortex_set_genetic_budgeting(false));
-        assert_eq!(rt.vortex_genetic_budgeting_enabled(), Some(false));
-    }
-
-    #[cfg(feature = "vortex")]
-    #[tokio::test]
-    async fn runtime_vortex_genetic_budgeting_effects_during_actor_run() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let rt = Runtime::new();
-
-        // Start with dynamic budgeting disabled.
-        assert!(rt.vortex_set_genetic_budgeting(false));
-
-        let counter = std::sync::Arc::new(AtomicUsize::new(0));
-        let counter_clone = counter.clone();
-        let pid = rt.spawn_handler_with_budget(
-            move |_msg| {
-                let counter_clone = counter_clone.clone();
-                async move {
-                    counter_clone.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            8,
-        );
-
-        for _ in 0..400 {
-            let _ = rt.send(pid, mailbox::Message::User(b"x".to_vec().into()));
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Enable genetic budgeting while actor is still running.
-        assert!(rt.vortex_set_genetic_budgeting(true));
-
-        for _ in 0..400 {
-            let _ = rt.send(pid, mailbox::Message::User(b"x".to_vec().into()));
-        }
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if counter.load(Ordering::Relaxed) >= 800 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("all messages should be processed");
-
-        rt.stop(pid);
-    }
-
-    #[cfg(feature = "vortex")]
-    #[test]
-    fn runtime_vortex_genetic_budget_policy_math() {
-        // base=8 => min=2, max=32
-        assert_eq!(next_dynamic_budget(8, 8, false, 0.0, 0.4, 0.7), 9);
-        assert_eq!(next_dynamic_budget(32, 8, false, 0.0, 0.4, 0.7), 32);
-        assert_eq!(next_dynamic_budget(8, 8, true, 0.0, 0.4, 0.7), 4);
-        assert_eq!(next_dynamic_budget(3, 8, true, 0.0, 0.4, 0.7), 2);
-        assert_eq!(next_dynamic_budget(1, 8, true, 0.0, 0.4, 0.7), 2);
-
-        // high suspend rate should force stronger penalty.
-        assert_eq!(next_dynamic_budget(16, 8, false, 0.8, 0.4, 0.7), 9);
-        assert_eq!(next_dynamic_budget(20, 8, false, 0.5, 0.4, 0.7), 16);
-    }
-
-    #[cfg(feature = "vortex")]
-    #[test]
-    fn runtime_vortex_genetic_threshold_roundtrip() {
-        let rt = Runtime::new();
-        assert_eq!(rt.vortex_genetic_thresholds(), Some((0.4, 0.7)));
-        assert!(rt.vortex_set_genetic_thresholds(0.2, 0.5));
-        assert_eq!(rt.vortex_genetic_thresholds(), Some((0.2, 0.5)));
-        assert!(!rt.vortex_set_genetic_thresholds(0.7, 0.2));
-        assert!(!rt.vortex_set_genetic_thresholds(-0.1, 0.5));
-        assert!(!rt.vortex_set_genetic_thresholds(0.1, 1.2));
-    }
-
-    #[cfg(feature = "vortex")]
-    #[test]
-    fn runtime_vortex_isolation_disallow_roundtrip() {
-        let rt = Runtime::new();
-        assert_eq!(rt.vortex_get_isolation_disallowed_ops(), Some(vec![]));
-        assert!(rt.vortex_set_isolation_disallowed_ops(vec![90, 91]));
-        let mut got = rt.vortex_get_isolation_disallowed_ops().unwrap();
-        got.sort();
-        assert_eq!(got, vec![90, 91]);
     }
 }

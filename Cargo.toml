@@ -16,7 +16,7 @@ num_cpus = "*"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 dashmap = "5"
 parking_lot = "0.12"
-bytes = "1"
+bytes = "1.11.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 once_cell = "1"

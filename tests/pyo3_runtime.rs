@@ -107,6 +107,64 @@ async fn py_zero_copy_send() {
 }
 
 #[tokio::test]
+async fn py_send_accepts_bytes_like_objects() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_observed_handler", (8usize,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    Python::with_gil(|py| {
+        let bytearray_obj = py.eval("bytearray(b'hello-bytearray')", None, None).unwrap();
+        let memoryview_obj = py.eval("memoryview(b'hello-memoryview')", None, None).unwrap();
+
+        let sent_ba: bool = rt_py
+            .as_ref(py)
+            .call_method1("send", (pid, bytearray_obj))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(sent_ba);
+
+        let sent_mv: bool = rt_py
+            .as_ref(py)
+            .call_method1("send", (pid, memoryview_obj))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(sent_mv);
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let msgs: Vec<Vec<u8>> = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(&msgs[0], b"hello-bytearray");
+    assert_eq!(&msgs[1], b"hello-memoryview");
+}
+
+#[tokio::test]
 async fn py_runtime_spawn_and_send() {
     // create a single PyRuntime instance and keep it alive across await points
     let rt_py = Python::with_gil(|py| {

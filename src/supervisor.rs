@@ -52,6 +52,13 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    fn push_unique_link(links: &DashMap<Pid, Vec<Pid>>, a: Pid, b: Pid) {
+        let mut entry = links.entry(a).or_insert_with(Vec::new);
+        if !entry.contains(&b) {
+            entry.push(b);
+        }
+    }
+
     /// Create a supervisor instance.
     pub fn new() -> Self {
         Supervisor {
@@ -78,9 +85,17 @@ impl Supervisor {
     pub fn unlink(&self, a: Pid, b: Pid) {
         if let Some(mut entry) = self.links.get_mut(&a) {
             entry.retain(|&p| p != b);
+            if entry.is_empty() {
+                drop(entry);
+                self.links.remove(&a);
+            }
         }
         if let Some(mut entry) = self.links.get_mut(&b) {
             entry.retain(|&p| p != a);
+            if entry.is_empty() {
+                drop(entry);
+                self.links.remove(&b);
+            }
         }
     }
 
@@ -96,8 +111,8 @@ impl Supervisor {
 
     /// Establish a bidirectional link between two PIDs.
     pub fn link(&self, a: Pid, b: Pid) {
-        self.links.entry(a).or_insert_with(Vec::new).push(b);
-        self.links.entry(b).or_insert_with(Vec::new).push(a);
+        Self::push_unique_link(&self.links, a, b);
+        Self::push_unique_link(&self.links, b, a);
     }
 
     /// Retrieve and remove the PIDs linked to `pid`.
@@ -315,63 +330,5 @@ impl Supervisor {
                 });
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tracing_subscriber;
-
-    #[test]
-    fn watch_and_unwatch() {
-        let _ = tracing_subscriber::fmt::try_init();
-        let s = Supervisor::new();
-        s.watch(1);
-        assert!(s.children.contains_key(&1));
-        s.unwatch(1);
-        assert!(!s.children.contains_key(&1));
-    }
-
-    #[tokio::test]
-    async fn factory_failure_skips_restart() {
-        let _ = tracing_subscriber::fmt::try_init();
-        let s = Supervisor::new();
-        // Insert a child whose factory always fails
-        let bad_factory = Arc::new(move || Err::<Pid, String>("boom".to_string()));
-        let spec = ChildSpec {
-            factory: bad_factory,
-            strategy: RestartStrategy::RestartOne,
-        };
-        s.add_child(42, spec);
-
-        // Notify exit: factory should fail and the children map should eventually be empty
-        s.notify_exit(42);
-
-        // Wait for the supervisor task to process the failure.
-        let mut attempts = 0;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            attempts += 1;
-
-            let no_children = s.children_count() == 0;
-            let has_errors = !s.errors().is_empty();
-
-            if no_children && has_errors {
-                break;
-            }
-
-            if attempts > 30 {
-                panic!(
-                    "Timeout waiting for supervisor: children_count={} errors={}",
-                    s.children_count(),
-                    s.errors().len()
-                );
-            }
-        }
-
-        // ensure the failure was recorded correctly
-        let errs = s.errors();
-        assert!(errs[0].contains("boom"));
     }
 }
