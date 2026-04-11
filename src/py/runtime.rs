@@ -32,7 +32,7 @@ where
 }
 
 use super::mailbox::PyMailbox;
-use super::pool::{make_release_gil_channel, PoolTask, GIL_WORKER_POOL};
+use super::pool::{make_release_gil_channel, DedicatedPoolTask, PoolTask, GIL_WORKER_POOL};
 use super::utils::{message_to_py, run_python_matcher};
 #[cfg(feature = "vortex")]
 use crate::vortex::VortexGhostPolicy;
@@ -348,9 +348,12 @@ impl PyRuntime {
     }
 
     /// Phase 5: Send a binary payload to a PID on a remote node.
-    fn send_remote(&self, addr: String, pid: u64, data: &PyAny) -> PyResult<()> {
+    fn send_remote(&self, py: Python, addr: String, pid: u64, data: &PyAny) -> PyResult<()> {
         let bytes = py_any_to_bytes(data)?;
-        self.inner.send_remote(addr, pid, bytes);
+        let rt = self.inner.clone();
+        py.allow_threads(move || {
+            rt.send_remote(addr, pid, bytes);
+        });
         Ok(())
     }
 
@@ -455,7 +458,13 @@ impl PyRuntime {
         let pid_holder_clone = pid_holder.clone();
         let rt = self.inner.clone();
         // compute maybe_tx using shared helper (propagates error on strict limit)
-        let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
+        let maybe_tx = make_release_gil_channel(
+            &self.inner,
+            release,
+            behavior.clone(),
+            pid_holder.clone(),
+            rt.clone(),
+        )?;
 
         let handler = move |msg: crate::mailbox::Message| {
             let b = behavior.clone();
@@ -472,21 +481,13 @@ impl PyRuntime {
                     // dedicated-thread path: translate to PoolTask
                     match msg {
                         crate::mailbox::Message::User(bytes) => {
-                            let task = PoolTask::Execute {
-                                behavior: b.clone(),
-                                bytes,
-                                pid_holder: pid_holder.clone(),
-                                rt: rt.clone(),
-                            };
+                            let task = DedicatedPoolTask::Execute(bytes);
                             let _ = tx.send(task);
                         }
                         crate::mailbox::Message::System(
                             crate::mailbox::SystemMessage::HotSwap(ptr),
                         ) => {
-                            let task = PoolTask::HotSwap {
-                                behavior: b.clone(),
-                                ptr,
-                            };
+                            let task = DedicatedPoolTask::HotSwap(ptr);
                             let _ = tx.send(task);
                         }
                         _ => {}
@@ -687,7 +688,13 @@ impl PyRuntime {
         let pid_holder = Arc::new(AtomicU64::new(0));
         let pid_holder_clone = pid_holder.clone();
         let rt = self.inner.clone();
-        let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
+        let maybe_tx = make_release_gil_channel(
+            &self.inner,
+            release,
+            behavior.clone(),
+            pid_holder.clone(),
+            rt.clone(),
+        )?;
 
         let handler = move |mut rx: crate::mailbox::MailboxReceiver| {
             let maybe_tx = maybe_tx.clone();
@@ -703,21 +710,13 @@ impl PyRuntime {
                     if let Some(tx) = &maybe_tx {
                         match msg {
                             crate::mailbox::Message::User(bytes) => {
-                                let task = PoolTask::Execute {
-                                    behavior: behavior.clone(),
-                                    bytes,
-                                    pid_holder: pid_holder.clone(),
-                                    rt: rt.clone(),
-                                };
+                                let task = DedicatedPoolTask::Execute(bytes);
                                 let _ = tx.send(task);
                             }
                             crate::mailbox::Message::System(
                                 crate::mailbox::SystemMessage::HotSwap(ptr),
                             ) => {
-                                let task = PoolTask::HotSwap {
-                                    behavior: behavior.clone(),
-                                    ptr,
-                                };
+                                let task = DedicatedPoolTask::HotSwap(ptr);
                                 let _ = tx.send(task);
                             }
                             _ => {}
@@ -875,7 +874,13 @@ impl PyRuntime {
         let pid_holder = Arc::new(AtomicU64::new(0));
         let pid_holder_clone = pid_holder.clone();
         let rt = self.inner.clone();
-        let maybe_tx = make_release_gil_channel(&self.inner, release, behavior.clone())?;
+        let maybe_tx = make_release_gil_channel(
+            &self.inner,
+            release,
+            behavior.clone(),
+            pid_holder.clone(),
+            rt.clone(),
+        )?;
 
         let handler = move |msg: crate::mailbox::Message| {
             let maybe_tx = maybe_tx.clone();
@@ -887,21 +892,13 @@ impl PyRuntime {
                     // blocking GIL thread path
                     match msg {
                         crate::mailbox::Message::User(bytes) => {
-                            let task = PoolTask::Execute {
-                                behavior: behavior.clone(),
-                                bytes,
-                                pid_holder: pid_holder.clone(),
-                                rt: rt.clone(),
-                            };
+                            let task = DedicatedPoolTask::Execute(bytes);
                             let _ = tx.send(task);
                         }
                         crate::mailbox::Message::System(
                             crate::mailbox::SystemMessage::HotSwap(ptr),
                         ) => {
-                            let task = PoolTask::HotSwap {
-                                behavior: behavior.clone(),
-                                ptr,
-                            };
+                            let task = DedicatedPoolTask::HotSwap(ptr);
                             let _ = tx.send(task);
                         }
                         _ => {}
@@ -1082,9 +1079,31 @@ impl PyRuntime {
         Ok(pid)
     }
 
-    fn send(&self, pid: u64, data: &PyAny) -> PyResult<bool> {
+    fn send(&self, py: Python, pid: u64, data: &PyAny) -> PyResult<bool> {
         let msg = py_any_to_bytes(data)?;
-        Ok(self.inner.send_user(pid, msg).is_ok())
+        let rt = self.inner.clone();
+        Ok(py.allow_threads(move || rt.send_user(pid, msg).is_ok()))
+    }
+
+    /// Batch-send bytes-like payloads to a PID.
+    ///
+    /// Returns the number of payloads accepted by the mailbox.
+    fn send_many(&self, py: Python, pid: u64, payloads: &PyAny) -> PyResult<usize> {
+        let cap_hint = payloads.len().unwrap_or(0);
+        let iter = payloads.iter().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "payloads must be an iterable of bytes-like objects",
+            )
+        })?;
+
+        let mut converted = Vec::with_capacity(cap_hint);
+        for item in iter {
+            let data = item?;
+            converted.push(py_any_to_bytes(data)?);
+        }
+
+        let rt = self.inner.clone();
+        Ok(py.allow_threads(move || rt.send_user_many(pid, converted)))
     }
 
     /// Schedule a one-shot send from Python. Returns a numeric timer id.

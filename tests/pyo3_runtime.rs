@@ -165,6 +165,57 @@ async fn py_send_accepts_bytes_like_objects() {
 }
 
 #[tokio::test]
+async fn py_send_many_accepts_bytes_like_objects() {
+    let rt_py = Python::with_gil(|py| {
+        let module = iris::py::make_module(py).expect("make_module");
+        let runtime_type = module
+            .as_ref(py)
+            .getattr("PyRuntime")
+            .expect("no PyRuntime type");
+        let rt_obj = runtime_type.call0().expect("construct PyRuntime");
+        rt_obj.into_py(py)
+    });
+
+    let pid: u64 = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("spawn_observed_handler", (16usize,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    let accepted: usize = Python::with_gil(|py| {
+        let payloads = py.eval(
+            "[b'one', bytearray(b'two'), memoryview(b'three')]",
+            None,
+            None,
+        )
+        .unwrap();
+        rt_py
+            .as_ref(py)
+            .call_method1("send_many", (pid, payloads))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    assert_eq!(accepted, 3);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let msgs: Vec<Vec<u8>> = Python::with_gil(|py| {
+        rt_py
+            .as_ref(py)
+            .call_method1("get_messages", (pid,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+
+    assert_eq!(msgs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+}
+
+#[tokio::test]
 async fn py_runtime_spawn_and_send() {
     // create a single PyRuntime instance and keep it alive across await points
     let rt_py = Python::with_gil(|py| {

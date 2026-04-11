@@ -30,6 +30,13 @@ pub(crate) enum PoolTask {
     },
 }
 
+/// Lightweight task variants for dedicated per-actor GIL threads.
+#[cfg(feature = "pyo3")]
+pub(crate) enum DedicatedPoolTask {
+    Execute(bytes::Bytes),
+    HotSwap(usize),
+}
+
 #[cfg(feature = "pyo3")]
 pub(crate) struct GilPool {
     pub(crate) sender: cb_channel::Sender<PoolTask>,
@@ -101,7 +108,9 @@ pub(crate) fn make_release_gil_channel(
     rt: &Runtime,
     release: bool,
     behavior: Arc<parking_lot::RwLock<PyObject>>,
-) -> PyResult<Option<cb_channel::Sender<PoolTask>>> {
+    pid_holder: Arc<AtomicU64>,
+    rt_arc: Arc<Runtime>,
+) -> PyResult<Option<cb_channel::Sender<DedicatedPoolTask>>> {
     if !release {
         return Ok(None);
     }
@@ -134,8 +143,10 @@ pub(crate) fn make_release_gil_channel(
         return Ok(None);
     }
 
-    let (tx, rx) = cb_channel::unbounded::<PoolTask>();
+    let (tx, rx) = cb_channel::unbounded::<DedicatedPoolTask>();
     let _b_thread = behavior.clone();
+    let pid_holder_thread = pid_holder.clone();
+    let rt_thread = rt_arc.clone();
     std::thread::spawn(move || loop {
         if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
             RELEASE_GIL_THREADS.fetch_sub(1, Ordering::SeqCst);
@@ -143,35 +154,30 @@ pub(crate) fn make_release_gil_channel(
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(task) => match task {
-                PoolTask::Execute {
-                    behavior,
-                    bytes,
-                    pid_holder,
-                    rt,
-                } => {
+                DedicatedPoolTask::Execute(bytes) => {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                         continue;
                     }
                     let success = crate::py::utils::run_python_callback(|py| {
-                        let guard = behavior.read();
+                        let guard = _b_thread.read();
                         let cb = guard.as_ref(py);
                         let pybytes = PyBytes::new(py, &bytes);
                         cb.call1((pybytes,)).map(|_| ())
                     });
                     if !success {
-                        let pid = pid_holder.load(Ordering::SeqCst);
+                        let pid = pid_holder_thread.load(Ordering::SeqCst);
                         if pid != 0 {
-                            rt.stop(pid);
+                            rt_thread.stop(pid);
                         }
                     }
                 }
-                PoolTask::HotSwap { behavior, ptr } => {
+                DedicatedPoolTask::HotSwap(ptr) => {
                     if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
                         continue;
                     }
                     Python::with_gil(|py| unsafe {
                         let new_obj = PyObject::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject);
-                        *behavior.write() = new_obj;
+                        *_b_thread.write() = new_obj;
                     });
                 }
             },
@@ -199,7 +205,13 @@ mod tests {
 
         pyo3::Python::with_gil(|py| {
             let behavior = Arc::new(parking_lot::RwLock::new(py.None().into_py(py)));
-            let ch = make_release_gil_channel(&rt, true, behavior)
+            let ch = make_release_gil_channel(
+                &rt,
+                true,
+                behavior,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(rt.clone()),
+            )
                 .expect("max_threads=0 should force shared pool mode without strict error");
             assert!(ch.is_none());
         });

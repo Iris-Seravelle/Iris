@@ -2007,6 +2007,40 @@ impl Runtime {
         Ok(self.current_backpressure_state(pid))
     }
 
+    /// Send a batch of user payloads and return the number accepted.
+    ///
+    /// For unbounded mailboxes this uses a single sender lookup for the whole
+    /// batch. Bounded mailboxes fall back to per-message `send_user` to preserve
+    /// overflow policy semantics.
+    #[doc(hidden)]
+    pub fn send_user_many(&self, pid: Pid, payloads: Vec<bytes::Bytes>) -> usize {
+        let _ = self.ensure_virtual_actor_active(pid);
+
+        if self.bounded_capacity.contains_key(&pid) {
+            let mut accepted = 0usize;
+            for payload in payloads {
+                if self.send_user(pid, payload).is_ok() {
+                    accepted += 1;
+                }
+            }
+            return accepted;
+        }
+
+        let Some(sender) = self.mailboxes.get(&pid) else {
+            return 0;
+        };
+
+        let mut accepted = 0usize;
+        for payload in payloads {
+            if sender.send_user_bytes(payload).is_ok() {
+                accepted += 1;
+            } else {
+                break;
+            }
+        }
+        accepted
+    }
+
     /// Send shared bytes from Arc-backed storage.
     ///
     /// This uses owner-backed `Bytes` construction, avoiding payload copy.
