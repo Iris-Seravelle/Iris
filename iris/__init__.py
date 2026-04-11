@@ -1,6 +1,6 @@
 # iris/__init__.py
 import asyncio
-from typing import Optional, Callable, Union, Awaitable
+from typing import Optional, Callable, Union, Awaitable, Iterable
 from .jit import (
     offload,
     set_jit_logging,
@@ -116,25 +116,32 @@ class Runtime:
         """
         return self._inner.spawn_child_with_mailbox(parent, handler, budget)
 
-    def send(self, pid: int, data: bytes) -> bool:
-        """Send data to a specific local PID."""
+    def send(self, pid: int, data: Union[bytes, bytearray, memoryview]) -> bool:
+        """Send bytes-like data to a specific local PID."""
         return self._inner.send(pid, data)
 
-    def send_named(self, name: str, data: bytes) -> bool:
-        """Send data to an actor by its registered name."""
+    def send_many(self, pid: int, payloads: Iterable[Union[bytes, bytearray, memoryview]]) -> int:
+        """Batch-send bytes-like payloads to a PID.
+
+        Returns the number of payloads accepted by the mailbox.
+        """
+        return self._inner.send_many(pid, payloads)
+
+    def send_named(self, name: str, data: Union[bytes, bytearray, memoryview]) -> bool:
+        """Send bytes-like data to an actor by its registered name."""
         pid = self.resolve(name)
         if pid:
             return self._inner.send(pid, data)
         return False
 
-    def send_after(self, pid: int, delay_ms: int, data: bytes) -> int:
+    def send_after(self, pid: int, delay_ms: int, data: Union[bytes, bytearray, memoryview]) -> int:
         """
         Schedule a one-shot message to be sent after `delay_ms` milliseconds.
         Returns a timer ID.
         """
         return self._inner.send_after(pid, delay_ms, data)
 
-    def send_interval(self, pid: int, interval_ms: int, data: bytes) -> int:
+    def send_interval(self, pid: int, interval_ms: int, data: Union[bytes, bytearray, memoryview]) -> int:
         """
         Schedule a repeating message to be sent every `interval_ms` milliseconds.
         Returns a timer ID.
@@ -335,8 +342,8 @@ class Runtime:
         """When True, spawning with `release_gil=True` returns an error if limits are exceeded."""
         self._inner.set_release_gil_strict(strict)
 
-    def send_remote(self, addr: str, pid: int, data: bytes):
-        """Send data to a PID on a remote node.
+    def send_remote(self, addr: str, pid: int, data: Union[bytes, bytearray, memoryview]):
+        """Send bytes-like data to a PID on a remote node.
 
         This helper will internally create or reuse a proxy actor, so users
         rarely need to call it directly.  Most code should just use

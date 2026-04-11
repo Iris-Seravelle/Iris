@@ -80,11 +80,12 @@ rt.spawn_with_mailbox(mailbox_worker)
 
 ## Sending messages
 
-- `send(pid: int, data: bytes) -> bool` — send user bytes to a PID.
-- `send_named(name: str, data: bytes) -> bool` — resolve and send by registered name.
+- `send(pid: int, data: bytes-like) -> bool` — send user payload (`bytes`, `bytearray`, `memoryview`) to a PID.
+- `send_many(pid: int, payloads: Iterable[bytes-like]) -> int` — batch-send payloads and return accepted count.
+- `send_named(name: str, data: bytes-like) -> bool` — resolve and send by registered name.
 - `send_buffer(pid: int, buffer_id: int) -> bool` — zero-copy send via buffer ID (use `allocate_buffer`).
-- `send_after(pid: int, delay_ms: int, data: bytes) -> int` — schedule one-shot message; returns timer id.
-- `send_interval(pid: int, interval_ms: int, data: bytes) -> int` — schedule repeating message; returns timer id.
+- `send_after(pid: int, delay_ms: int, data: bytes-like) -> int` — schedule one-shot message; returns timer id.
+- `send_interval(pid: int, interval_ms: int, data: bytes-like) -> int` — schedule repeating message; returns timer id.
 - `cancel_timer(timer_id: int) -> bool` — cancel timer/interval.
 
 Example:
@@ -93,6 +94,10 @@ Example:
 timer = rt.send_after(pid, 200, b'tick')
 # cancel
 rt.cancel_timer(timer)
+
+# batch send
+accepted = rt.send_many(pid, [b"a", bytearray(b"b"), memoryview(b"c")])
+print("accepted", accepted)
 ```
 
 ---
@@ -187,7 +192,7 @@ rt.hot_swap(pid, lambda m: print('upgraded', m))
 - `resolve_remote(addr: str, name: str) -> Optional[int]` — blocking remote resolve (returns local proxy PID).
 - `resolve_remote_py(addr: str, name: str) -> Awaitable[Optional[int]]` — async remote resolve.
 - `is_node_up(addr: str) -> bool` — quick probe for remote node reachability.
-- `send_remote(addr: str, pid: int, data: bytes)` — send bytes to a remote PID (creates/reuses proxy internally).
+- `send_remote(addr: str, pid: int, data: bytes-like)` — send bytes-like payload to a remote PID (creates/reuses proxy internally).
 - `monitor_remote(addr: str, pid: int)` — watch remote PID; triggers local supervisor on failure.
 
 Example:

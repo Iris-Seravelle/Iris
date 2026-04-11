@@ -78,6 +78,7 @@ def fast_math(x: float):
 
 # 3. Message the actor
 rt.send(pid, b"hello world")
+rt.send_many(pid, [b"a", bytearray(b"b"), memoryview(b"c")])
 print(fast_math(10.0))
 ```
 
