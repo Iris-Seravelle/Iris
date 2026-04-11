@@ -1,15 +1,17 @@
 #![allow(non_local_definitions)]
 
 use crate::vortex::vortex_bytecode::{
-    decode_wordcode, encode_wordcode, evaluate_rewrite_compatibility, instrument_with_probe,
-    opcode_meta, probe_instructions, quickening_support, read_exception_entries,
-    validate_probe_compatibility, verify_cache_layout, verify_exception_handler_targets,
-    verify_exception_table_invariants, verify_stacksize_minimum,
+    decode_wordcode, encode_wordcode, evaluate_rewrite_compatibility,
+    instrument_with_probe_with_sites, opcode_meta, probe_injection_sites, probe_instructions,
+    quickening_support, read_exception_entries, validate_probe_compatibility, verify_cache_layout,
+    verify_exception_handler_targets, verify_exception_table_invariants, verify_stacksize_minimum,
+    QuickeningSupport,
 };
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyDict};
 use std::collections::HashSet;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -44,6 +46,11 @@ impl Default for GuardTelemetry {
 
 static GUARD_TELEMETRY: Lazy<Mutex<GuardTelemetry>> =
     Lazy::new(|| Mutex::new(GuardTelemetry::default()));
+
+fn transmute_log(msg: &str) {
+    eprintln!("{}", msg);
+    let _ = std::io::stderr().flush();
+}
 
 fn set_guard_telemetry(mode: &str, reason: &str, py_minor: i32, attempted: bool, applied: bool) {
     if let Ok(mut g) = GUARD_TELEMETRY.lock() {
@@ -129,14 +136,32 @@ pub fn get_isolation_disallowed_ops() -> Vec<u8> {
 
 #[pyfunction]
 pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
+    fn opcode_name(py: Python, op: u8) -> String {
+        py.import("opcode")
+            .and_then(|m| m.getattr("opname"))
+            .and_then(|names| names.get_item(op as usize))
+            .and_then(|name| name.extract::<String>())
+            .unwrap_or_else(|_| format!("op{}", op))
+    }
+
     let py_minor: i32 = py
         .eval("__import__('sys').version_info.minor", None, None)
         .and_then(|v| v.extract())
         .unwrap_or(99);
 
+    let fn_name = py_func
+        .getattr("__name__")
+        .and_then(|n| n.extract::<String>())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    transmute_log(&format!(
+        "[Ocular][Transmute] begin fn={} py_minor={}",
+        fn_name, py_minor
+    ));
+
     let code = py_func
         .getattr("__code__")
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/code: {e}")))?;
+    let code_ptr = code.as_ptr() as usize;
     let raw: &[u8] = code
         .getattr("co_code")
         .and_then(|v| v.extract())
@@ -187,30 +212,53 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 false,
                 false,
             );
-            return fallback_shadow(py, py_func, "opcode metadata unavailable");
+            return fallback_with_log(py, py_func, &fn_name, "opcode metadata unavailable");
         }
     };
 
     let quickening = match quickening_support(py) {
         Ok(q) => q,
-        Err(_) => {
-            set_guard_telemetry(
-                "fallback",
-                "quickening_metadata_unavailable",
-                py_minor,
-                false,
-                false,
-            );
-            return fallback_shadow(py, py_func, "quickening metadata unavailable");
+        Err(e) => {
+            transmute_log(&format!(
+                "[Ocular][Transmute] quickening metadata unavailable fn={} err={} (continuing cache-agnostic)",
+                fn_name, e
+            ));
+            QuickeningSupport {
+                cache_opcode: None,
+                inline_cache_entries: Vec::new(),
+            }
         }
     };
 
     if let Err(reason) = evaluate_rewrite_compatibility(raw, meta.extended_arg, &quickening) {
         set_guard_telemetry("fallback", reason, py_minor, false, false);
-        return fallback_shadow(py, py_func, reason);
+        return fallback_with_log(py, py_func, &fn_name, reason);
     }
 
     if verify_stacksize_minimum(original_stack_size).is_err() {
+        let original_preview = decode_wordcode(raw, meta.extended_arg);
+        if let Ok(preview_probe) = probe_instructions(py, meta.extended_arg) {
+            let preview_sites = probe_injection_sites(&original_preview, &meta);
+            let preview_probe_desc = preview_probe
+                .iter()
+                .map(|ins| format!("{}({})", opcode_name(py, ins.op), ins.arg))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            transmute_log(&format!(
+                "[Ocular][Transmute] preview-only fn={} co_stacksize={} original_uops={} probe_uops={} injection_sites={} sites={:?}",
+                fn_name,
+                original_stack_size,
+                original_preview.len(),
+                preview_probe.len(),
+                preview_sites.len(),
+                preview_sites
+            ));
+            transmute_log(&format!(
+                "[Ocular][Transmute] preview_injected_probe={}",
+                preview_probe_desc
+            ));
+        }
+
         set_guard_telemetry(
             "fallback",
             "stack_depth_invariant_failed",
@@ -218,7 +266,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             false,
             false,
         );
-        return fallback_shadow(py, py_func, "stack depth invariant failed");
+        return fallback_with_log(py, py_func, &fn_name, "stack depth invariant failed");
     }
 
     let original_entries = match read_exception_entries(py, code) {
@@ -231,7 +279,12 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 false,
                 false,
             );
-            return fallback_shadow(py, py_func, "exception table metadata unavailable");
+            return fallback_with_log(
+                py,
+                py_func,
+                &fn_name,
+                "exception table metadata unavailable",
+            );
         }
     };
     if verify_exception_table_invariants(&original_entries, raw.len() / 2, original_stack_size)
@@ -244,7 +297,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             false,
             false,
         );
-        return fallback_shadow(py, py_func, "exception table invalid");
+        return fallback_with_log(py, py_func, &fn_name, "exception table invalid");
     }
 
     let original = decode_wordcode(raw, meta.extended_arg);
@@ -256,7 +309,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             false,
             false,
         );
-        return fallback_shadow(py, py_func, "exception table invalid");
+        return fallback_with_log(py, py_func, &fn_name, "exception table invalid");
     }
 
     set_guard_telemetry("rewrite", "attempt", py_minor, true, false);
@@ -270,11 +323,11 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched exception table invalid");
+        return fallback_with_log(py, py_func, &fn_name, "patched exception table invalid");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_CODE_REPLACE_FAILED") {
         set_guard_telemetry("fallback", "code_replace_failed", py_minor, true, false);
-        return fallback_shadow(py, py_func, "code replace failed");
+        return fallback_with_log(py, py_func, &fn_name, "code replace failed");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_TYPES_MODULE_UNAVAILABLE") {
         set_guard_telemetry(
@@ -284,7 +337,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "types module unavailable");
+        return fallback_with_log(py, py_func, &fn_name, "types module unavailable");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_SHADOW_CONSTRUCTION_FAILED") {
         set_guard_telemetry(
@@ -294,7 +347,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "shadow function construction failed");
+        return fallback_with_log(py, py_func, &fn_name, "shadow function construction failed");
     }
     if test_hook_enabled(py, "IRIS_VORTEX_TEST_FORCE_PROBE_INSTRUMENTATION_FAILED") {
         set_guard_telemetry(
@@ -304,7 +357,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "probe instrumentation failed");
+        return fallback_with_log(py, py_func, &fn_name, "probe instrumentation failed");
     }
     if test_hook_enabled(
         py,
@@ -317,7 +370,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched stack metadata unavailable");
+        return fallback_with_log(py, py_func, &fn_name, "patched stack metadata unavailable");
     }
     if test_hook_enabled(
         py,
@@ -330,23 +383,93 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
+        return fallback_with_log(
+            py,
+            py_func,
+            &fn_name,
+            "patched exception table metadata unavailable",
+        );
     }
 
     let probe = match probe_instructions(py, meta.extended_arg) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry("fallback", "probe_extraction_failed", py_minor, true, false);
-            return fallback_shadow(py, py_func, "probe extraction failed");
+            return fallback_with_log(py, py_func, &fn_name, "probe extraction failed");
         }
     };
 
     if let Err(reason) = validate_probe_compatibility(&probe, &quickening) {
         set_guard_telemetry("fallback", reason, py_minor, true, false);
-        return fallback_shadow(py, py_func, reason);
+        return fallback_with_log(py, py_func, &fn_name, reason);
     }
 
-    let patched = match instrument_with_probe(&original, &probe, &meta) {
+    // Ocular-style visibility into transmutation: show exactly what got injected and where.
+    let base_injection_sites = probe_injection_sites(&original, &meta);
+
+    let mut offset_to_idx: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+    let mut ext_acc: u32 = 0;
+    let mut i = 0usize;
+    let mut ins_idx = 0usize;
+    while i + 1 < raw.len() {
+        let op = raw[i];
+        let arg = raw[i + 1] as u32;
+        if op == meta.extended_arg {
+            ext_acc = (ext_acc << 8) | arg;
+            i += 2;
+            continue;
+        }
+        let _ = ext_acc;
+        offset_to_idx.insert(i as i32, ins_idx);
+        ins_idx = ins_idx.saturating_add(1);
+        ext_acc = 0;
+        i += 2;
+    }
+
+    let observed_offsets = crate::vortex::ocular::state::get_observed_offsets_for_code(code_ptr);
+    let mut runtime_sites = Vec::new();
+    for offset in observed_offsets {
+        if let Some(idx) = offset_to_idx.get(&offset).copied() {
+            runtime_sites.push(idx);
+        }
+    }
+    runtime_sites.sort_unstable();
+    runtime_sites.dedup();
+
+    let mut merged_sites = base_injection_sites.clone();
+    merged_sites.extend(runtime_sites.iter().copied());
+    merged_sites.sort_unstable();
+    merged_sites.dedup();
+
+    let probe_desc = probe
+        .iter()
+        .map(|ins| format!("{}({})", opcode_name(py, ins.op), ins.arg))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let sites_preview = if merged_sites.len() > 16 {
+        format!(
+            "{:?} ... (+{} more)",
+            &merged_sites[..16],
+            merged_sites.len() - 16
+        )
+    } else {
+        format!("{:?}", merged_sites)
+    };
+    transmute_log(&format!(
+        "[Ocular][Transmute] fn={} original_uops={} probe_uops={} injection_sites={} runtime_guided_sites={} sites={}",
+        fn_name,
+        original.len(),
+        probe.len(),
+        merged_sites.len(),
+        runtime_sites.len(),
+        sites_preview
+    ));
+    transmute_log(&format!(
+        "[Ocular][Transmute] injected_probe={}",
+        probe_desc
+    ));
+
+    let patched = match instrument_with_probe_with_sites(&original, &probe, &meta, &runtime_sites) {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry(
@@ -356,7 +479,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 true,
                 false,
             );
-            return fallback_shadow(py, py_func, "probe instrumentation failed");
+            return fallback_with_log(py, py_func, &fn_name, "probe instrumentation failed");
         }
     };
 
@@ -368,7 +491,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched cache layout invalid");
+        return fallback_with_log(py, py_func, &fn_name, "patched cache layout invalid");
     }
 
     let final_patched = if ISOLATION_MODE.load(Ordering::Relaxed) {
@@ -387,7 +510,12 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                         true,
                         false,
                     );
-                    return fallback_shadow(py, py_func, "isolation cache layout invalid");
+                    return fallback_with_log(
+                        py,
+                        py_func,
+                        &fn_name,
+                        "isolation cache layout invalid",
+                    );
                 }
                 isolated
             }
@@ -399,17 +527,24 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                     true,
                     false,
                 );
-                return fallback_shadow(py, py_func, "isolation transform failed");
+                return fallback_with_log(py, py_func, &fn_name, "isolation transform failed");
             }
         }
     } else {
         patched
     };
 
+    transmute_log(&format!(
+        "[Ocular][Transmute] fn={} patched_uops={} delta_uops={}",
+        fn_name,
+        final_patched.len(),
+        final_patched.len() as isize - original.len() as isize
+    ));
+
     let final_raw = encode_wordcode(&final_patched, meta.extended_arg);
     if final_raw.len() > MAX_PATCHED_CODE_BYTES {
         set_guard_telemetry("fallback", "patched_code_too_large", py_minor, true, false);
-        return fallback_shadow(py, py_func, "patched code too large");
+        return fallback_with_log(py, py_func, &fn_name, "patched code too large");
     }
 
     let kwargs = [("co_code", PyBytes::new(py, &final_raw))].into_py_dict(py);
@@ -417,7 +552,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
         Ok(v) => v,
         Err(_) => {
             set_guard_telemetry("fallback", "code_replace_failed", py_minor, true, false);
-            return fallback_shadow(py, py_func, "code replace failed");
+            return fallback_with_log(py, py_func, &fn_name, "code replace failed");
         }
     };
 
@@ -432,7 +567,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 true,
                 false,
             );
-            return fallback_shadow(py, py_func, "patched stack metadata unavailable");
+            return fallback_with_log(py, py_func, &fn_name, "patched stack metadata unavailable");
         }
     };
     let patched_entries = match read_exception_entries(py, new_code) {
@@ -445,7 +580,12 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 true,
                 false,
             );
-            return fallback_shadow(py, py_func, "patched exception table metadata unavailable");
+            return fallback_with_log(
+                py,
+                py_func,
+                &fn_name,
+                "patched exception table metadata unavailable",
+            );
         }
     };
     if verify_exception_table_invariants(&patched_entries, final_raw.len() / 2, patched_stack_size)
@@ -458,7 +598,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched exception table invalid");
+        return fallback_with_log(py, py_func, &fn_name, "patched exception table invalid");
     }
     if verify_exception_handler_targets(&patched_entries, &final_patched, &quickening).is_err() {
         set_guard_telemetry(
@@ -468,7 +608,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
             true,
             false,
         );
-        return fallback_shadow(py, py_func, "patched exception table invalid");
+        return fallback_with_log(py, py_func, &fn_name, "patched exception table invalid");
     }
 
     let types_mod = match py.import("types") {
@@ -481,7 +621,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 true,
                 false,
             );
-            return fallback_shadow(py, py_func, "types module unavailable");
+            return fallback_with_log(py, py_func, &fn_name, "types module unavailable");
         }
     };
 
@@ -519,7 +659,7 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
                 true,
                 false,
             );
-            return fallback_shadow(py, py_func, "shadow function construction failed");
+            return fallback_with_log(py, py_func, &fn_name, "shadow function construction failed");
         }
     };
 
@@ -528,6 +668,19 @@ pub fn transmute_function(py: Python, py_func: &PyAny) -> PyResult<PyObject> {
     }
     set_guard_telemetry("rewrite", "applied", py_minor, true, true);
     Ok(shadow.into())
+}
+
+fn fallback_with_log(
+    py: Python,
+    py_func: &PyAny,
+    fn_name: &str,
+    reason: &str,
+) -> PyResult<PyObject> {
+    transmute_log(&format!(
+        "[Ocular][Transmute] fallback fn={} reason={}",
+        fn_name, reason
+    ));
+    fallback_shadow(py, py_func, reason)
 }
 
 fn fallback_shadow(py: Python, py_func: &PyAny, _reason: &str) -> PyResult<PyObject> {
@@ -606,5 +759,6 @@ pub fn init_py(m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_isolation_mode, m)?)?;
     m.add_function(wrap_pyfunction!(set_isolation_disallowed_ops, m)?)?;
     m.add_function(wrap_pyfunction!(get_isolation_disallowed_ops, m)?)?;
+    crate::vortex::ocular::init_py(m)?;
     Ok(())
 }

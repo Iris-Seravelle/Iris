@@ -27,6 +27,9 @@ pub mod vortex_bytecode;
 pub mod rescue_pool;
 
 #[cfg(feature = "vortex")]
+pub mod ocular;
+
+#[cfg(feature = "vortex")]
 pub use engine::VortexEngine;
 
 #[cfg(feature = "vortex")]

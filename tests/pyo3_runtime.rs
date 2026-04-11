@@ -128,8 +128,12 @@ async fn py_send_accepts_bytes_like_objects() {
     });
 
     Python::with_gil(|py| {
-        let bytearray_obj = py.eval("bytearray(b'hello-bytearray')", None, None).unwrap();
-        let memoryview_obj = py.eval("memoryview(b'hello-memoryview')", None, None).unwrap();
+        let bytearray_obj = py
+            .eval("bytearray(b'hello-bytearray')", None, None)
+            .unwrap();
+        let memoryview_obj = py
+            .eval("memoryview(b'hello-memoryview')", None, None)
+            .unwrap();
 
         let sent_ba: bool = rt_py
             .as_ref(py)
@@ -186,12 +190,13 @@ async fn py_send_many_accepts_bytes_like_objects() {
     });
 
     let accepted: usize = Python::with_gil(|py| {
-        let payloads = py.eval(
-            "[b'one', bytearray(b'two'), memoryview(b'three')]",
-            None,
-            None,
-        )
-        .unwrap();
+        let payloads = py
+            .eval(
+                "[b'one', bytearray(b'two'), memoryview(b'three')]",
+                None,
+                None,
+            )
+            .unwrap();
         rt_py
             .as_ref(py)
             .call_method1("send_many", (pid, payloads))
@@ -212,7 +217,10 @@ async fn py_send_many_accepts_bytes_like_objects() {
             .unwrap()
     });
 
-    assert_eq!(msgs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+    assert_eq!(
+        msgs,
+        vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+    );
 }
 
 #[tokio::test]

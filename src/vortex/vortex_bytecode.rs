@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
@@ -49,12 +49,12 @@ pub fn verify_wordcode_bytes(raw: &[u8]) -> Result<(), VerifyError> {
 pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
     let meta = py.eval(
         r#"
-(lambda dis: (
-    dis.opmap["EXTENDED_ARG"],
-    list(dis.hasjabs),
-    list(dis.hasjrel),
-    [op for name, op in dis.opmap.items() if "BACKWARD" in name],
-))(__import__("dis"))
+(lambda opcode: (
+    opcode.opmap["EXTENDED_ARG"],
+    list(getattr(opcode, "hasjabs", [])),
+    list(getattr(opcode, "hasjrel", [])),
+    [op for name, op in opcode.opmap.items() if "BACKWARD" in name],
+))(__import__("opcode"))
 "#,
         None,
         None,
@@ -76,17 +76,34 @@ pub fn opcode_meta(py: Python) -> PyResult<OpcodeMeta> {
 pub fn quickening_support(py: Python) -> PyResult<QuickeningSupport> {
     let data = py.eval(
         r#"
-(lambda dis: (
-    dis.opmap.get("CACHE", -1),
-    list(getattr(dis, "_inline_cache_entries", [])),
-))(__import__("dis"))
+(lambda opcode: (
+    opcode.opmap.get("CACHE", -1),
+    (lambda raw_entries, opmap: (
+        [
+            int(x) if isinstance(x, (int, bool)) else 0
+            for x in list(raw_entries)
+        ]
+        if not hasattr(raw_entries, "items") else
+        (lambda out: (
+            [
+                out.__setitem__(int(opmap[name]), int(count))
+                for name, count in raw_entries.items()
+                if name in opmap and isinstance(count, (int, bool))
+            ]
+            and out
+        ))([0] * 256)
+    ))(getattr(opcode, "_inline_cache_entries", []), opcode.opmap),
+))(__import__("opcode"))
 "#,
         None,
         None,
     )?;
 
-    let cache_raw: i16 = data.get_item(0)?.extract()?;
-    let entries: Vec<u16> = data.get_item(1)?.extract()?;
+    let cache_raw: i32 = data.get_item(0)?.extract().unwrap_or(-1);
+    let entries: Vec<u16> = data
+        .get_item(1)
+        .and_then(|v| v.extract::<Vec<u16>>())
+        .unwrap_or_default();
     let cache_opcode = if cache_raw >= 0 {
         Some(cache_raw as u8)
     } else {
@@ -167,17 +184,9 @@ fn jump_target(idx: usize, ins: &Instruction, meta: &OpcodeMeta, len: usize) -> 
     None
 }
 
-pub fn instrument_with_probe(
-    original: &[Instruction],
-    probe: &[Instruction],
-    meta: &OpcodeMeta,
-) -> Result<Vec<Instruction>, VerifyError> {
-    if probe.is_empty() {
-        return Err(VerifyError::EmptyProbe);
-    }
-
+pub fn probe_injection_sites(original: &[Instruction], meta: &OpcodeMeta) -> Vec<usize> {
     if original.is_empty() {
-        return Ok(original.to_vec());
+        return Vec::new();
     }
 
     let mut check_sites: HashSet<usize> = HashSet::new();
@@ -188,6 +197,41 @@ pub fn instrument_with_probe(
             if target <= idx {
                 check_sites.insert(target);
             }
+        }
+    }
+
+    let mut out: Vec<usize> = check_sites.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+pub fn instrument_with_probe(
+    original: &[Instruction],
+    probe: &[Instruction],
+    meta: &OpcodeMeta,
+) -> Result<Vec<Instruction>, VerifyError> {
+    instrument_with_probe_with_sites(original, probe, meta, &[])
+}
+
+pub fn instrument_with_probe_with_sites(
+    original: &[Instruction],
+    probe: &[Instruction],
+    meta: &OpcodeMeta,
+    extra_sites: &[usize],
+) -> Result<Vec<Instruction>, VerifyError> {
+    if probe.is_empty() {
+        return Err(VerifyError::EmptyProbe);
+    }
+
+    if original.is_empty() {
+        return Ok(original.to_vec());
+    }
+
+    let mut check_sites: HashSet<usize> =
+        probe_injection_sites(original, meta).into_iter().collect();
+    for &idx in extra_sites {
+        if idx < original.len() {
+            check_sites.insert(idx);
         }
     }
 
@@ -361,34 +405,58 @@ pub fn read_exception_entries(
     py: Python,
     code: &PyAny,
 ) -> PyResult<Vec<(usize, usize, usize, usize)>> {
-    let locals = PyDict::new(py);
-    locals.set_item("code_obj", code)?;
-    py.run(
-        r#"
-import dis
-bc = dis.Bytecode(code_obj)
-entries = getattr(bc, "exception_entries", ())
-__iris_exc_entries = [
-    (
-        int(e.start),
-        int(e.end),
-        int(e.depth),
-        int(getattr(e, "target", e.start)),
-    )
-    for e in entries
-]
-"#,
-        None,
-        Some(locals),
-    )?;
+    fn parse_varint(raw: &[u8], idx: &mut usize) -> Option<usize> {
+        if *idx >= raw.len() {
+            return None;
+        }
+        let mut b = raw[*idx];
+        *idx += 1;
+        let mut val = (b & 0x3f) as usize;
+        while (b & 0x40) != 0 {
+            if *idx >= raw.len() {
+                return None;
+            }
+            b = raw[*idx];
+            *idx += 1;
+            val = (val << 6) | ((b & 0x3f) as usize);
+        }
+        Some(val)
+    }
 
-    let entries = locals
-        .get_item("__iris_exc_entries")?
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: missing result")
-        })?
-        .downcast::<PyList>()?;
-    entries.extract()
+    let raw: &[u8] = code
+        .getattr("co_exceptiontable")
+        .and_then(|v| v.extract::<&[u8]>())
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "vortex/exception-entries-bytes: {e}"
+            ))
+        })?;
+
+    let mut idx = 0usize;
+    let mut out: Vec<(usize, usize, usize, usize)> = Vec::new();
+    while idx < raw.len() {
+        let start_units = parse_varint(raw, &mut idx).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: malformed start")
+        })?;
+        let len_units = parse_varint(raw, &mut idx).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: malformed length")
+        })?;
+        let target_units = parse_varint(raw, &mut idx).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: malformed target")
+        })?;
+        let depth_lasti = parse_varint(raw, &mut idx).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/exception-entries: malformed depth")
+        })?;
+
+        let depth = depth_lasti >> 1;
+        let start = start_units.saturating_mul(2);
+        let end = start_units.saturating_add(len_units).saturating_mul(2);
+        let target = target_units.saturating_mul(2);
+        out.push((start, end, depth, target));
+    }
+
+    let _ = py;
+    Ok(out)
 }
 
 pub fn verify_exception_table_invariants(
@@ -450,8 +518,8 @@ pub fn apply_isolation_transform(
     py: Python,
     disallowed_ops: Option<&std::collections::HashSet<u8>>,
 ) -> PyResult<Vec<Instruction>> {
-    let dis = py.import("dis")?;
-    let store_attr: u8 = dis.getattr("opmap")?.get_item("STORE_ATTR")?.extract()?;
+    let opcode = py.import("opcode")?;
+    let store_attr: u8 = opcode.getattr("opmap")?.get_item("STORE_ATTR")?.extract()?;
 
     if let Some(disallowed) = disallowed_ops {
         for ins in code {
@@ -489,53 +557,49 @@ pub fn probe_instructions(py: Python, extended_arg: u8) -> PyResult<Vec<Instruct
     let locals = PyDict::new(py);
     py.run(
         r#"
-import dis
-
 def __iris_probe():
     _vortex_check()
-
-ins = list(dis.get_instructions(__iris_probe, show_caches=True))
-start = next(i.offset for i in ins if i.opname == "LOAD_GLOBAL")
-end = next(i.offset for i in ins if i.opname == "POP_TOP")
-__iris_probe_bytes = list(__iris_probe.__code__.co_code[start:end+2])
+__iris_probe_code = __iris_probe.__code__
 "#,
         None,
         Some(locals),
     )?;
 
-    let bytes = locals
-        .get_item("__iris_probe_bytes")?
+    let code = locals.get_item("__iris_probe_code")?.ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-code: missing result")
+    })?;
+
+    let raw: &[u8] = code
+        .getattr("co_code")
+        .and_then(|v| v.extract::<&[u8]>())
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("vortex/probe-co_code: {e}"))
+        })?;
+
+    let opmap = py.import("opcode")?.getattr("opmap")?;
+    let load_global: u8 = opmap.get_item("LOAD_GLOBAL")?.extract()?;
+    let pop_top: u8 = opmap.get_item("POP_TOP")?.extract()?;
+
+    let decoded = decode_wordcode(raw, extended_arg);
+    let start = decoded
+        .iter()
+        .position(|ins| ins.op == load_global)
         .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-bytes: missing result")
-        })?
-        .downcast::<PyList>()?;
-    let raw: Vec<u8> = bytes.extract()?;
-    Ok(decode_wordcode(&raw, extended_arg))
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe: missing LOAD_GLOBAL")
+        })?;
+    let rel_end = decoded[start..]
+        .iter()
+        .position(|ins| ins.op == pop_top)
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe: missing POP_TOP")
+        })?;
+    let end = start + rel_end;
+
+    Ok(decoded[start..=end].to_vec())
 }
 
 pub fn probe_raw_bytes(py: Python) -> PyResult<Vec<u8>> {
-    let locals = PyDict::new(py);
-    py.run(
-        r#"
-import dis
-
-def __iris_probe():
-    _vortex_check()
-
-ins = list(dis.get_instructions(__iris_probe, show_caches=True))
-start = next(i.offset for i in ins if i.opname == "LOAD_GLOBAL")
-end = next(i.offset for i in ins if i.opname == "POP_TOP")
-__iris_probe_bytes = list(__iris_probe.__code__.co_code[start:end+2])
-"#,
-        None,
-        Some(locals),
-    )?;
-
-    let bytes = locals
-        .get_item("__iris_probe_bytes")?
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("vortex/probe-bytes: missing result")
-        })?
-        .downcast::<PyList>()?;
-    bytes.extract()
+    let ext = opcode_meta(py)?.extended_arg;
+    let probe = probe_instructions(py, ext)?;
+    Ok(encode_wordcode(&probe, ext))
 }

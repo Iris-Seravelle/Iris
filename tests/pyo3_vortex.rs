@@ -5,6 +5,204 @@ use pyo3::types::{PyDict, PyList};
 use tokio::time::{sleep, timeout, Duration};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_ocular_api_is_exposed() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        assert!(m.getattr(py, "start_tracing").is_ok());
+        assert!(m.getattr(py, "stop_tracing").is_ok());
+        assert!(m.getattr(py, "instruction_callback").is_ok());
+        assert!(m.getattr(py, "py_start_callback").is_ok());
+        assert!(m.getattr(py, "jump_callback").is_ok());
+        assert!(m.getattr(py, "py_return_callback").is_ok());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_ocular_start_stop_tracing_smoke() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+        let sys = py.import("sys").unwrap();
+
+        // PEP 669 monitoring APIs are required for Ocular wiring.
+        if !sys.hasattr("monitoring").unwrap_or(false) {
+            return;
+        }
+
+        m.getattr(py, "start_tracing")
+            .unwrap()
+            .call(
+                py,
+                (
+                    "precise",
+                    64_u32,
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                ),
+                None,
+            )
+            .unwrap();
+
+        let globals = PyDict::new(py);
+        py.run(
+            r#"
+def ocular_smoke(n):
+    acc = 0
+    i = 0
+    while i < n:
+        acc += i
+        i += 1
+    return acc
+
+_r = ocular_smoke(64)
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let result: i64 = globals.get_item("_r").unwrap().unwrap().extract().unwrap();
+        assert_eq!(result, 2016);
+
+        m.getattr(py, "stop_tracing").unwrap().call0(py).unwrap();
+
+        let stats = m
+            .getattr(py, "get_tracing_stats")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let stats = stats.downcast::<PyDict>(py).unwrap();
+        let processed_events: u64 = stats
+            .get_item("processed_events")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let instruction_events: u64 = stats
+            .get_item("instruction_events")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert!(processed_events > 0);
+        assert!(instruction_events > 0);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_ocular_captures_non_hot_paths() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+        let sys = py.import("sys").unwrap();
+
+        if !sys.hasattr("monitoring").unwrap_or(false) {
+            return;
+        }
+
+        m.getattr(py, "start_tracing")
+            .unwrap()
+            .call(
+                py,
+                ("precise", 0_u32, Vec::<String>::new(), Vec::<String>::new()),
+                None,
+            )
+            .unwrap();
+
+        let globals = PyDict::new(py);
+        py.run(
+            r#"
+def straight_path(a, b):
+    c = a + b
+    d = c * 2
+    return d - a
+
+_x = straight_path(7, 5)
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let value: i64 = globals.get_item("_x").unwrap().unwrap().extract().unwrap();
+        assert_eq!(value, 17);
+
+        m.getattr(py, "stop_tracing").unwrap().call0(py).unwrap();
+
+        let stats = m
+            .getattr(py, "get_tracing_stats")
+            .unwrap()
+            .call0(py)
+            .unwrap();
+        let stats = stats.downcast::<PyDict>(py).unwrap();
+        let instruction_events: u64 = stats
+            .get_item("instruction_events")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let unique_instruction_sites: usize = stats
+            .get_item("unique_instruction_sites")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap();
+
+        assert!(instruction_events > 0);
+        assert!(unique_instruction_sites > 0);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_vortex_ocular_callbacks_smoke() {
+    Python::with_gil(|py| {
+        let m = iris::py::make_module(py).unwrap();
+
+        let globals = PyDict::new(py);
+        py.run(
+            r#"
+def cb_target():
+    x = 1
+    return x
+"#,
+            Some(globals),
+            None,
+        )
+        .unwrap();
+
+        let code_obj = globals
+            .get_item("cb_target")
+            .unwrap()
+            .unwrap()
+            .getattr("__code__")
+            .unwrap();
+
+        m.getattr(py, "py_start_callback")
+            .unwrap()
+            .call1(py, (code_obj, 0_i32))
+            .unwrap();
+
+        let inst_res = m
+            .getattr(py, "instruction_callback")
+            .unwrap()
+            .call1(py, (code_obj, 0_i32))
+            .unwrap();
+        assert!(inst_res.as_ref(py).is_none());
+
+        let jump_res = m
+            .getattr(py, "jump_callback")
+            .unwrap()
+            .call1(py, (code_obj, 0_i32, 0_i32))
+            .unwrap();
+        assert!(jump_res.as_ref(py).is_none());
+
+        m.getattr(py, "py_return_callback")
+            .unwrap()
+            .call1(py, (code_obj, 0_i32, py.None()))
+            .unwrap();
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_vortex_preemption_on_while_true() {
     Python::with_gil(|py| {
         let m = iris::py::make_module(py).unwrap();
