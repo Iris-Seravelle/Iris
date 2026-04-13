@@ -2,9 +2,10 @@
 
 ![Iris Banner](https://svg-banners.vercel.app/api?type=luminance&text1=Iris%20🌸&width=800&height=200&color=FFB6C1)
 
-![Version](https://img.shields.io/badge/version-0.5.0-blue.svg?style=for-the-badge)
-![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=for-the-badge&logo=rust)
-![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-0.5.0-blue.svg?style=flat-square)
+![Language](https://img.shields.io/badge/language-Rust%20%7C%20Python%20%7C%20Node.js-orange.svg?style=flat-square&logo=rust)
+![License](https://img.shields.io/badge/license-AGPL_3.0-green.svg?style=flat-square)
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SSL-ACTX/Iris)
 
 **Hybrid distributed runtime fabric for actors, cross-language services, and experimental native compute offload.**
 
