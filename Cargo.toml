@@ -24,7 +24,7 @@ crossbeam-channel = "0.5"
 crossbeam-queue = "0.3.11"
 
 # Python (Default)
-pyo3 = { version = "0.20", features = ["auto-initialize"], optional = true}
+pyo3 = { version = "0.20", features = ["extension-module", "auto-initialize"], optional = true}
 pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"], optional = true }
 
 # JIT (Optional and experimental)
